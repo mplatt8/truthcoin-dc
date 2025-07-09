@@ -229,7 +229,7 @@ impl utoipa::ToSchema for Txid {
     }
 }
 
-/// Identifier for a BitAsset
+/// Identifier for a Truthcoin
 #[derive(
     BorshDeserialize,
     BorshSerialize,
@@ -245,9 +245,9 @@ impl utoipa::ToSchema for Txid {
     Serialize,
 )]
 #[repr(transparent)]
-pub struct BitAssetId(#[serde(with = "serde_hexstr_human_readable")] pub Hash);
+pub struct TruthcoinId(#[serde(with = "serde_hexstr_human_readable")] pub Hash);
 
-impl FromHex for BitAssetId {
+impl FromHex for TruthcoinId {
     type Error = <Hash as FromHex>::Error;
 
     fn from_hex<T: AsRef<[u8]>>(hex: T) -> Result<Self, Self::Error> {
@@ -255,14 +255,14 @@ impl FromHex for BitAssetId {
     }
 }
 
-impl std::str::FromStr for BitAssetId {
+impl std::str::FromStr for TruthcoinId {
     type Err = <Self as FromHex>::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::from_hex(s)
     }
 }
 
-impl utoipa::PartialSchema for BitAssetId {
+impl utoipa::PartialSchema for TruthcoinId {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
         let obj =
             utoipa::openapi::Object::with_type(utoipa::openapi::Type::String);
@@ -270,9 +270,9 @@ impl utoipa::PartialSchema for BitAssetId {
     }
 }
 
-impl utoipa::ToSchema for BitAssetId {
+impl utoipa::ToSchema for TruthcoinId {
     fn name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("BitAssetId")
+        std::borrow::Cow::Borrowed("TruthcoinId")
     }
 }
 
@@ -284,7 +284,7 @@ pub enum ParseAssetIdError {
     FromHex(#[from] hex::FromHexError),
 }
 
-/// Identifier for an arbitrary asset (Bitcoin, BitAsset, or BitAsset control)
+/// Identifier for an arbitrary asset (Bitcoin, Truthcoin, or Truthcoin control)
 #[derive(
     Clone,
     Copy,
@@ -299,8 +299,8 @@ pub enum ParseAssetIdError {
 )]
 pub enum AssetId {
     Bitcoin,
-    BitAsset(BitAssetId),
-    BitAssetControl(BitAssetId),
+    Truthcoin(TruthcoinId),
+    TruthcoinControl(TruthcoinId),
 }
 
 impl<'de> Deserialize<'de> for AssetId {

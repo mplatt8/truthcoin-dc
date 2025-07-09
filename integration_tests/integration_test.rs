@@ -19,7 +19,7 @@ fn deposit_withdraw_roundtrip(
         bip300301_enforcer_integration_tests::integration_test::deposit_withdraw_roundtrip::<PostSetup>(
             bin_paths.others, Network::Regtest, Mode::Mempool,
             Init {
-                bitassets_app: bin_paths.bitassets,
+                truthcoin_app: bin_paths.truthcoin,
                 data_dir_suffix: None,
             },
         ).await

@@ -7,7 +7,7 @@ use strum::{EnumIter, IntoEnumIterator};
 use crate::{app::App, line_buffer::LineBuffer, util::PromiseStream};
 
 mod activity;
-mod truthcoin;
+mod votecoin;
 mod coins;
 mod console_logs;
 mod fonts;
@@ -18,7 +18,7 @@ mod seed;
 mod util;
 
 use activity::Activity;
-use truthcoin::Truthcoin;
+use votecoin::Votecoin;
 use coins::Coins;
 use console_logs::ConsoleLogs;
 use fonts::FONT_DEFINITIONS;
@@ -157,7 +157,7 @@ impl BottomPanel {
 pub struct EguiApp {
     activity: Activity,
     app: Option<App>,
-    truthcoin: Truthcoin,
+    votecoin: Votecoin,
     bottom_panel: BottomPanel,
     coins: Coins,
     console_logs: ConsoleLogs,
@@ -175,8 +175,8 @@ enum Tab {
     ParentChain,
     #[strum(to_string = "Coins")]
     Coins,
-    #[strum(to_string = "Truthcoin")]
-    Truthcoin,
+    #[strum(to_string = "Votecoin")]
+    Votecoin,
     #[strum(to_string = "Messaging")]
     Messaging,
     #[strum(to_string = "Activity")]
@@ -222,7 +222,7 @@ impl EguiApp {
         Self {
             activity,
             app,
-            truthcoin: Truthcoin::default(),
+            votecoin: Votecoin::default(),
             bottom_panel,
             coins,
             console_logs,
@@ -268,8 +268,8 @@ impl eframe::App for EguiApp {
                 Tab::Coins => {
                     let () = self.coins.show(self.app.as_ref(), ui).unwrap();
                 }
-                Tab::Truthcoin => {
-                    self.truthcoin.show(self.app.as_ref(), ui);
+                Tab::Votecoin => {
+                    self.votecoin.show(self.app.as_ref(), ui);
                 }
                 Tab::Messaging => {
                     self.messaging.show(self.app.as_ref(), ui);

@@ -9,7 +9,7 @@ use strum::{EnumIter, IntoEnumIterator, IntoStaticStr};
 
 use crate::{
     app::App,
-    gui::util::{UiExt, borsh_deserialize_hex},
+    gui::util::UiExt,
 };
 
 #[derive(
@@ -18,26 +18,17 @@ use crate::{
 pub enum AssetKind {
     #[default]
     Bitcoin,
-    Truthcoin,
-    #[strum(serialize = "Truthcoin Control")]
-    TruthcoinControl,
+    Votecoin,
 }
 
 #[derive(Debug, Default)]
 pub struct AssetInput {
     asset_kind: AssetKind,
-    hex_input: String,
 }
 
 impl PartialEq for AssetInput {
     fn eq(&self, other: &Self) -> bool {
         self.asset_kind == other.asset_kind
-            && match self.asset_kind {
-                AssetKind::Bitcoin => true,
-                AssetKind::Truthcoin | AssetKind::TruthcoinControl => {
-                    self.hex_input == other.hex_input
-                }
-            }
     }
 }
 
@@ -47,14 +38,7 @@ impl AssetInput {
     pub fn asset_id(&self) -> anyhow::Result<AssetId> {
         match self.asset_kind {
             AssetKind::Bitcoin => Ok(AssetId::Bitcoin),
-            AssetKind::Truthcoin => {
-                borsh_deserialize_hex(self.hex_input.as_str())
-                    .map(AssetId::Truthcoin)
-            }
-            AssetKind::TruthcoinControl => {
-                borsh_deserialize_hex(self.hex_input.as_str())
-                    .map(AssetId::TruthcoinControl)
-            }
+            AssetKind::Votecoin => Ok(AssetId::Votecoin),
         }
     }
 
@@ -70,12 +54,6 @@ impl AssetInput {
                     );
                 }
             });
-        match self.asset_kind {
-            AssetKind::Bitcoin => (),
-            AssetKind::Truthcoin | AssetKind::TruthcoinControl => {
-                ui.text_edit_singleline(&mut self.hex_input);
-            }
-        }
     }
 }
 
@@ -161,6 +139,8 @@ impl UtxoSelector {
                     bitcoin::Amount::from_sat(total_confirmed_value),
                 ));
             }
+        } else if asset_id == AssetId::Votecoin {
+            ui.monospace(format!("Total: {} VOT", total_confirmed_value));
         } else {
             ui.monospace(format!("Total: {total_confirmed_value}"));
         }
@@ -174,7 +154,6 @@ impl UtxoSelector {
                 ui.monospace_selectable_singleline(false, "Value");
                 ui.end_row();
                 for (outpoint, output) in utxos {
-                    //ui.horizontal(|ui| {});
                     show_utxo(ui, &outpoint, &output, false);
 
                     if ui.button("spend").clicked() {
@@ -183,7 +162,6 @@ impl UtxoSelector {
                     ui.end_row();
                 }
                 for (outpoint, output) in unconfirmed_utxos {
-                    //ui.horizontal(|ui| {});
                     show_unconfirmed_utxo(
                         ui,
                         &outpoint,
@@ -257,14 +235,11 @@ pub fn show_utxo(
                 },
             );
         }
-        Some((
-            asset_id @ (AssetId::Truthcoin(_) | AssetId::TruthcoinControl(_)),
-            value,
-        )) => {
+        Some((asset_id @ AssetId::Votecoin, value)) => {
             if show_asset_id {
                 ui.monospace_selectable_singleline(true, format!("{asset_id}"));
             }
-            ui.monospace_selectable_singleline(false, format!("{value}"));
+            ui.monospace_selectable_singleline(false, format!("{value} VOT"));
         }
     }
 }
@@ -314,20 +289,14 @@ pub fn show_unconfirmed_utxo(
                 },
             );
         }
-        Some(AssetOutputContent::Truthcoin(value)) => {
+        Some(AssetOutputContent::Votecoin(value)) => {
             if show_asset_id {
-                ui.monospace_selectable_singleline(true, "Truthcoin");
+                ui.monospace_selectable_singleline(true, "Votecoin");
             }
             ui.monospace_selectable_singleline(
                 false,
-                format!("{value} (unconfirmed)"),
+                format!("{value} VOT (unconfirmed)"),
             );
-        }
-        Some(AssetOutputContent::TruthcoinControl) => {
-            if show_asset_id {
-                ui.monospace_selectable_singleline(true, "Truthcoin Control");
-            }
-            ui.monospace_selectable_singleline(false, "1 (unconfirmed)");
         }
     }
 }

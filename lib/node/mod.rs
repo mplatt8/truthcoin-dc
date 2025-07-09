@@ -19,12 +19,12 @@ use crate::{
     mempool::{self, MemPool},
     net::{self, Net, Peer},
     state::{
-        self, AmmPair, AmmPoolState, TruthcoinSeqId, DutchAuctionState, State,
+        self, AmmPair, AmmPoolState, State,
     },
     types::{
         Address, AmountOverflowError, AmountUnderflowError, AssetId,
-        Authorized, AuthorizedTransaction, TruthcoinData, TruthcoinId, Block,
-        BlockHash, BmmResult, Body, DutchAuctionId, FilledOutput,
+        Authorized, AuthorizedTransaction, Block,
+        BlockHash, BmmResult, Body, FilledOutput,
         FilledTransaction, GetBitcoinValue, Header, InPoint, Network, OutPoint,
         Output, SpentOutput, Tip, Transaction, TxIn, Txid, WithdrawalBundle,
         proto::{self, mainchain},
@@ -291,82 +291,26 @@ where
         Ok(res)
     }
 
-    /// List all Truthcoin and their current data
-    pub fn truthcoin(
+    /// List all Votecoin network data
+    pub fn votecoin_network_data(
         &self,
-    ) -> Result<Vec<(TruthcoinSeqId, TruthcoinId, TruthcoinData)>, Error> {
+    ) -> Result<Vec<(crate::state::votecoin::VotecoinId, crate::state::votecoin::VotecoinNetworkData)>, Error> {
         let rotxn = self.env.read_txn()?;
-        let truthcoin_ids_to_data: HashMap<_, _> = self
-            .state
-            .truthcoin()
-            .truthcoin()
-            .iter(&rotxn)
-            .map_err(state::Error::from)?
-            .map_err(state::Error::from)
-            .map(|(truthcoin_id, truthcoin_data)| {
-                Ok((truthcoin_id, truthcoin_data.current()))
-            })
-            .collect()?;
         let res = self
             .state
-            .truthcoin()
-            .seq_to_truthcoin()
+            .votecoin()
+            .votecoin()
             .iter(&rotxn)
             .map_err(state::Error::from)?
             .map_err(state::Error::from)
-            .map(|(truthcoin_seq_id, truthcoin_id)| {
-                let truthcoin_data = truthcoin_ids_to_data
-                    .get(&truthcoin_id)
-                    .ok_or_else(|| state::error::Truthcoin::Missing {
-                        truthcoin: truthcoin_id,
-                    })?;
-                Ok((truthcoin_seq_id, truthcoin_id, truthcoin_data.clone()))
+            .map(|(votecoin_id, votecoin_data)| {
+                Ok((votecoin_id, votecoin_data.current()))
             })
             .collect()?;
         Ok(res)
     }
 
-    /// List all dutch auctions and their current state
-    pub fn dutch_auctions(
-        &self,
-    ) -> Result<Vec<(DutchAuctionId, DutchAuctionState)>, Error> {
-        let rotxn = self.env.read_txn()?;
-        let res = self
-            .state
-            .dutch_auctions()
-            .iter(&rotxn)
-            .map_err(state::Error::from)?
-            .map_err(state::Error::from)
-            .collect()?;
-        Ok(res)
-    }
 
-    pub fn try_get_dutch_auction_state(
-        &self,
-        auction_id: DutchAuctionId,
-    ) -> Result<Option<DutchAuctionState>, Error> {
-        let rotxn = self.env.read_txn()?;
-        let res = self
-            .state
-            .dutch_auctions()
-            .try_get(&rotxn, &auction_id)
-            .map_err(state::Error::from)?;
-        Ok(res)
-    }
-
-    pub fn get_dutch_auction_state(
-        &self,
-        auction_id: DutchAuctionId,
-    ) -> Result<DutchAuctionState, Error> {
-        self.try_get_dutch_auction_state(auction_id).and_then(
-            |dutch_auction_state| {
-                dutch_auction_state.ok_or_else(|| {
-                    let err = state::error::dutch_auction::Bid::MissingAuction;
-                    state::Error::DutchAuction(err.into()).into()
-                })
-            },
-        )
-    }
 
     pub fn try_get_height(
         &self,
@@ -403,45 +347,53 @@ where
         Ok(self.archive.is_descendant(&rotxn, ancestor, descendant)?)
     }
 
-    /** Resolve truthcoin data at the specified block height.
-     * Returns an error if it does not exist.rror if it does not exist. */
-    pub fn get_truthcoin_data_at_block_height(
+    /** Resolve Votecoin network data at the specified block height.
+     * Returns an error if it does not exist. */
+    pub fn get_votecoin_data_at_block_height(
         &self,
-        truthcoin: &TruthcoinId,
+        votecoin_id: &crate::state::votecoin::VotecoinId,
         height: u32,
-    ) -> Result<TruthcoinData, Error> {
+    ) -> Result<crate::state::votecoin::VotecoinNetworkData, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self
             .state
-            .truthcoin()
-            .get_truthcoin_data_at_block_height(&rotxn, truthcoin, height)
-            .map_err(state::Error::Truthcoin)?)
+            .votecoin()
+            .try_get_votecoin_data_at_block_height(&rotxn, votecoin_id, height)
+            .map_err(state::Error::from)?
+            .ok_or_else(|| Error::State(Box::new(state::Error::UnbalancedVotecoin {
+                inputs: 0,
+                outputs: 0,
+            })))?)
     }
 
-    /// resolve current truthcoin data, if it exists
-    pub fn try_get_current_truthcoin_data(
+    /// resolve current Votecoin network data, if it exists
+    pub fn try_get_current_votecoin_data(
         &self,
-        truthcoin: &TruthcoinId,
-    ) -> Result<Option<TruthcoinData>, Error> {
+        votecoin_id: &crate::state::votecoin::VotecoinId,
+    ) -> Result<Option<crate::state::votecoin::VotecoinNetworkData>, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self
             .state
-            .truthcoin()
-            .try_get_current_truthcoin_data(&rotxn, truthcoin)
-            .map_err(state::Error::Truthcoin)?)
+            .votecoin()
+            .try_get_current_votecoin_data(&rotxn, votecoin_id)
+            .map_err(state::Error::from)?)
     }
 
-    /// Resolve current truthcoin data. Returns an error if it does not exist.
-    pub fn get_current_truthcoin_data(
+    /// Resolve current Votecoin network data. Returns an error if it does not exist.
+    pub fn get_current_votecoin_data(
         &self,
-        truthcoin: &TruthcoinId,
-    ) -> Result<TruthcoinData, Error> {
+        votecoin_id: &crate::state::votecoin::VotecoinId,
+    ) -> Result<crate::state::votecoin::VotecoinNetworkData, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self
             .state
-            .truthcoin()
-            .get_current_truthcoin_data(&rotxn, truthcoin)
-            .map_err(state::Error::Truthcoin)?)
+            .votecoin()
+            .try_get_current_votecoin_data(&rotxn, votecoin_id)
+            .map_err(state::Error::from)?
+            .ok_or_else(|| Error::State(Box::new(state::Error::UnbalancedVotecoin {
+                inputs: 0,
+                outputs: 0,
+            })))?)
     }
 
     pub fn submit_transaction(

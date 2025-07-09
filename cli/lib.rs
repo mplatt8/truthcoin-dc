@@ -9,8 +9,7 @@ use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
 use truthcoin_dc::{
     authorization::{Dst, Signature},
     types::{
-        Address, AssetId, TruthcoinData, TruthcoinId, BlockHash, DutchAuctionId,
-        DutchAuctionParams, EncryptionPubKey, THIS_SIDECHAIN, Txid,
+        Address, AssetId, BlockHash, EncryptionPubKey, THIS_SIDECHAIN, Txid,
         VerifyingKey,
     },
 };
@@ -50,13 +49,6 @@ pub enum Command {
         #[arg(long)]
         amount_spend: u64,
     },
-    /// Retrieve data for a single Truthcoin
-    #[command(name = "truthcoin-data")]
-    TruthcoinData {
-        truthcoin_id: TruthcoinId,
-    },
-    /// List all Truthcoin
-    Truthcoin,
     /// Get Bitcoin balance in sats
     BitcoinBalance,
     /// Connect to a peer
@@ -82,24 +74,6 @@ pub enum Command {
         #[arg(long)]
         utf8: bool,
     },
-    /// Returns the amount of the base asset to receive
-    DutchAuctionBid {
-        #[arg(long)]
-        auction_id: DutchAuctionId,
-        #[arg(long)]
-        bid_size: u64,
-    },
-    /// Create a dutch auction
-    DutchAuctionCreate {
-        #[command(flatten)]
-        params: DutchAuctionParams,
-    },
-    /// Returns the amount of the base asset and quote asset to receive
-    DutchAuctionCollect {
-        auction_id: DutchAuctionId,
-    },
-    /// List all Dutch auctions
-    DutchAuctions,
     /// Encrypt a message to the specified encryption pubkey.
     /// Returns the ciphertext as a hex string.
     EncryptMsg {
@@ -180,21 +154,9 @@ pub enum Command {
     OpenApiSchema,
     /// Get pending withdrawal bundle
     PendingWithdrawalBundle,
-    /// Register a Truthcoin
-    RegisterTruthcoin {
-        plaintext_name: String,
-        #[arg(long)]
-        initial_supply: u64,
-        #[command(flatten)]
-        truthcoin_data: Box<TruthcoinData>,
-    },
     /// Remove a tx from the mempool
     RemoveFromMempool {
         txid: Txid,
-    },
-    /// Reserve a Truthcoin
-    ReserveTruthcoin {
-        plaintext_name: String,
     },
     /// Set the wallet seed from a mnemonic seed phrase
     SetSeedFromMnemonic {
@@ -226,13 +188,11 @@ pub enum Command {
         #[arg(long)]
         fee_sats: u64,
     },
-    /// Transfer truthcoin to the specified address
-    TransferTruthcoin {
+    /// Transfer votecoin to the specified address
+    TransferVotecoin {
         dest: Address,
         #[arg(long)]
-        asset_id: TruthcoinId,
-        #[arg(long)]
-        amount: u64,
+        amount: u32,
         #[arg(long)]
         fee_sats: u64,
     },
@@ -345,14 +305,6 @@ where
                 .await?;
             format!("{amount}")
         }
-        Command::TruthcoinData { truthcoin_id } => {
-            let truthcoin_data = rpc_client.truthcoin_data(truthcoin_id).await?;
-            serde_json::to_string_pretty(&truthcoin_data)?
-        }
-        Command::Truthcoin => {
-            let truthcoin = rpc_client.truthcoin().await?;
-            serde_json::to_string_pretty(&truthcoin)?
-        }
         Command::BitcoinBalance => {
             let balance = rpc_client.bitcoin_balance().await?;
             serde_json::to_string_pretty(&balance)?
@@ -384,31 +336,6 @@ where
             } else {
                 msg_hex
             }
-        }
-        Command::DutchAuctionBid {
-            auction_id,
-            bid_size,
-        } => {
-            let amount =
-                rpc_client.dutch_auction_bid(auction_id, bid_size).await?;
-            format!("{amount}")
-        }
-        Command::DutchAuctionCreate { params } => {
-            let txid = rpc_client.dutch_auction_create(params).await?;
-            format!("{txid}")
-        }
-        Command::DutchAuctionCollect { auction_id } => {
-            let (amount0, amount1) =
-                rpc_client.dutch_auction_collect(auction_id).await?;
-            let resp = serde_json::json!({
-                "amount0": amount0,
-                "amount1": amount1
-            });
-            serde_json::to_string_pretty(&resp)?
-        }
-        Command::DutchAuctions => {
-            let auctions = rpc_client.dutch_auctions().await?;
-            serde_json::to_string_pretty(&auctions)?
         }
         Command::EncryptMsg {
             encryption_pubkey,
@@ -510,43 +437,24 @@ where
                 rpc_client.pending_withdrawal_bundle().await?;
             serde_json::to_string_pretty(&withdrawal_bundle)?
         }
-        Command::RegisterTruthcoin {
-            plaintext_name,
-            initial_supply,
-            truthcoin_data,
-        } => {
-            let txid = rpc_client
-                .register_truthcoin(
-                    plaintext_name,
-                    initial_supply,
-                    Some(*truthcoin_data),
-                )
-                .await?;
-            format!("{txid}")
-        }
         Command::RemoveFromMempool { txid } => {
             let () = rpc_client.remove_from_mempool(txid).await?;
             String::default()
-        }
-        Command::ReserveTruthcoin { plaintext_name } => {
-            let txid = rpc_client.reserve_truthcoin(plaintext_name).await?;
-            format!("{txid}")
         }
         Command::SetSeedFromMnemonic { mnemonic } => {
             let () = rpc_client.set_seed_from_mnemonic(mnemonic).await?;
             String::default()
         }
         Command::SidechainWealth => {
-            let sidechain_wealth = rpc_client.sidechain_wealth_sats().await?;
-            format!("{sidechain_wealth}")
+            let wealth = rpc_client.sidechain_wealth_sats().await?;
+            format!("{wealth}")
         }
         Command::SignArbitraryMsg { verifying_key, msg } => {
-            let sig = rpc_client.sign_arbitrary_msg(verifying_key, msg).await?;
-            format!("{sig}")
+            let signature = rpc_client.sign_arbitrary_msg(verifying_key, msg).await?;
+            format!("{signature}")
         }
         Command::SignArbitraryMsgAsAddr { address, msg } => {
-            let authorization =
-                rpc_client.sign_arbitrary_msg_as_addr(address, msg).await?;
+            let authorization = rpc_client.sign_arbitrary_msg_as_addr(address, msg).await?;
             serde_json::to_string_pretty(&authorization)?
         }
         Command::Stop => {
@@ -563,14 +471,13 @@ where
                 .await?;
             format!("{txid}")
         }
-        Command::TransferTruthcoin {
+        Command::TransferVotecoin {
             dest,
-            asset_id,
             amount,
             fee_sats,
         } => {
             let txid = rpc_client
-                .transfer_truthcoin(dest, asset_id, amount, fee_sats, None)
+                .transfer_votecoin(dest, amount, fee_sats, None)
                 .await?;
             format!("{txid}")
         }

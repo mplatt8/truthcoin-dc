@@ -4,14 +4,14 @@ use truthcoin_dc::types::EncryptionPubKey;
 
 use crate::{
     app::App,
-    gui::util::{InnerResponseExt, UiExt, borsh_deserialize_hex},
+    gui::util::{InnerResponseExt, UiExt},
 };
 
 #[derive(Debug)]
 pub struct DecryptMessage {
-    // Encryption pubkey or Truthcoin ID
-    receiver_input: String,
-    // none if not yet set, otherwise result of parsing/resolving receiver pubkey
+    // Encryption pubkey
+    receiver_pubkey_string: String,
+    // none if not yet set, otherwise result of parsing receiver pubkey
     receiver_pubkey: Option<anyhow::Result<EncryptionPubKey>>,
     ciphertext: String,
     // none if not yet computed, otherwise result of attempting to decrypt
@@ -21,7 +21,7 @@ pub struct DecryptMessage {
 impl DecryptMessage {
     pub fn new() -> Self {
         Self {
-            receiver_input: String::new(),
+            receiver_pubkey_string: String::new(),
             receiver_pubkey: None,
             ciphertext: String::new(),
             plaintext_bytes: None,
@@ -40,38 +40,22 @@ impl DecryptMessage {
         let Some(app) = app else {
             return;
         };
-        let receiver_input_response = ui
+        let receiver_pubkey_response = ui
             .horizontal(|ui| {
                 ui.monospace(
-                    "Receiver's Truthcoin ID or Encryption Pubkey (Bech32m): ",
-                ) | ui.add(egui::TextEdit::singleline(&mut self.receiver_input))
+                    "Receiver's Encryption Pubkey (Bech32m): ",
+                ) | ui.add(egui::TextEdit::singleline(&mut self.receiver_pubkey_string))
             })
             .join();
-        if receiver_input_response.changed() {
-            let receiver_pubkey: anyhow::Result<EncryptionPubKey> = {
-                if let Ok(truthcoin_id) =
-                    borsh_deserialize_hex(&self.receiver_input)
-                {
-                    app.node
-                        .get_current_truthcoin_data(&truthcoin_id)
-                        .map_err(anyhow::Error::from)
-                        .and_then(|truthcoin_data| {
-                            truthcoin_data.encryption_pubkey.ok_or(
-                                anyhow::anyhow!(
-                                "No encryption pubkey exists for this Truthcoin"
-                        ),
-                            )
-                        })
-                } else {
-                    EncryptionPubKey::bech32m_decode(&self.receiver_input)
-                        .map_err(|_| {
-                            anyhow::anyhow!(
-                                "Failed to parse Truthcoin ID or Encryption Pubkey"
-                            )
-                        })
-                }
-            };
-            self.receiver_pubkey = Some(receiver_pubkey);
+        if receiver_pubkey_response.changed() {
+            self.receiver_pubkey = Some(
+                EncryptionPubKey::bech32m_decode(&self.receiver_pubkey_string)
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "Failed to parse Encryption Pubkey"
+                        )
+                    })
+            );
         }
         let ciphertext_response = ui
             .horizontal_wrapped(|ui| {
@@ -91,7 +75,7 @@ impl DecryptMessage {
             Some(Ok(receiver_pubkey)) => receiver_pubkey,
         };
         // regenerate plaintext if possible
-        if receiver_input_response.changed() || ciphertext_response.changed() {
+        if receiver_pubkey_response.changed() || ciphertext_response.changed() {
             let ciphertext_bytes = match hex::decode(&self.ciphertext) {
                 Ok(ciphertext_bytes) => ciphertext_bytes,
                 Err(err) => {

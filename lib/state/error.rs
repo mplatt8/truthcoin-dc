@@ -5,7 +5,7 @@ use thiserror::Error;
 use transitive::Transitive;
 
 use crate::types::{
-    AmountOverflowError, AmountUnderflowError, AssetId, TruthcoinId, BlockHash,
+    AmountOverflowError, AmountUnderflowError, AssetId, BlockHash,
     Hash, M6id, MerkleRoot, OutPoint, Txid, WithdrawalBundleError,
 };
 
@@ -42,133 +42,13 @@ pub enum Amm {
     RevertMint,
     #[error("Failed to revert AMM swap")]
     RevertSwap,
-    #[error("Too few Truthcoin to mint an AMM position")]
-    TooFewTruthcoinToMint,
+    #[error("Too few Votecoin to mint an AMM position")]
+    TooFewVotecoinToMint,
 }
 
-/// Errors related to Truthcoin
-#[derive(Debug, Error, Transitive)]
-#[transitive(from(db::Delete, db::Error))]
-#[transitive(from(db::Last, db::Error))]
-#[transitive(from(db::Put, db::Error))]
-#[transitive(from(db::TryGet, db::Error))]
-pub enum Truthcoin {
-    #[error(transparent)]
-    Db(#[from] db::Error),
-    #[error("missing Truthcoin {truthcoin:?}")]
-    Missing { truthcoin: TruthcoinId },
-    #[error(
-        "Missing Truthcoin data for {name_hash:?} at block height {block_height}"
-    )]
-    MissingData { name_hash: Hash, block_height: u32 },
-    #[error("missing Truthcoin reservation {txid}")]
-    MissingReservation { txid: Txid },
-    #[error("no Truthcoin to mint")]
-    NoTruthcoinToMint,
-    #[error("no Truthcoin to update")]
-    NoTruthcoinToUpdate,
-    #[error("Mint would cause total supply to overflow")]
-    TotalSupplyOverflow,
-    #[error("Reverting Mint would cause total supply to underflow")]
-    TotalSupplyUnderflow,
-}
 
-/// Errors related to Dutch auctions
-pub mod dutch_auction {
-    use sneed::db::error as db;
-    use thiserror::Error;
-    use transitive::Transitive;
 
-    use crate::types::DutchAuctionId;
 
-    /// Errors when bidding on a Dutch auction
-    #[derive(Debug, Error)]
-    pub enum Bid {
-        #[error("Auction has already ended")]
-        AuctionEnded,
-        #[error("Auction has not started yet")]
-        AuctionNotStarted,
-        #[error("Incorrect receive asset specified")]
-        IncorrectReceiveAsset,
-        #[error("Incorrect spend asset")]
-        IncorrectSpendAsset,
-        #[error("Invalid Dutch auction bid")]
-        Invalid,
-        #[error("Tx can only be applied at the specified price")]
-        InvalidPrice,
-        #[error("Invalid TxData")]
-        InvalidTxData,
-        #[error("Auction not found")]
-        MissingAuction,
-        #[error("Bid quantity is more than is offered in the auction")]
-        QuantityTooLarge,
-    }
-
-    /// Errors when creating a Dutch auction
-    #[derive(Debug, Error)]
-    pub enum Create {
-        #[error("Tx expired; Auction start block already exists")]
-        Expired,
-        #[error("Invalid tx; Final price cannot be greater than initial price")]
-        FinalPrice,
-        #[error(
-            "Invalid tx; For a single-block auction, 
-                final price must be exactly equal to initial price"
-        )]
-        PriceMismatch,
-        #[error("Invalid tx; Auction duration cannot be `0` blocks")]
-        ZeroDuration,
-    }
-
-    /// Errors when collecting the proceeds from a Dutch auction
-    #[derive(Debug, Error)]
-    pub enum Collect {
-        #[error("Auction has not ended yet")]
-        AuctionNotFinished,
-        #[error("Incorrect offered asset")]
-        IncorrectOfferedAsset,
-        #[error(
-            "Offered asset amount must be exactly equal to the amount remaining"
-        )]
-        IncorrectOfferedAssetAmount,
-        #[error("Incorrect receive asset specified")]
-        IncorrectReceiveAsset,
-        #[error(
-            "Receive asset amount must be exactly equal to the amount received"
-        )]
-        IncorrectReceiveAssetAmount,
-        #[error("Invalid Dutch auction collect")]
-        Invalid,
-        #[error("Invalid TxData")]
-        InvalidTxData,
-        #[error("Auction not found")]
-        MissingAuction,
-        #[error("Failed to revert Dutch Auction collect")]
-        Revert,
-    }
-
-    /// Errors related to Dutch auctions
-    #[derive(Debug, Error, Transitive)]
-    #[transitive(from(db::Delete, db::Error))]
-    #[transitive(from(db::Error, sneed::Error))]
-    #[transitive(from(db::Put, db::Error))]
-    #[transitive(from(db::TryGet, db::Error))]
-    pub enum Error {
-        #[error(transparent)]
-        Bid(#[from] Bid),
-        #[error(transparent)]
-        Collect(#[from] Collect),
-        #[error(transparent)]
-        Create(#[from] Create),
-        #[error(transparent)]
-        Db(#[from] sneed::Error),
-        #[error("missing Dutch auction {0}")]
-        Missing(DutchAuctionId),
-        #[error("Too few Truthcoin to create a Dutch auction")]
-        TooFewTruthcoinToCreate,
-    }
-}
-pub use dutch_auction::Error as DutchAuction;
 
 #[derive(Debug, Error)]
 pub enum InvalidHeader {
@@ -231,18 +111,14 @@ pub enum Error {
     AuthorizationError,
     #[error("bad coinbase output content")]
     BadCoinbaseOutputContent,
-    #[error(transparent)]
-    Truthcoin(#[from] Truthcoin),
-    #[error("truthcoin {name_hash:?} already registered")]
-    TruthcoinAlreadyRegistered { name_hash: Hash },
+
+
     #[error("bundle too heavy {weight} > {max_weight}")]
     BundleTooHeavy { weight: u64, max_weight: u64 },
     #[error(transparent)]
     BorshSerialize(borsh::io::Error),
     #[error(transparent)]
     Db(#[from] sneed::Error),
-    #[error(transparent)]
-    DutchAuction(#[from] DutchAuction),
     #[error(transparent)]
     FillTxOutputContents(#[from] FillTxOutputContents),
     #[error(
@@ -254,12 +130,8 @@ pub enum Error {
     },
     #[error("invalid header: {0}")]
     InvalidHeader(InvalidHeader),
-    #[error(
-        "The last output in a Truthcoin registration tx must be a control coin"
-    )]
-    LastOutputNotControlCoin,
-    #[error("missing Truthcoin input {name_hash:?}")]
-    MissingTruthcoinInput { name_hash: Hash },
+
+
     #[error("deposit block doesn't exist")]
     NoDepositBlock,
     #[error("total fees less than coinbase value")]
@@ -274,39 +146,20 @@ pub enum Error {
     NoUtxo { outpoint: OutPoint },
     #[error("Withdrawal bundle event block doesn't exist")]
     NoWithdrawalBundleEventBlock,
-    #[error(
-        "The second-last output in a Truthcoin registration tx \
-             must be the Truthcoin mint, \
-             if the initial supply is nonzero"
-    )]
-    SecondLastOutputNotTruthcoin,
+
     #[error(transparent)]
     SignatureError(#[from] ed25519_dalek::SignatureError),
-    #[error("Too few Truthcoin control coin outputs")]
-    TooFewTruthcoinControlOutputs,
+
+
+
     #[error(
-        "unbalanced Truthcoin control coins: \
-         {n_truthcoin_control_inputs} Truthcoin control coin inputs, \
-         {n_truthcoin_control_outputs} Truthcoin control coin outputs"
+        "unbalanced Votecoin: {inputs} inputs, {outputs} outputs"
     )]
-    UnbalancedTruthcoinControls {
-        n_truthcoin_control_inputs: usize,
-        n_truthcoin_control_outputs: usize,
+    UnbalancedVotecoin {
+        inputs: u32,
+        outputs: u32,
     },
-    #[error(
-        "unbalanced Truthcoin: {n_unique_truthcoin_inputs} unique Truthcoin inputs, {n_truthcoin_outputs} Truthcoin outputs"
-    )]
-    UnbalancedTruthcoin {
-        n_unique_truthcoin_inputs: usize,
-        n_truthcoin_outputs: usize,
-    },
-    #[error(
-        "unbalanced reservations: {n_reservation_inputs} reservation inputs, {n_reservation_outputs} reservation outputs"
-    )]
-    UnbalancedReservations {
-        n_reservation_inputs: usize,
-        n_reservation_outputs: usize,
-    },
+
     #[error("Unknown withdrawal bundle: {m6id}")]
     UnknownWithdrawalBundle { m6id: M6id },
     #[error(

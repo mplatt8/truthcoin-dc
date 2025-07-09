@@ -5,9 +5,9 @@ use std::collections::HashSet;
 use sneed::{RoTxn, RwTxn};
 
 use crate::{
-    state::{Error, State, amm, dutch_auction, error},
+    state::{Error, State, amm, error},
     types::{
-        AmountOverflowError, Authorization, TruthcoinId, Body, FilledOutput,
+        AmountOverflowError, Authorization, Body, FilledOutput,
         FilledOutputContent, GetAddress as _, GetBitcoinValue as _, Header,
         InPoint, OutPoint, OutputContent, SpentOutput, TxData, Verify as _,
     },
@@ -113,10 +113,7 @@ pub fn connect(
                 FilledOutputContent::BitcoinWithdrawal(withdrawal)
             }
             OutputContent::AmmLpToken(_)
-            | OutputContent::Truthcoin(_)
-            | OutputContent::TruthcoinControl
-            | OutputContent::TruthcoinReservation
-            | OutputContent::DutchAuctionReceipt => {
+            | OutputContent::Votecoin(_) => {
                 return Err(Error::BadCoinbaseOutputContent);
             }
         };
@@ -167,67 +164,6 @@ pub fn connect(
             Some(TxData::AmmSwap { .. }) => {
                 let () = amm::apply_swap(&state.amm_pools, rwtxn, &filled_tx)?;
             }
-            Some(TxData::TruthcoinReservation { commitment }) => {
-                let () = state
-                    .truthcoin
-                    .put_reservation(rwtxn, &txid, commitment)?;
-            }
-            Some(TxData::TruthcoinRegistration {
-                name_hash,
-                revealed_nonce: _,
-                truthcoin_data,
-                initial_supply,
-            }) => {
-                let () = state.truthcoin.apply_registration(
-                    rwtxn,
-                    &filled_tx,
-                    *name_hash,
-                    truthcoin_data,
-                    *initial_supply,
-                    height,
-                )?;
-            }
-            Some(TxData::TruthcoinMint(mint_amount)) => {
-                let () = state.truthcoin.apply_mint(
-                    rwtxn,
-                    &filled_tx,
-                    *mint_amount,
-                    height,
-                )?;
-            }
-            Some(TxData::TruthcoinUpdate(truthcoin_updates)) => {
-                let () = state.truthcoin.apply_updates(
-                    rwtxn,
-                    &filled_tx,
-                    (**truthcoin_updates).clone(),
-                    height,
-                )?;
-            }
-            Some(TxData::DutchAuctionBid { .. }) => {
-                let () = dutch_auction::apply_bid(
-                    &state.dutch_auctions,
-                    rwtxn,
-                    &filled_tx,
-                    height,
-                )?;
-            }
-            Some(TxData::DutchAuctionCreate(dutch_auction_params)) => {
-                let () = dutch_auction::apply_create(
-                    &state.dutch_auctions,
-                    rwtxn,
-                    &filled_tx,
-                    *dutch_auction_params,
-                    height,
-                )?;
-            }
-            Some(TxData::DutchAuctionCollect { .. }) => {
-                let () = dutch_auction::apply_collect(
-                    &state.dutch_auctions,
-                    rwtxn,
-                    &filled_tx,
-                    height,
-                )?;
-            }
         }
     }
     let block_hash = header.hash();
@@ -276,60 +212,6 @@ pub fn disconnect_tip(
             }
             Some(TxData::AmmSwap { .. }) => {
                 let () = amm::revert_swap(&state.amm_pools, rwtxn, &filled_tx)?;
-            }
-            Some(TxData::TruthcoinMint(mint_amount)) => {
-                let () = state.truthcoin.revert_mint(
-                    rwtxn,
-                    &filled_tx,
-                    *mint_amount,
-                )?;
-            }
-            Some(TxData::TruthcoinRegistration {
-                name_hash,
-                revealed_nonce: _,
-                truthcoin_data: _,
-                initial_supply: _,
-            }) => {
-                let () = state.truthcoin.revert_registration(
-                    rwtxn,
-                    &filled_tx,
-                    TruthcoinId(*name_hash),
-                )?;
-            }
-            Some(TxData::TruthcoinReservation { commitment: _ }) => {
-                if !state.truthcoin.delete_reservation(rwtxn, &txid)? {
-                    let err = error::Truthcoin::MissingReservation { txid };
-                    return Err(err.into());
-                }
-            }
-            Some(TxData::TruthcoinUpdate(truthcoin_updates)) => {
-                let () = state.truthcoin.revert_updates(
-                    rwtxn,
-                    &filled_tx,
-                    (**truthcoin_updates).clone(),
-                    height - 1,
-                )?;
-            }
-            Some(TxData::DutchAuctionBid { .. }) => {
-                let () = dutch_auction::revert_bid(
-                    &state.dutch_auctions,
-                    rwtxn,
-                    &filled_tx,
-                )?;
-            }
-            Some(TxData::DutchAuctionCollect { .. }) => {
-                let () = dutch_auction::revert_collect(
-                    &state.dutch_auctions,
-                    rwtxn,
-                    &filled_tx,
-                )?;
-            }
-            Some(TxData::DutchAuctionCreate(_auction_params)) => {
-                let () = dutch_auction::revert_create(
-                    &state.dutch_auctions,
-                    rwtxn,
-                    &filled_tx,
-                )?;
             }
         }
         // delete UTXOs, last-to-first

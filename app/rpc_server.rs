@@ -11,10 +11,10 @@ use jsonrpsee::{
 use truthcoin_dc::{
     authorization::{self, Dst, Signature},
     net::Peer,
-    state::{self, AmmPair, AmmPoolState, TruthcoinSeqId, DutchAuctionState},
+    state::{self, AmmPair, AmmPoolState},
     types::{
-        Address, AssetId, Authorization, TruthcoinData, TruthcoinId, Block,
-        BlockHash, DutchAuctionId, DutchAuctionParams, EncryptionPubKey,
+        Address, AssetId, Authorization, Block,
+        BlockHash, EncryptionPubKey,
         FilledOutputContent, PointedOutput, Transaction, Txid, VerifyingKey,
         WithdrawalBundle, keys::Ecies,
     },
@@ -151,22 +151,6 @@ impl RpcServer for RpcServerImpl {
         Ok(amount_receive)
     }
 
-    async fn truthcoin_data(
-        &self,
-        truthcoin_id: TruthcoinId,
-    ) -> RpcResult<TruthcoinData> {
-        self.app
-            .node
-            .get_current_truthcoin_data(&truthcoin_id)
-            .map_err(custom_err)
-    }
-
-    async fn truthcoin(
-        &self,
-    ) -> RpcResult<Vec<(TruthcoinSeqId, TruthcoinId, TruthcoinData)>> {
-        self.app.node.truthcoin().map_err(custom_err)
-    }
-
     async fn bitcoin_balance(&self) -> RpcResult<Balance> {
         self.app.wallet.get_bitcoin_balance().map_err(custom_err)
     }
@@ -205,105 +189,6 @@ impl RpcServer for RpcServerImpl {
             .decrypt_msg(&encryption_pubkey, &ciphertext)
             .map(hex::encode)
             .map_err(custom_err)
-    }
-
-    async fn dutch_auction_bid(
-        &self,
-        auction_id: DutchAuctionId,
-        bid_size: u64,
-    ) -> RpcResult<u64> {
-        let height = self.getblockcount().await?;
-        let auction_state = self
-            .app
-            .node
-            .get_dutch_auction_state(auction_id)
-            .map_err(custom_err)?;
-        let next_auction_state = auction_state
-            .bid(Txid::default(), bid_size, height)
-            .map_err(custom_err)?;
-        let receive_quantity =
-            auction_state.base_amount_remaining.latest().data
-                - next_auction_state.base_amount_remaining.latest().data;
-        let mut tx = Transaction::default();
-        let () = self
-            .app
-            .wallet
-            .dutch_auction_bid(
-                &mut tx,
-                auction_id,
-                auction_state.base_asset,
-                auction_state.quote_asset,
-                bid_size,
-                receive_quantity,
-            )
-            .map_err(custom_err)?;
-        let authorized_tx =
-            self.app.wallet.authorize(tx).map_err(custom_err)?;
-        self.app
-            .node
-            .submit_transaction(authorized_tx)
-            .map_err(custom_err)?;
-        Ok(receive_quantity)
-    }
-
-    async fn dutch_auction_collect(
-        &self,
-        auction_id: DutchAuctionId,
-    ) -> RpcResult<(u64, u64)> {
-        let height = self.getblockcount().await?;
-        let auction_state = self
-            .app
-            .node
-            .get_dutch_auction_state(auction_id)
-            .map_err(custom_err)?;
-        if height <= auction_state.start_block + auction_state.duration {
-            let err = state::error::dutch_auction::Collect::AuctionNotFinished;
-            return Err(custom_err(err));
-        }
-        let mut tx = Transaction::default();
-        let () = self
-            .app
-            .wallet
-            .dutch_auction_collect(
-                &mut tx,
-                auction_id,
-                auction_state.base_asset,
-                auction_state.quote_asset,
-                auction_state.base_amount_remaining.latest().data,
-                auction_state.quote_amount.latest().data,
-            )
-            .map_err(custom_err)?;
-        let authorized_tx =
-            self.app.wallet.authorize(tx).map_err(custom_err)?;
-        self.app
-            .node
-            .submit_transaction(authorized_tx)
-            .map_err(custom_err)?;
-        Ok((
-            auction_state.base_amount_remaining.latest().data,
-            auction_state.quote_amount.latest().data,
-        ))
-    }
-
-    async fn dutch_auction_create(
-        &self,
-        dutch_auction_params: DutchAuctionParams,
-    ) -> RpcResult<Txid> {
-        let mut tx = Transaction::default();
-        let () = self
-            .app
-            .wallet
-            .dutch_auction_create(&mut tx, dutch_auction_params)
-            .map_err(custom_err)?;
-        let txid = tx.txid();
-        let () = self.app.sign_and_send(tx).map_err(custom_err)?;
-        Ok(txid)
-    }
-
-    async fn dutch_auctions(
-        &self,
-    ) -> RpcResult<Vec<(DutchAuctionId, DutchAuctionState)>> {
-        self.app.node.dutch_auctions().map_err(custom_err)
     }
 
     async fn encrypt_msg(
@@ -565,41 +450,8 @@ impl RpcServer for RpcServerImpl {
             .map_err(custom_err)
     }
 
-    async fn register_truthcoin(
-        &self,
-        plain_name: String,
-        initial_supply: u64,
-        truthcoin_data: Option<TruthcoinData>,
-    ) -> RpcResult<Txid> {
-        let mut tx = Transaction::default();
-        let truthcoin_data = Cow::Owned(truthcoin_data.unwrap_or_default());
-        let () = match self.app.wallet.register_truthcoin(
-            &mut tx,
-            &plain_name,
-            truthcoin_data,
-            initial_supply,
-        ) {
-            Ok(()) => (),
-            Err(err) => return Err(custom_err(err)),
-        };
-        let txid = tx.txid();
-        let () = self.app.sign_and_send(tx).map_err(custom_err)?;
-        Ok(txid)
-    }
-
     async fn remove_from_mempool(&self, txid: Txid) -> RpcResult<()> {
         self.app.node.remove_from_mempool(txid).map_err(custom_err)
-    }
-
-    async fn reserve_truthcoin(&self, plain_name: String) -> RpcResult<Txid> {
-        let mut tx = Transaction::default();
-        let () = match self.app.wallet.reserve_truthcoin(&mut tx, &plain_name) {
-            Ok(()) => (),
-            Err(err) => return Err(custom_err(err)),
-        };
-        let txid = tx.txid();
-        let () = self.app.sign_and_send(tx).map_err(custom_err)?;
-        Ok(txid)
     }
 
     async fn set_seed_from_mnemonic(&self, mnemonic: String) -> RpcResult<()> {
@@ -670,11 +522,10 @@ impl RpcServer for RpcServerImpl {
         Ok(txid)
     }
 
-    async fn transfer_truthcoin(
+    async fn transfer_votecoin(
         &self,
         dest: Address,
-        asset_id: TruthcoinId,
-        amount: u64,
+        amount: u32,
         fee_sats: u64,
         memo: Option<String>,
     ) -> RpcResult<Txid> {
@@ -688,9 +539,8 @@ impl RpcServer for RpcServerImpl {
         let tx = self
             .app
             .wallet
-            .create_truthcoin_transfer(
+            .create_votecoin_transfer(
                 dest,
-                asset_id,
                 amount,
                 Amount::from_sat(fee_sats),
                 memo,

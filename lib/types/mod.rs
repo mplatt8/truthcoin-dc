@@ -14,7 +14,6 @@ use utoipa::ToSchema;
 pub use crate::authorization::Authorization;
 
 mod address;
-pub mod truthcoin_data;
 pub mod hashes;
 pub mod keys;
 pub mod proto;
@@ -22,16 +21,15 @@ pub mod schema;
 mod transaction;
 
 pub use address::Address;
-pub use truthcoin_data::{TruthcoinData, TruthcoinDataUpdates, Update};
 pub use hashes::{
-    AssetId, TruthcoinId, BlockHash, DutchAuctionId, Hash, M6id, MerkleRoot,
+    AssetId, BlockHash, Hash, M6id, MerkleRoot,
     Txid,
 };
 pub use keys::{EncryptionPubKey, VerifyingKey};
 pub use transaction::{
     AmmBurn, AmmMint, AmmSwap, AssetOutput, AssetOutputContent, Authorized,
     AuthorizedTransaction, BitcoinOutput, BitcoinOutputContent,
-    DutchAuctionBid, DutchAuctionCollect, DutchAuctionParams, FilledOutput,
+    FilledOutput,
     FilledOutputContent, FilledTransaction, InPoint, OutPoint, Output,
     OutputContent, PointedOutput, SpentOutput, Transaction, TxData, TxInputs,
     WithdrawalOutputContent,

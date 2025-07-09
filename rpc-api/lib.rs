@@ -9,12 +9,10 @@ use l2l_openapi::open_api;
 use truthcoin_dc::{
     authorization::{Dst, Signature},
     net::{Peer, PeerConnectionStatus},
-    state::{AmmPoolState, TruthcoinSeqId, DutchAuctionState},
+    state::AmmPoolState,
     types::{
-        Address, AssetId, Authorization, TruthcoinData, TruthcoinDataUpdates,
-        TruthcoinId, BitcoinOutputContent, Block, BlockHash, Body,
-        DutchAuctionId, DutchAuctionParams, EncryptionPubKey,
-        FilledOutputContent, Header, MerkleRoot, OutPoint, Output,
+        Address, AssetId, Authorization, BitcoinOutputContent, Block, BlockHash, Body,
+        EncryptionPubKey, FilledOutputContent, Header, MerkleRoot, OutPoint, Output,
         OutputContent, PointedOutput, Transaction, TxData, TxIn, Txid,
         VerifyingKey, WithdrawalBundle, WithdrawalOutputContent,
         schema as truthcoin_schema,
@@ -39,8 +37,7 @@ pub struct TxInfo {
     truthcoin_schema::BitcoinAddr, truthcoin_schema::BitcoinBlockHash,
     truthcoin_schema::BitcoinTransaction, truthcoin_schema::BitcoinOutPoint,
     truthcoin_schema::SocketAddr, Address, AssetId, Authorization,
-    TruthcoinData, TruthcoinDataUpdates, TruthcoinId, BitcoinOutputContent,
-    BlockHash, Body, DutchAuctionId, DutchAuctionParams, EncryptionPubKey,
+    BitcoinOutputContent, BlockHash, Body, EncryptionPubKey,
     FilledOutputContent, Header, MerkleRoot, OutPoint, Output, OutputContent,
     PeerConnectionStatus, Signature, Transaction, TxData, Txid, TxIn,
     WithdrawalOutputContent, VerifyingKey,
@@ -74,22 +71,6 @@ pub trait Rpc {
         asset_receive: AssetId,
         amount_spend: u64,
     ) -> RpcResult<u64>;
-
-    /// Retrieve data for a single Truthcoin
-    #[method(name = "truthcoin_data")]
-    async fn truthcoin_data(
-        &self,
-        truthcoin_id: TruthcoinId,
-    ) -> RpcResult<TruthcoinData>;
-
-    /// List all Truthcoin
-    #[open_api_method(output_schema(PartialSchema = "schema::Array<
-            schema::ArrayTuple3<TruthcoinSeqId, TruthcoinId, TruthcoinData>
-        >"))]
-    #[method(name = "truthcoin")]
-    async fn truthcoin(
-        &self,
-    ) -> RpcResult<Vec<(TruthcoinSeqId, TruthcoinId, TruthcoinData)>>;
 
     /// Balance in sats
     #[open_api_method(output_schema(ToSchema))]
@@ -126,41 +107,6 @@ pub trait Rpc {
         encryption_pubkey: EncryptionPubKey,
         ciphertext: String,
     ) -> RpcResult<String>;
-
-    /// Returns the amount of the base asset to receive
-    #[method(name = "dutch_auction_bid")]
-    async fn dutch_auction_bid(
-        &self,
-        dutch_auction_id: DutchAuctionId,
-        bid_size: u64,
-    ) -> RpcResult<u64>;
-
-    /// Create a dutch auction
-    #[method(name = "dutch_auction_create")]
-    async fn dutch_auction_create(
-        &self,
-        #[open_api_method_arg(schema(ToSchema))]
-        dutch_auction_params: DutchAuctionParams,
-    ) -> RpcResult<Txid>;
-
-    /// Returns the amount of the base asset and quote asset to receive
-    #[open_api_method(output_schema(
-        PartialSchema = "schema::ArrayTuple<u64, u64>"
-    ))]
-    #[method(name = "dutch_auction_collect")]
-    async fn dutch_auction_collect(
-        &self,
-        dutch_auction_id: DutchAuctionId,
-    ) -> RpcResult<(u64, u64)>;
-
-    /// List all Dutch auctions
-    #[open_api_method(output_schema(
-        PartialSchema = "schema::Array<schema::ArrayTuple<DutchAuctionId, serde_json::Value>>"
-    ))]
-    #[method(name = "dutch_auctions")]
-    async fn dutch_auctions(
-        &self,
-    ) -> RpcResult<Vec<(DutchAuctionId, DutchAuctionState)>>;
 
     /// Encrypt a message to the specified encryption pubkey
     /// Returns the ciphertext as a hex string.
@@ -326,23 +272,10 @@ pub trait Rpc {
     #[method(name = "openapi_schema")]
     async fn openapi_schema(&self) -> RpcResult<utoipa::openapi::OpenApi>;
 
-    /// Register a Truthcoin
-    #[method(name = "register_truthcoin")]
-    async fn register_truthcoin(
-        &self,
-        plain_name: String,
-        initial_supply: u64,
-        truthcoin_data: Option<TruthcoinData>,
-    ) -> RpcResult<Txid>;
-
     /// Remove a tx from the mempool
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "remove_from_mempool")]
     async fn remove_from_mempool(&self, txid: Txid) -> RpcResult<()>;
-
-    /// Reserve a Truthcoin
-    #[method(name = "reserve_truthcoin")]
-    async fn reserve_truthcoin(&self, plain_name: String) -> RpcResult<Txid>;
 
     /// Set the wallet seed from a mnemonic seed phrase
     #[open_api_method(output_schema(ToSchema))]
@@ -383,13 +316,12 @@ pub trait Rpc {
         memo: Option<String>,
     ) -> RpcResult<Txid>;
 
-    /// Transfer truthcoin to the specified address
-    #[method(name = "transfer_truthcoin")]
-    async fn transfer_truthcoin(
+    /// Transfer votecoin to the specified address
+    #[method(name = "transfer_votecoin")]
+    async fn transfer_votecoin(
         &self,
         dest: Address,
-        asset_id: TruthcoinId,
-        amount: u64,
+        amount: u32,
         fee_sats: u64,
         memo: Option<String>,
     ) -> RpcResult<Txid>;

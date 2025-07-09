@@ -98,7 +98,7 @@ pub struct State {
 }
 
 impl State {
-    pub const NUM_DBS: u32 = votecoin::Dbs::NUM_DBS + 7;
+    pub const NUM_DBS: u32 = votecoin::Dbs::NUM_DBS + 11;
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn()?;

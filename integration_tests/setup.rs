@@ -221,10 +221,7 @@ impl Sidechain for PostSetup {
                     }
                     FilledOutputContent::AmmLpToken { .. }
                     | FilledOutputContent::BitcoinWithdrawal { .. }
-                    | FilledOutputContent::Truthcoin(..)
-                    | FilledOutputContent::TruthcoinControl(_)
-                    | FilledOutputContent::TruthcoinReservation(_, _)
-                    | FilledOutputContent::DutchAuctionReceipt(_) => false,
+                    | FilledOutputContent::Votecoin(_) => false,
                 }
                 && match utxo.outpoint {
                     truthcoin_dc::types::OutPoint::Deposit(outpoint) => {

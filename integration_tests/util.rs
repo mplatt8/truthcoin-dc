@@ -63,6 +63,8 @@ impl TruthcoinApp {
             "--datadir".to_owned(),
             self.data_dir.display().to_string(),
             "--headless".to_owned(),
+            "--network".to_owned(),
+            "regtest".to_owned(),
             "--mainchain-grpc-port".to_owned(),
             self.mainchain_grpc_port.to_string(),
             "--net-addr".to_owned(),

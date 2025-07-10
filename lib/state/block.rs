@@ -112,8 +112,15 @@ pub fn connect(
             OutputContent::Withdrawal(withdrawal) => {
                 FilledOutputContent::BitcoinWithdrawal(withdrawal)
             }
-            OutputContent::AmmLpToken(_)
-            | OutputContent::Votecoin(_) => {
+            OutputContent::Votecoin(amount) => {
+                // Only allow Votecoin creation in the genesis block (height 0)
+                if height == 0 {
+                    FilledOutputContent::Votecoin(amount)
+                } else {
+                    return Err(Error::BadCoinbaseOutputContent);
+                }
+            }
+            OutputContent::AmmLpToken(_) => {
                 return Err(Error::BadCoinbaseOutputContent);
             }
         };

@@ -307,10 +307,11 @@ impl State {
     /** Check Votecoin balance constraints for AMM and Dutch auction operations.
      *  Since Votecoin has a fixed supply and no registration/reservation system,
      *  validation is much simpler than the old Truthcoin system.
+     *  Special case: Allow Votecoin creation in genesis block (height 0).
      * */
     pub fn validate_votecoin(
         &self,
-        _rotxn: &RoTxn,
+        rotxn: &RoTxn,
         tx: &FilledTransaction,
     ) -> Result<(), Error> {
         // Get total Votecoin in inputs and outputs
@@ -329,15 +330,24 @@ impl State {
             })
             .sum();
         
-        // Basic conservation: total in == total out (no creation/destruction)
-        if votecoin_inputs != votecoin_outputs {
-            return Err(Error::UnbalancedVotecoin {
-                inputs: votecoin_inputs,
-                outputs: votecoin_outputs,
-            });
-        }
+        // Check if we're in the genesis block (height 0)
+        let current_height = self.try_get_height(rotxn)?.unwrap_or(0);
+        let is_genesis = current_height == 0;
         
-        Ok(())
+        if is_genesis {
+            // In genesis block, allow Votecoin creation (inputs can be 0, outputs > 0)
+            // No validation needed as this is the initial supply distribution
+            Ok(())
+        } else {
+            // In all other blocks, enforce strict conservation: total in == total out
+            if votecoin_inputs != votecoin_outputs {
+                return Err(Error::UnbalancedVotecoin {
+                    inputs: votecoin_inputs,
+                    outputs: votecoin_outputs,
+                });
+            }
+            Ok(())
+        }
     }
 
     /// Validates a filled transaction, and returns the fee

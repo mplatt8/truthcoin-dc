@@ -347,13 +347,29 @@ impl App {
         };
         const NUM_TRANSACTIONS: usize = 1000;
         let (txs, tx_fees) = self.node.get_transactions(NUM_TRANSACTIONS)?;
-        let coinbase = match tx_fees {
+        
+        // Check if the NEW block being mined will be the genesis block (height 0)
+        let new_block_height = self.node.try_get_tip_height()?.map_or(0, |h| h + 1);
+        let is_genesis = new_block_height == 0;
+        
+        let mut coinbase = match tx_fees {
             bitcoin::Amount::ZERO => vec![],
             _ => vec![types::Output::new(
                 self.wallet.get_new_address()?,
                 types::OutputContent::Bitcoin(BitcoinOutputContent(tx_fees)),
             )],
         };
+        
+        // Add initial Votecoin supply in genesis block only
+        if is_genesis {
+            const INITIAL_VOTECOIN_SUPPLY: u32 = 1000000; // 1 million Votecoin
+            coinbase.push(types::Output::new(
+                self.wallet.get_new_address()?,
+                types::OutputContent::Votecoin(INITIAL_VOTECOIN_SUPPLY),
+            ));
+            tracing::info!("Genesis block: Creating initial Votecoin supply of {} units", INITIAL_VOTECOIN_SUPPLY);
+        }
+        
         let body = {
             let txs = txs.into_iter().map(|tx| tx.into()).collect();
             Body::new(txs, coinbase)

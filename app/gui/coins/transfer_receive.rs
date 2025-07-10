@@ -181,12 +181,24 @@ impl Receive {
             }
             None => (),
         }
-        if ui
-            .add_enabled(app.is_some(), Button::new("generate"))
-            .clicked()
-        {
-            *self = Self::new(app)
-        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(app.is_some(), Button::new("generate"))
+                .clicked()
+            {
+                *self = Self::new(app)
+            }
+            
+            let has_valid_address = matches!(&self.address, Some(Ok(_)));
+            if ui
+                .add_enabled(has_valid_address, Button::new("copy"))
+                .clicked()
+            {
+                if let Some(Ok(address)) = &self.address {
+                    ui.output_mut(|o| o.copied_text = address.to_string());
+                }
+            }
+        });
     }
 }
 

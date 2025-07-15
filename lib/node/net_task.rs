@@ -139,14 +139,18 @@ fn connect_tip_(
 ) -> Result<(), Error> {
     let block_hash = header.hash();
     let _fees: bitcoin::Amount = state.validate_block(rwtxn, header, body)?;
+    
+    // Get mainchain timestamp for slot minting
+    let mainchain_timestamp = archive.get_main_header_info(rwtxn, &header.prev_main_hash)?.timestamp;
+    
     if tracing::enabled!(tracing::Level::DEBUG) {
         let merkle_root = body.compute_merkle_root();
         let height = state.try_get_height(rwtxn)?;
-        let () = state.connect_block(rwtxn, header, body)?;
+        let () = state.connect_block(rwtxn, header, body, mainchain_timestamp)?;
         tracing::debug!(?height, %merkle_root, %block_hash,
                             "connected body")
     } else {
-        let () = state.connect_block(rwtxn, header, body)?;
+        let () = state.connect_block(rwtxn, header, body, mainchain_timestamp)?;
     }
     let () = state.connect_two_way_peg_data(rwtxn, two_way_peg_data)?;
     let () = archive.put_header(rwtxn, header)?;

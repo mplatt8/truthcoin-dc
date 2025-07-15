@@ -82,6 +82,7 @@ pub fn connect(
     rwtxn: &mut RwTxn,
     header: &Header,
     body: &Body,
+    mainchain_timestamp: u64,
 ) -> Result<(), Error> {
     let height = state.try_get_height(rwtxn)?.map_or(0, |height| height + 1);
     let tip_hash = state.try_get_tip(rwtxn)?;
@@ -100,6 +101,17 @@ pub fn connect(
         };
         return Err(err);
     }
+    
+    // slot minting using mainchain timestamp
+
+    if height == 0 {
+        // Genesis block: mint initial slots
+        state.slots().mint_genesis(rwtxn, mainchain_timestamp, height)?;
+    } else {
+        // Regular block: mint slots for new periods
+        state.slots().mint_up_to(rwtxn, mainchain_timestamp, height)?;
+    }
+    
     for (vout, output) in body.coinbase.iter().enumerate() {
         let outpoint = OutPoint::Coinbase {
             merkle_root: header.merkle_root,

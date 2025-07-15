@@ -24,6 +24,14 @@ cd ../truthcoin-dc && cargo build --bin truthcoin_dc_app
 
 ### 1. Create Data Directories
 
+## Clean up old temp dir
+
+```bash
+rm -rf /tmp/regtest-data
+```
+
+## New temp dir
+
 ```bash
 mkdir -p /tmp/regtest-data/{bitcoin,electrs,enforcer,truthcoin}
 ```
@@ -85,6 +93,8 @@ mkdir -p /tmp/regtest-data/{bitcoin,electrs,enforcer,truthcoin}
 
 ### 5. Start Truthcoin App
 
+## GUI
+
 ```bash
 ./target/debug/truthcoin_dc_app \
   --datadir=/tmp/regtest-data/truthcoin \
@@ -93,6 +103,25 @@ mkdir -p /tmp/regtest-data/{bitcoin,electrs,enforcer,truthcoin}
   --net-addr=127.0.0.1:18445 \
   --rpc-port=18332 \
   --zmq-addr=127.0.0.1:28333
+```
+
+## Headless for CLI
+```bash
+./target/debug/truthcoin_dc_app \
+  --headless \
+  --datadir=/tmp/regtest-data/truthcoin \
+  --network=regtest \
+  --mainchain-grpc-port=50051 \
+  --net-addr=127.0.0.1:18445 \
+  --rpc-port=18332 \
+  --zmq-addr=127.0.0.1:28333
+  ```
+### headless needs a l2 wallet created
+```bash
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 generate-mnemonic
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 set-seed-from-mneonic "twelve words separated by a space"
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-new-address
+
 ```
 
 ## Activation and Funding
@@ -139,14 +168,14 @@ grpcurl -plaintext -d '{}' 127.0.0.1:50051 cusf.mainchain.v1.ValidatorService.Ge
 
 ### 3. Create Deposit to Sidechain
 
-Get a Truthcoin address from your GUI, then:
+Get a Truthcoin address from your GUI or RPC, then:
 
 ```bash
 # Create deposit (replace ADDRESS with your Truthcoin address)
 grpcurl -plaintext -d '{
   "sidechain_id": 13,
   "address": "YOUR_TRUTHCOIN_ADDRESS",
-  "value_sats": 21000000,
+  "value_sats": 100000000,
   "fee_sats": 10000
 }' 127.0.0.1:50051 cusf.mainchain.v1.WalletService.CreateDepositTransaction
 

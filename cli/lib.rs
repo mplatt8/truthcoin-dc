@@ -218,6 +218,24 @@ pub enum Command {
         #[arg(long)]
         mainchain_fee_sats: u64,
     },
+    /// Get all available slots by quarter/period
+    SlotsListAll,
+    /// Get slots for a specific quarter/period
+    SlotsGetQuarter {
+        quarter: u32,
+    },
+    /// Get expired slots (marked for cleanup but not yet purged)
+    SlotsGetExpired,
+    /// Show slot system configuration and status
+    SlotsStatus,
+    /// Convert timestamp to quarter/period
+    SlotsConvertTimestamp {
+        timestamp: u64,
+    },
+    /// Convert block height to testing period (testing mode only)
+    SlotsConvertBlockHeight {
+        block_height: u32,
+    },
 }
 
 const DEFAULT_RPC_HOST: Host = Host::Ipv4(Ipv4Addr::LOCALHOST);
@@ -507,6 +525,75 @@ where
                 )
                 .await?;
             format!("{txid}")
+        }
+        Command::SlotsListAll => {
+            let slots = rpc_client.slots_list_all().await?;
+            let mut output = String::new();
+            output.push_str("Available Slots by Period:\n");
+            output.push_str("========================\n\n");
+            if slots.is_empty() {
+                output.push_str("No slots minted yet.\n");
+            } else {
+                for slot_info in slots {
+                    let period_name = rpc_client.quarter_to_string(slot_info.period).await?;
+                    output.push_str(&format!("{}: {} slots\n", period_name, slot_info.slots));
+                }
+            }
+            output
+        }
+        Command::SlotsGetQuarter { quarter } => {
+            let slot_count = rpc_client.slots_get_quarter(quarter).await?;
+            let period_name = rpc_client.quarter_to_string(quarter).await?;
+            format!("{}: {} slots", period_name, slot_count)
+        }
+        Command::SlotsGetExpired => {
+            let expired_slots = rpc_client.slots_get_expired().await?;
+            let mut output = String::new();
+            output.push_str("Expired Slots:\n");
+            output.push_str("=============\n\n");
+            if expired_slots.is_empty() {
+                output.push_str("No expired slots found.\n");
+            } else {
+                for slot_info in expired_slots {
+                    let period_name = rpc_client.quarter_to_string(slot_info.period).await?;
+                    output.push_str(&format!("{}: {} slots (expired at period {})\n", 
+                        period_name, slot_info.slots, slot_info.expired_at));
+                }
+            }
+            output
+        }
+        Command::SlotsStatus => {
+            let status = rpc_client.slots_status().await?;
+            let mut output = String::new();
+            output.push_str("Slot System Status:\n");
+            output.push_str("==================\n\n");
+            
+            if status.is_testing_mode {
+                output.push_str("Mode: TESTING\n");
+                output.push_str(&format!("Blocks per period: {}\n", status.blocks_per_period));
+                output.push_str("Slots are minted every N blocks instead of every quarter.\n");
+            } else {
+                output.push_str("Mode: PRODUCTION\n");
+                output.push_str("Slots are minted every calendar quarter based on Bitcoin timestamps.\n");
+            }
+            
+            output.push_str(&format!("\nCurrent period: {} ({})\n", status.current_period_name, status.current_period));
+            
+            output
+        }
+        Command::SlotsConvertTimestamp { timestamp } => {
+            let quarter = rpc_client.timestamp_to_quarter(timestamp).await?;
+            let period_name = rpc_client.quarter_to_string(quarter).await?;
+            format!("Timestamp {} converts to: {} (Period {})", timestamp, period_name, quarter)
+        }
+        Command::SlotsConvertBlockHeight { block_height } => {
+            let status = rpc_client.slots_status().await?;
+            if !status.is_testing_mode {
+                return Ok("Block height conversion is only available in testing mode.".to_string());
+            }
+            let period = rpc_client.block_height_to_testing_period(block_height).await?;
+            let period_name = rpc_client.quarter_to_string(period).await?;
+            format!("Block height {} converts to: {} (Period {})", block_height, period_name, period)
         }
     })
 }

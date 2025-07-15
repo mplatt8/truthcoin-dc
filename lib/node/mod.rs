@@ -883,4 +883,47 @@ where
     pub fn watch_state(&self) -> impl Stream<Item = ()> {
         self.state.watch()
     }
+
+    /// Get all available slots by quarter
+    pub fn get_all_slot_quarters(&self) -> Result<Vec<(u32, u64)>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.get_all_slot_quarters(&rotxn)?)
+    }
+
+    /// Get slots for a specific quarter
+    pub fn get_slots_for_quarter(&self, quarter: u32) -> Result<u64, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.get_slots_for_quarter(&rotxn, quarter)?)
+    }
+
+    /// Get expired periods (those marked for cleanup but not yet purged)
+    pub fn get_expired_periods(&self) -> Result<Vec<(u32, u32, u64)>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.get_expired_periods(&rotxn)?)
+    }
+}
+
+/// Convert timestamp to quarter index (utility function)
+pub fn timestamp_to_quarter(timestamp: u64) -> u32 {
+    crate::state::slots::Dbs::timestamp_to_quarter(timestamp)
+}
+
+/// Convert quarter index to human readable string (utility function)
+pub fn quarter_to_string(quarter: u32) -> String {
+    crate::state::slots::quarter_to_string(quarter)
+}
+
+/// Check if slots are in testing mode (block-height based)
+pub fn is_slots_testing_mode() -> bool {
+    crate::state::slots::Dbs::is_testing_mode()
+}
+
+/// Get testing mode configuration (blocks per period)
+pub fn get_slots_testing_config() -> u32 {
+    crate::state::slots::Dbs::get_testing_blocks_per_period()
+}
+
+/// Convert block height to testing period (for testing mode)
+pub fn block_height_to_testing_period(block_height: u32) -> u32 {
+    crate::state::slots::Dbs::block_height_to_testing_period(block_height)
 }

@@ -33,13 +33,43 @@ pub struct TxInfo {
     pub txin: Option<TxIn>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct SlotInfo {
+    /// Period/quarter number
+    pub period: u32,
+    /// Number of slots available in this period
+    pub slots: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct ExpiredSlotInfo {
+    /// Period/quarter number
+    pub period: u32,
+    /// Period when this expired (for cleanup tracking)
+    pub expired_at: u32,
+    /// Number of slots in this expired period
+    pub slots: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct SlotStatus {
+    /// Whether the system is in testing mode (block-based) or production mode (time-based)
+    pub is_testing_mode: bool,
+    /// In testing mode: blocks per period. In production mode: always 0
+    pub blocks_per_period: u32,
+    /// Current period/quarter number
+    pub current_period: u32,
+    /// Human-readable name for the current period
+    pub current_period_name: String,
+}
+
 #[open_api(ref_schemas[
     truthcoin_schema::BitcoinAddr, truthcoin_schema::BitcoinBlockHash,
     truthcoin_schema::BitcoinTransaction, truthcoin_schema::BitcoinOutPoint,
     truthcoin_schema::SocketAddr, Address, AssetId, Authorization,
     BitcoinOutputContent, BlockHash, Body, EncryptionPubKey,
-    FilledOutputContent, Header, MerkleRoot, OutPoint, Output, OutputContent,
-    PeerConnectionStatus, Signature, Transaction, TxData, Txid, TxIn,
+    ExpiredSlotInfo, FilledOutputContent, Header, MerkleRoot, OutPoint, Output, OutputContent,
+    PeerConnectionStatus, Signature, SlotInfo, SlotStatus, Transaction, TxData, Txid, TxIn,
     WithdrawalOutputContent, VerifyingKey,
 ])]
 #[rpc(client, server)]
@@ -351,4 +381,32 @@ pub trait Rpc {
         fee_sats: u64,
         mainchain_fee_sats: u64,
     ) -> RpcResult<Txid>;
+
+    /// Get all available slots by quarter/period
+    #[method(name = "slots_list_all")]
+    async fn slots_list_all(&self) -> RpcResult<Vec<SlotInfo>>;
+
+    /// Get slots for a specific quarter/period
+    #[method(name = "slots_get_quarter")]
+    async fn slots_get_quarter(&self, quarter: u32) -> RpcResult<u64>;
+
+    /// Get slot system status and configuration
+    #[method(name = "slots_status")]
+    async fn slots_status(&self) -> RpcResult<SlotStatus>;
+
+    /// Convert timestamp to quarter/period index
+    #[method(name = "timestamp_to_quarter")]
+    async fn timestamp_to_quarter(&self, timestamp: u64) -> RpcResult<u32>;
+
+    /// Convert quarter/period index to human readable string
+    #[method(name = "quarter_to_string")]
+    async fn quarter_to_string(&self, quarter: u32) -> RpcResult<String>;
+
+    /// Convert block height to testing period (testing mode only)
+    #[method(name = "block_height_to_testing_period")]
+    async fn block_height_to_testing_period(&self, block_height: u32) -> RpcResult<u32>;
+
+    /// Get expired periods (those marked for cleanup but not yet purged)
+    #[method(name = "slots_get_expired")]
+    async fn slots_get_expired(&self) -> RpcResult<Vec<ExpiredSlotInfo>>;
 }

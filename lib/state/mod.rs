@@ -21,6 +21,7 @@ use crate::{
 
 mod amm;
 pub mod votecoin;
+pub mod slots;
 mod block;
 pub mod error;
 mod rollback;
@@ -72,6 +73,7 @@ pub struct State {
     /// Associates ordered pairs of assets to their AMM pool states
     amm_pools: amm::PoolsDb,
     votecoin: votecoin::Dbs,
+    slots: slots::Dbs,
     utxos: DatabaseUnique<SerdeBincode<OutPoint>, SerdeBincode<FilledOutput>>,
     stxos: DatabaseUnique<SerdeBincode<OutPoint>, SerdeBincode<SpentOutput>>,
     /// Pending withdrawal bundle and block height
@@ -98,7 +100,7 @@ pub struct State {
 }
 
 impl State {
-    pub const NUM_DBS: u32 = votecoin::Dbs::NUM_DBS + 11;
+    pub const NUM_DBS: u32 = votecoin::Dbs::NUM_DBS + 15;
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn()?;
@@ -106,6 +108,7 @@ impl State {
         let height = DatabaseUnique::create(env, &mut rwtxn, "height")?;
         let amm_pools = DatabaseUnique::create(env, &mut rwtxn, "amm_pools")?;
         let votecoin = votecoin::Dbs::new(env, &mut rwtxn)?;
+        let slots = slots::Dbs::new(env, &mut rwtxn)?;
         let utxos = DatabaseUnique::create(env, &mut rwtxn, "utxos")?;
         let stxos = DatabaseUnique::create(env, &mut rwtxn, "stxos")?;
         let pending_withdrawal_bundle = DatabaseUnique::create(
@@ -137,6 +140,7 @@ impl State {
             height,
             amm_pools,
             votecoin,
+            slots,
             utxos,
             stxos,
             pending_withdrawal_bundle,
@@ -154,6 +158,10 @@ impl State {
 
     pub fn votecoin(&self) -> &votecoin::Dbs {
         &self.votecoin
+    }
+
+    pub fn slots(&self) -> &slots::Dbs {
+        &self.slots
     }
 
     pub fn deposit_blocks(
@@ -461,8 +469,9 @@ impl State {
         rwtxn: &mut RwTxn,
         header: &Header,
         body: &Body,
+        mainchain_timestamp: u64,
     ) -> Result<(), Error> {
-        block::connect(self, rwtxn, header, body)
+        block::connect(self, rwtxn, header, body, mainchain_timestamp)
     }
 
     pub fn disconnect_tip(
@@ -488,6 +497,41 @@ impl State {
         two_way_peg_data: &TwoWayPegData,
     ) -> Result<(), Error> {
         two_way_peg_data::disconnect(self, rwtxn, two_way_peg_data)
+    }
+
+    /// Get all available slots by quarter (active periods only)
+    pub fn get_all_slot_quarters(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<Vec<(u32, u64)>, Error> {
+        self.slots.get_active_periods(rotxn)
+    }
+
+    /// Get slots for a specific quarter
+    pub fn get_slots_for_quarter(
+        &self,
+        rotxn: &RoTxn,
+        quarter: u32,
+    ) -> Result<u64, Error> {
+        self.slots.total_for(rotxn, quarter)
+    }
+
+    /// Get slots around a timestamp (useful for current time)
+    pub fn get_slots_around_time(
+        &self,
+        rotxn: &RoTxn,
+        timestamp: u64,
+        range: u32,
+    ) -> Result<Vec<(u32, u64)>, Error> {
+        self.slots.get_slots_around_time(rotxn, timestamp, range)
+    }
+
+    /// Get expired periods (those marked for cleanup but not yet purged)
+    pub fn get_expired_periods(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<Vec<(u32, u32, u64)>, Error> {
+        self.slots.get_expired_periods(rotxn)
     }
 }
 

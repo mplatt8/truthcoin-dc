@@ -23,6 +23,7 @@ blake3 = { workspace = true }
 borsh = { workspace = true, features = ["derive"] }
 byteorder = "1.4.3"
 bytes = "1.9.0"
+chrono = { version = "0.4", features = ["serde"] }
 clap = { workspace = true, features = ["derive"], optional = true }
 ed25519-dalek = { version = "2.1.1", features = ["batch", "serde"] }
 fallible-iterator = "0.3.0"

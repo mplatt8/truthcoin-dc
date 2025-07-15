@@ -111,7 +111,8 @@ pub enum Error {
     AuthorizationError,
     #[error("bad coinbase output content")]
     BadCoinbaseOutputContent,
-
+    #[error("genesis slots have already been initialized")]
+    GenesisAlreadyInitialized,
 
     #[error("bundle too heavy {weight} > {max_weight}")]
     BundleTooHeavy { weight: u64, max_weight: u64 },

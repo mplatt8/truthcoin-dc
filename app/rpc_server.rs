@@ -588,6 +588,69 @@ impl RpcServer for RpcServerImpl {
         self.app.sign_and_send(tx).map_err(custom_err)?;
         Ok(txid)
     }
+
+    async fn slots_list_all(&self) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::SlotInfo>> {
+        let slots = self.app.node.get_all_slot_quarters().map_err(custom_err)?;
+        let result = slots.into_iter().map(|(period, slots)| {
+            truthcoin_dc_app_rpc_api::SlotInfo { period, slots }
+        }).collect();
+        Ok(result)
+    }
+
+    async fn slots_get_quarter(&self, quarter: u32) -> RpcResult<u64> {
+        self.app.node.get_slots_for_quarter(quarter).map_err(custom_err)
+    }
+
+    async fn slots_status(&self) -> RpcResult<truthcoin_dc_app_rpc_api::SlotStatus> {
+        let is_testing_mode = truthcoin_dc::node::is_slots_testing_mode();
+        let blocks_per_period = if is_testing_mode {
+            truthcoin_dc::node::get_slots_testing_config()
+        } else {
+            0
+        };
+        
+        // Get current period based on current time or tip height
+        let current_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let current_period = if is_testing_mode {
+            // Get current block height from node tip
+            let tip_height = self.app.node.try_get_tip_height().map_err(custom_err)?.unwrap_or(0);
+            truthcoin_dc::node::block_height_to_testing_period(tip_height)
+        } else {
+            truthcoin_dc::node::timestamp_to_quarter(current_timestamp)
+        };
+        
+        let current_period_name = truthcoin_dc::node::quarter_to_string(current_period);
+        
+        Ok(truthcoin_dc_app_rpc_api::SlotStatus {
+            is_testing_mode,
+            blocks_per_period,
+            current_period,
+            current_period_name,
+        })
+    }
+
+    async fn slots_get_expired(&self) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::ExpiredSlotInfo>> {
+        let expired = self.app.node.get_expired_periods().map_err(custom_err)?;
+        let result = expired.into_iter().map(|(period, expired_at, slots)| {
+            truthcoin_dc_app_rpc_api::ExpiredSlotInfo { period, expired_at, slots }
+        }).collect();
+        Ok(result)
+    }
+
+    async fn timestamp_to_quarter(&self, timestamp: u64) -> RpcResult<u32> {
+        Ok(truthcoin_dc::node::timestamp_to_quarter(timestamp))
+    }
+
+    async fn quarter_to_string(&self, quarter: u32) -> RpcResult<String> {
+        Ok(truthcoin_dc::node::quarter_to_string(quarter))
+    }
+
+    async fn block_height_to_testing_period(&self, block_height: u32) -> RpcResult<u32> {
+        Ok(truthcoin_dc::node::block_height_to_testing_period(block_height))
+    }
 }
 
 #[derive(Clone, Debug)]

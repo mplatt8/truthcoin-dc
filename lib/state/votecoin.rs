@@ -11,9 +11,7 @@ use crate::{
         error::Error,
         rollback::{RollBack, TxidStamped},
     },
-    types::{
-        EncryptionPubKey, FilledTransaction, Hash, Txid, VerifyingKey,
-    },
+    types::{EncryptionPubKey, FilledTransaction, Hash, Txid, VerifyingKey},
 };
 
 /// Update actions for Votecoin network data
@@ -265,10 +263,7 @@ impl VotecoinData {
      *  last value seen in the block.
      *  Returns `None` if the data did not exist at the specified block
      *  height. */
-    pub fn at_block_height(
-        &self,
-        height: u32,
-    ) -> Option<VotecoinNetworkData> {
+    pub fn at_block_height(&self, height: u32) -> Option<VotecoinNetworkData> {
         Some(VotecoinNetworkData {
             commitment: self.commitment.at_block_height(height)?.data,
             socket_addr_v4: self.socket_addr_v4.at_block_height(height)?.data,
@@ -368,11 +363,12 @@ impl Dbs {
         rotxn: &RoTxn,
         votecoin_id: &VotecoinId,
     ) -> Result<VotecoinData, Error> {
-        self.try_get_votecoin(rotxn, votecoin_id)?
-            .ok_or(Error::UnbalancedVotecoin {
+        self.try_get_votecoin(rotxn, votecoin_id)?.ok_or(
+            Error::UnbalancedVotecoin {
                 inputs: 0,
                 outputs: 0,
-            })
+            },
+        )
     }
 
     /// Resolve Votecoin network data at the specified block height, if it exists.
@@ -421,23 +417,26 @@ impl Dbs {
             })?;
 
         // Use the Votecoin amount to create a deterministic ID for network data
-        let votecoin_id = VotecoinId(crate::types::hashes::hash(&votecoin_amount));
-        
+        let votecoin_id =
+            VotecoinId(crate::types::hashes::hash(&votecoin_amount));
+
         let mut votecoin_data = self
             .votecoin
             .try_get(rwtxn, &votecoin_id)?
-            .unwrap_or_else(|| VotecoinData::init(
-                VotecoinNetworkData {
-                    commitment: None,
-                    socket_addr_v4: None,
-                    socket_addr_v6: None,
-                    encryption_pubkey: None,
-                    signing_pubkey: None,
-                },
-                filled_tx.txid(),
-                height,
-            ));
-        
+            .unwrap_or_else(|| {
+                VotecoinData::init(
+                    VotecoinNetworkData {
+                        commitment: None,
+                        socket_addr_v4: None,
+                        socket_addr_v6: None,
+                        encryption_pubkey: None,
+                        signing_pubkey: None,
+                    },
+                    filled_tx.txid(),
+                    height,
+                )
+            });
+
         votecoin_data.apply_updates(votecoin_updates, filled_tx.txid(), height);
         self.votecoin.put(rwtxn, &votecoin_id, &votecoin_data)?;
         Ok(())
@@ -462,8 +461,9 @@ impl Dbs {
             })?;
 
         // Use the Votecoin amount to create a deterministic ID for network data
-        let votecoin_id = VotecoinId(crate::types::hashes::hash(&votecoin_amount));
-        
+        let votecoin_id =
+            VotecoinId(crate::types::hashes::hash(&votecoin_amount));
+
         let mut votecoin_data = self
             .votecoin
             .try_get(rwtxn, &votecoin_id)?
@@ -471,7 +471,7 @@ impl Dbs {
                 inputs: 0,
                 outputs: 0,
             })?;
-        
+
         votecoin_data.revert_updates(
             votecoin_updates,
             filled_tx.txid(),

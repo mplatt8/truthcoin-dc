@@ -12,13 +12,9 @@ use utoipa::{PartialSchema, ToSchema};
 use crate::{
     authorization::Authorization,
     types::{
-        AmountOverflowError, GetAddress,
-        GetBitcoinValue,
+        AmountOverflowError, GetAddress, GetBitcoinValue,
         address::Address,
-        hashes::{
-            self, AssetId, M6id, MerkleRoot,
-            Txid,
-        },
+        hashes::{self, AssetId, M6id, MerkleRoot, Txid},
         serde_hexstr_human_readable,
     },
 };
@@ -110,8 +106,6 @@ pub type TxInputs = Vec<OutPoint>;
 
 pub type TxOutputs = Vec<Output>;
 
-
-
 #[allow(clippy::enum_variant_names)]
 #[derive(BorshSerialize, Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[schema(as = TxData)]
@@ -143,7 +137,21 @@ pub enum TransactionData {
         /// Pair asset to swap for
         pair_asset: AssetId,
     },
-
+    /// Claim a decision slot
+    ClaimDecisionSlot {
+        /// 3 byte slot ID
+        slot_id_bytes: [u8; 3],
+        /// Whether it is a Standard slot or not
+        is_standard: bool,
+        /// Scaled (true) or Binary (false) decision
+        is_scaled: bool,
+        /// Human readable question for voters (<1000 bytes)
+        question: String,
+        /// Min value (only for scaled decisions)
+        min: Option<u16>,
+        /// Max value (only for scaled decisions)
+        max: Option<u16>,
+    },
 }
 
 pub type TxData = TransactionData;
@@ -162,6 +170,11 @@ impl TxData {
     /// `true` if the tx data corresponds to an AMM swap
     pub fn is_amm_swap(&self) -> bool {
         matches!(self, Self::AmmSwap { .. })
+    }
+
+    /// `true` if the tx data corresponds to a decision slot claim
+    pub fn is_claim_decision_slot(&self) -> bool {
+        matches!(self, Self::ClaimDecisionSlot { .. })
     }
 }
 
@@ -202,7 +215,22 @@ pub struct AmmSwap {
     pub amount_receive: u64,
 }
 
-
+/// Struct describing a decision slot claim
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimDecisionSlot {
+    /// 3 byte slot ID
+    pub slot_id_bytes: [u8; 3],
+    /// Whether it is a Standard slot or not
+    pub is_standard: bool,
+    /// Scaled (true) or Binary (false) decision
+    pub is_scaled: bool,
+    /// Human readable question for voters (<1000 bytes)
+    pub question: String,
+    /// Min value (only for scaled decisions)
+    pub min: Option<u16>,
+    /// Max value (only for scaled decisions)
+    pub max: Option<u16>,
+}
 
 #[derive(
     BorshSerialize, Clone, Debug, Default, Deserialize, Serialize, ToSchema,
@@ -268,7 +296,13 @@ impl Transaction {
         }
     }
 
-
+    /// `true` if the tx data corresponds to a decision slot claim
+    pub fn is_claim_decision_slot(&self) -> bool {
+        match &self.data {
+            Some(tx_data) => tx_data.is_claim_decision_slot(),
+            None => false,
+        }
+    }
 
     /// `true` if the tx data corresponds to a regular tx
     pub fn is_regular(&self) -> bool {
@@ -317,7 +351,10 @@ impl FilledTransaction {
         self.transaction.is_amm_swap()
     }
 
-
+    /// `true` if the tx data corresponds to a decision slot claim
+    pub fn is_claim_decision_slot(&self) -> bool {
+        self.transaction.is_claim_decision_slot()
+    }
 
     /// `true` if the tx data corresponds to a regular tx
     pub fn is_regular(&self) -> bool {
@@ -329,7 +366,7 @@ impl FilledTransaction {
         &self.transaction.outputs
     }
 
-     /** If the tx is an AMM burn, returns the LP token's
+    /** If the tx is an AMM burn, returns the LP token's
      *  corresponding [`AmmBurn`]. */
     pub fn amm_burn(&self) -> Option<AmmBurn> {
         match self.transaction.data {
@@ -398,7 +435,27 @@ impl FilledTransaction {
         }
     }
 
-
+    /// If the tx is a decision slot claim, returns the corresponding [`ClaimDecisionSlot`].
+    pub fn claim_decision_slot(&self) -> Option<ClaimDecisionSlot> {
+        match &self.transaction.data {
+            Some(TransactionData::ClaimDecisionSlot {
+                slot_id_bytes,
+                is_standard,
+                is_scaled,
+                question,
+                min,
+                max,
+            }) => Some(ClaimDecisionSlot {
+                slot_id_bytes: *slot_id_bytes,
+                is_standard: *is_standard,
+                is_scaled: *is_scaled,
+                question: question.clone(),
+                min: *min,
+                max: *max,
+            }),
+            _ => None,
+        }
+    }
 
     /// Accessor for txid
     pub fn txid(&self) -> Txid {
@@ -465,23 +522,23 @@ impl FilledTransaction {
         })
     }
 
-         /** Returns the total amount of Votecoin spent in this transaction.
-      *  Since Votecoin has a fixed supply with no subtypes, this returns
-      *  a simple total amount. */
-     pub fn unique_spent_votecoin(&self) -> Option<u32> {
-         let mut total_votecoin: u64 = 0;
-         for (_, output) in self.spent_votecoin() {
-             if let Some(amount) = output.votecoin() {
-                 total_votecoin += amount as u64;
-             }
-         }
-         if total_votecoin > 0 {
-             // Convert back to u32, should not overflow since Votecoin uses u32
-             total_votecoin.try_into().ok()
-         } else {
-             None
-         }
-     }
+    /** Returns the total amount of Votecoin spent in this transaction.
+     *  Since Votecoin has a fixed supply with no subtypes, this returns
+     *  a simple total amount. */
+    pub fn unique_spent_votecoin(&self) -> Option<u32> {
+        let mut total_votecoin: u64 = 0;
+        for (_, output) in self.spent_votecoin() {
+            if let Some(amount) = output.votecoin() {
+                total_votecoin += amount as u64;
+            }
+        }
+        if total_votecoin > 0 {
+            // Convert back to u32, should not overflow since Votecoin uses u32
+            total_votecoin.try_into().ok()
+        } else {
+            None
+        }
+    }
 
     /** Return a vector of pairs consisting of an [`AssetId`] and the combined
      *  input value for that asset.
@@ -503,8 +560,6 @@ impl FilledTransaction {
             .map(|(asset, _)| (asset, combined_value[&asset]))
             .collect()
     }
-
-
 
     /// Return an iterator over spent AMM LP tokens
     pub fn spent_lp_tokens(
@@ -583,7 +638,8 @@ impl FilledTransaction {
         self.unique_spent_assets()
             .into_iter()
             .map(move |(asset, total_value)| {
-                let total_value = if let Some((burn_asset, burn_amount)) = amm_burn0
+                let total_value = if let Some((burn_asset, burn_amount)) =
+                    amm_burn0
                     && burn_asset == asset
                 {
                     amm_burn0 = None;
@@ -615,7 +671,6 @@ impl FilledTransaction {
                 {
                     amm_swap_receive = None;
                     total_value.checked_add(swap_receive_amount)
-
                 } else {
                     Some(total_value)
                 };
@@ -644,8 +699,6 @@ impl FilledTransaction {
                 (receive_asset, Some(receive_amount))
             }))
     }
-
-
 
     /** Returns the max value of Bitcoin that can occur in the outputs.
      *  The total output value can possibly over/underflow in a transaction,
@@ -719,12 +772,6 @@ impl FilledTransaction {
                 )
             }))
     }
-
-
-
-
-
-
 
     /// compute the filled outputs.
     /// returns None if the outputs cannot be filled because the tx is invalid

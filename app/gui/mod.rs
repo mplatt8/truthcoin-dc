@@ -1,13 +1,12 @@
 use std::task::Poll;
 
 use eframe::egui::{self, Color32, RichText};
-use truthcoin_dc::{util::Watchable, wallet::Wallet};
 use strum::{EnumIter, IntoEnumIterator};
+use truthcoin_dc::{util::Watchable, wallet::Wallet};
 
 use crate::{app::App, line_buffer::LineBuffer, util::PromiseStream};
 
 mod activity;
-mod votecoin;
 mod coins;
 mod console_logs;
 mod fonts;
@@ -15,9 +14,9 @@ mod miner;
 mod parent_chain;
 mod seed;
 mod util;
+mod votecoin;
 
 use activity::Activity;
-use votecoin::Votecoin;
 use coins::Coins;
 use console_logs::ConsoleLogs;
 use fonts::FONT_DEFINITIONS;
@@ -25,6 +24,7 @@ use miner::Miner;
 use parent_chain::ParentChain;
 use seed::SetSeed;
 use util::{BITCOIN_LOGO_FA, BITCOIN_ORANGE, UiExt, show_btc_amount};
+use votecoin::Votecoin;
 
 /// Bottom panel, if initialized
 struct BottomPanelInitialized {

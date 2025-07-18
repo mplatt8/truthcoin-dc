@@ -8,8 +8,9 @@ use crate::{
     state::{Error, State, amm, error},
     types::{
         AmountOverflowError, Authorization, Body, FilledOutput,
-        FilledOutputContent, GetAddress as _, GetBitcoinValue as _, Header,
-        InPoint, OutPoint, OutputContent, SpentOutput, TxData, Verify as _,
+        FilledOutputContent, FilledTransaction, GetAddress as _,
+        GetBitcoinValue as _, Header, InPoint, OutPoint, OutputContent,
+        SpentOutput, TxData, Verify as _,
     },
 };
 
@@ -36,6 +37,11 @@ pub fn validate(
         };
         return Err(err);
     }
+
+    // Calculate the height this block will have after being applied
+    let future_height =
+        state.try_get_height(rotxn)?.map_or(0, |height| height + 1);
+
     let mut coinbase_value = bitcoin::Amount::ZERO;
     for output in &body.coinbase {
         coinbase_value = coinbase_value
@@ -56,8 +62,13 @@ pub fn validate(
             }
             spent_utxos.insert(*input);
         }
+        // Use the future height for validation
         total_fees = total_fees
-            .checked_add(state.validate_filled_transaction(rotxn, filled_tx)?)
+            .checked_add(state.validate_filled_transaction(
+                rotxn,
+                filled_tx,
+                Some(future_height),
+            )?)
             .ok_or(AmountOverflowError)?;
     }
     if coinbase_value > total_fees {
@@ -101,17 +112,19 @@ pub fn connect(
         };
         return Err(err);
     }
-    
+
     // slot minting using mainchain timestamp
 
     if height == 0 {
-        // Genesis block: mint initial slots
-        state.slots().mint_genesis(rwtxn, mainchain_timestamp, height)?;
+        state
+            .slots()
+            .mint_genesis(rwtxn, mainchain_timestamp, height)?;
     } else {
-        // Regular block: mint slots for new periods
-        state.slots().mint_up_to(rwtxn, mainchain_timestamp, height)?;
+        state
+            .slots()
+            .mint_up_to(rwtxn, mainchain_timestamp, height)?;
     }
-    
+
     for (vout, output) in body.coinbase.iter().enumerate() {
         let outpoint = OutPoint::Coinbase {
             merkle_root: header.merkle_root,
@@ -183,11 +196,34 @@ pub fn connect(
             Some(TxData::AmmSwap { .. }) => {
                 let () = amm::apply_swap(&state.amm_pools, rwtxn, &filled_tx)?;
             }
+            Some(TxData::ClaimDecisionSlot { .. }) => {
+                let () = apply_claim_decision_slot(
+                    state,
+                    rwtxn,
+                    &filled_tx,
+                    mainchain_timestamp,
+                    height,
+                )?;
+            }
         }
     }
     let block_hash = header.hash();
     state.tip.put(rwtxn, &(), &block_hash)?;
     state.height.put(rwtxn, &(), &height)?;
+    state
+        .mainchain_timestamp
+        .put(rwtxn, &(), &mainchain_timestamp)?;
+
+    // Purge old slots to keep the database clean
+    let purged_count = state.purge_old_slots(rwtxn)?;
+    if purged_count > 0 {
+        tracing::debug!(
+            "Purged {} old slots at height {}",
+            purged_count,
+            height
+        );
+    }
+
     Ok(())
 }
 
@@ -231,6 +267,9 @@ pub fn disconnect_tip(
             }
             Some(TxData::AmmSwap { .. }) => {
                 let () = amm::revert_swap(&state.amm_pools, rwtxn, &filled_tx)?;
+            }
+            Some(TxData::ClaimDecisionSlot { .. }) => {
+                let () = revert_claim_decision_slot(state, rwtxn, &filled_tx)?;
             }
         }
         // delete UTXOs, last-to-first
@@ -285,5 +324,72 @@ pub fn disconnect_tip(
             state.height.put(rwtxn, &(), &(height - 1))?;
         }
     }
+    Ok(())
+}
+
+fn apply_claim_decision_slot(
+    state: &State,
+    rwtxn: &mut RwTxn,
+    filled_tx: &FilledTransaction,
+    mainchain_timestamp: u64,
+    block_height: u32,
+) -> Result<(), Error> {
+    use crate::state::slots::{Decision, SlotId};
+
+    let claim = filled_tx.claim_decision_slot().ok_or_else(|| {
+        Error::InvalidSlotId {
+            reason: "Not a decision slot claim transaction".to_string(),
+        }
+    })?;
+
+    let slot_id = SlotId::from_bytes(claim.slot_id_bytes)?;
+
+    let market_maker_address_bytes = filled_tx
+        .spent_utxos
+        .first()
+        .ok_or_else(|| Error::InvalidSlotId {
+            reason: "No spent UTXOs found".to_string(),
+        })?
+        .address
+        .0;
+
+    let decision = Decision::new(
+        market_maker_address_bytes,
+        claim.slot_id_bytes,
+        claim.is_standard,
+        claim.is_scaled,
+        claim.question.clone(),
+        claim.min,
+        claim.max,
+    )?;
+
+    state.slots().claim_slot(
+        rwtxn,
+        slot_id,
+        decision,
+        mainchain_timestamp,
+        Some(block_height),
+    )?;
+
+    Ok(())
+}
+
+fn revert_claim_decision_slot(
+    state: &State,
+    rwtxn: &mut RwTxn,
+    filled_tx: &FilledTransaction,
+) -> Result<(), Error> {
+    use crate::state::slots::SlotId;
+
+    let claim = filled_tx.claim_decision_slot().ok_or_else(|| {
+        Error::InvalidSlotId {
+            reason: "Not a decision slot claim transaction".to_string(),
+        }
+    })?;
+
+    let slot_id = SlotId::from_bytes(claim.slot_id_bytes)?;
+
+    state.slots().revert_claim_slot(rwtxn, slot_id)?;
+
     Ok(())
 }

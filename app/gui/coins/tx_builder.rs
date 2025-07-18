@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use eframe::egui;
 
 use truthcoin_dc::types::{
-    AssetId, AssetOutputContent, BitcoinOutputContent,
-    GetBitcoinValue, Transaction, WithdrawalOutputContent,
+    AssetId, AssetOutputContent, BitcoinOutputContent, GetBitcoinValue,
+    Transaction, WithdrawalOutputContent,
 };
 
 use super::{
@@ -89,7 +89,9 @@ impl TxBuilder {
                 let mut remove = None;
                 for (vout, outpoint) in self.base_tx.inputs.iter().enumerate() {
                     let output = &utxos_read[outpoint];
-                    if output.get_bitcoin_value() != bitcoin::Amount::ZERO || output.votecoin().is_some() {
+                    if output.get_bitcoin_value() != bitcoin::Amount::ZERO
+                        || output.votecoin().is_some()
+                    {
                         show_utxo(ui, outpoint, output, true);
                         if ui.button("remove").clicked() {
                             remove = Some(vout);

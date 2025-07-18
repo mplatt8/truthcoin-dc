@@ -18,15 +18,13 @@ use crate::{
     archive::{self, Archive},
     mempool::{self, MemPool},
     net::{self, Net, Peer},
-    state::{
-        self, AmmPair, AmmPoolState, State,
-    },
+    state::{self, AmmPair, AmmPoolState, State},
     types::{
         Address, AmountOverflowError, AmountUnderflowError, AssetId,
-        Authorized, AuthorizedTransaction, Block,
-        BlockHash, BmmResult, Body, FilledOutput,
-        FilledTransaction, GetBitcoinValue, Header, InPoint, Network, OutPoint,
-        Output, SpentOutput, Tip, Transaction, TxIn, Txid, WithdrawalBundle,
+        Authorized, AuthorizedTransaction, Block, BlockHash, BmmResult, Body,
+        FilledOutput, FilledTransaction, GetBitcoinValue, Header, InPoint,
+        Network, OutPoint, Output, SpentOutput, Tip, Transaction, TxIn, Txid,
+        WithdrawalBundle,
         proto::{self, mainchain},
     },
     util::Watchable,
@@ -294,7 +292,13 @@ where
     /// List all Votecoin network data
     pub fn votecoin_network_data(
         &self,
-    ) -> Result<Vec<(crate::state::votecoin::VotecoinId, crate::state::votecoin::VotecoinNetworkData)>, Error> {
+    ) -> Result<
+        Vec<(
+            crate::state::votecoin::VotecoinId,
+            crate::state::votecoin::VotecoinNetworkData,
+        )>,
+        Error,
+    > {
         let rotxn = self.env.read_txn()?;
         let res = self
             .state
@@ -309,8 +313,6 @@ where
             .collect()?;
         Ok(res)
     }
-
-
 
     pub fn try_get_height(
         &self,
@@ -360,17 +362,20 @@ where
             .votecoin()
             .try_get_votecoin_data_at_block_height(&rotxn, votecoin_id, height)
             .map_err(state::Error::from)?
-            .ok_or_else(|| Error::State(Box::new(state::Error::UnbalancedVotecoin {
-                inputs: 0,
-                outputs: 0,
-            })))?)
+            .ok_or_else(|| {
+                Error::State(Box::new(state::Error::UnbalancedVotecoin {
+                    inputs: 0,
+                    outputs: 0,
+                }))
+            })?)
     }
 
     /// resolve current Votecoin network data, if it exists
     pub fn try_get_current_votecoin_data(
         &self,
         votecoin_id: &crate::state::votecoin::VotecoinId,
-    ) -> Result<Option<crate::state::votecoin::VotecoinNetworkData>, Error> {
+    ) -> Result<Option<crate::state::votecoin::VotecoinNetworkData>, Error>
+    {
         let rotxn = self.env.read_txn()?;
         Ok(self
             .state
@@ -390,10 +395,12 @@ where
             .votecoin()
             .try_get_current_votecoin_data(&rotxn, votecoin_id)
             .map_err(state::Error::from)?
-            .ok_or_else(|| Error::State(Box::new(state::Error::UnbalancedVotecoin {
-                inputs: 0,
-                outputs: 0,
-            })))?)
+            .ok_or_else(|| {
+                Error::State(Box::new(state::Error::UnbalancedVotecoin {
+                    inputs: 0,
+                    outputs: 0,
+                }))
+            })?)
     }
 
     pub fn submit_transaction(
@@ -896,34 +903,128 @@ where
         Ok(self.state.get_slots_for_quarter(&rotxn, quarter)?)
     }
 
-    /// Get expired periods (those marked for cleanup but not yet purged)
-    pub fn get_expired_periods(&self) -> Result<Vec<(u32, u32, u64)>, Error> {
+    /// Get a specific slot by its ID
+    pub fn get_slot(
+        &self,
+        slot_id: crate::state::slots::SlotId,
+    ) -> Result<Option<crate::state::slots::Slot>, Error> {
         let rotxn = self.env.read_txn()?;
-        Ok(self.state.get_expired_periods(&rotxn)?)
+        Ok(self.state.slots().get_slot(&rotxn, slot_id)?)
+    }
+
+    /// Get all available (unclaimed) slot IDs in a specific period
+    pub fn get_available_slots_in_period(
+        &self,
+        period_index: u32,
+    ) -> Result<Vec<crate::state::slots::SlotId>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self
+            .state
+            .get_available_slots_in_period(&rotxn, period_index)?)
+    }
+
+    /// Get all claimed slots in a specific period
+    pub fn get_claimed_slots_in_period(
+        &self,
+        period_index: u32,
+    ) -> Result<Vec<crate::state::slots::Slot>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self
+            .state
+            .slots()
+            .get_claimed_slots_in_period(&rotxn, period_index)?)
+    }
+
+    /// Check if a slot is in voting period
+    pub fn is_slot_in_voting(
+        &self,
+        slot_id: crate::state::slots::SlotId,
+    ) -> Result<bool, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.is_slot_in_voting(&rotxn, slot_id)?)
+    }
+
+    /// Manually purge old slots (returns count of purged slots)
+    pub fn purge_old_slots(&self) -> Result<usize, Error> {
+        let mut rwtxn = self.env.write_txn()?;
+        let count = self.state.purge_old_slots(&mut rwtxn)?;
+        rwtxn.commit().map_err(RwTxnError::from)?;
+        Ok(count)
+    }
+
+    /// Get periods that are currently in voting phase
+    pub fn get_voting_periods(&self) -> Result<Vec<(u32, u64, u64)>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.get_voting_periods(&rotxn)?)
+    }
+
+    /// Get a summary of period states (active and voting periods only)
+    /// Returns (active_periods, voting_periods)
+    pub fn get_period_summary(
+        &self,
+    ) -> Result<(Vec<(u32, u64)>, Vec<(u32, u64)>), Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.get_period_summary(&rotxn)?)
+    }
+
+    /// Get the count of claimed slots in a specific period
+    pub fn get_claimed_slot_count_in_period(
+        &self,
+        period_index: u32,
+    ) -> Result<u64, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self
+            .state
+            .get_claimed_slot_count_in_period(&rotxn, period_index)?)
+    }
+
+    /// Check if the slots system is in testing mode
+    pub fn is_slots_testing_mode(&self) -> bool {
+        self.state.slots().is_testing_mode()
+    }
+
+    /// Get testing mode configuration (blocks per period)
+    pub fn get_slots_testing_config(&self) -> u32 {
+        self.state.slots().get_testing_blocks_per_period()
+    }
+
+    /// Convert timestamp to quarter index
+    pub fn timestamp_to_quarter(
+        timestamp: u64,
+    ) -> Result<u32, crate::state::Error> {
+        crate::state::slots::Dbs::timestamp_to_quarter(timestamp)
+    }
+
+    /// Convert block height to testing period
+    pub fn block_height_to_testing_period(&self, block_height: u32) -> u32 {
+        self.state
+            .slots()
+            .block_height_to_testing_period(block_height)
+    }
+
+    /// Convert quarter index to human readable string
+    pub fn quarter_to_string(&self, quarter: u32) -> String {
+        self.state.slots().quarter_to_string(quarter)
     }
 }
 
 /// Convert timestamp to quarter index (utility function)
-pub fn timestamp_to_quarter(timestamp: u64) -> u32 {
+pub fn timestamp_to_quarter(
+    timestamp: u64,
+) -> Result<u32, crate::state::Error> {
     crate::state::slots::Dbs::timestamp_to_quarter(timestamp)
 }
 
 /// Convert quarter index to human readable string (utility function)
+/// Note: Uses production config for standalone utility calls
 pub fn quarter_to_string(quarter: u32) -> String {
-    crate::state::slots::quarter_to_string(quarter)
-}
-
-/// Check if slots are in testing mode (block-height based)
-pub fn is_slots_testing_mode() -> bool {
-    crate::state::slots::Dbs::is_testing_mode()
-}
-
-/// Get testing mode configuration (blocks per period)
-pub fn get_slots_testing_config() -> u32 {
-    crate::state::slots::Dbs::get_testing_blocks_per_period()
+    let config = crate::state::slots::SlotConfig::production();
+    crate::state::slots::quarter_to_string(quarter, &config)
 }
 
 /// Convert block height to testing period (for testing mode)
+/// Note: Uses testing config with 1 block per period
 pub fn block_height_to_testing_period(block_height: u32) -> u32 {
-    crate::state::slots::Dbs::block_height_to_testing_period(block_height)
+    let config = crate::state::slots::SlotConfig::testing(1);
+    block_height / config.testing_blocks_per_period
 }

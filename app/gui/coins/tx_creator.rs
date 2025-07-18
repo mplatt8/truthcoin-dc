@@ -1,15 +1,10 @@
-use std::{
-    fmt::Display,
-    str::FromStr,
-};
+use std::str::FromStr;
 
 use eframe::egui::{self, InnerResponse, Response, TextBuffer};
 
 use truthcoin_dc::{
     state::AmmPair,
-    types::{
-        AssetId, Transaction, Txid,
-    },
+    types::{AssetId, Transaction, Txid},
 };
 
 use crate::{

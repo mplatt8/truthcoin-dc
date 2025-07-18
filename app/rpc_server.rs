@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cmp::Ordering, net::SocketAddr};
+use std::{cmp::Ordering, net::SocketAddr};
 
 use bitcoin::Amount;
 use fraction::Fraction;
@@ -8,25 +8,24 @@ use jsonrpsee::{
     types::ErrorObject,
 };
 
-use truthcoin_dc::{
-    authorization::{self, Dst, Signature},
-    net::Peer,
-    state::{self, AmmPair, AmmPoolState},
-    types::{
-        Address, AssetId, Authorization, Block,
-        BlockHash, EncryptionPubKey,
-        FilledOutputContent, PointedOutput, Transaction, Txid, VerifyingKey,
-        WithdrawalBundle, keys::Ecies,
-    },
-    wallet::Balance,
-};
-use truthcoin_dc_app_rpc_api::{RpcServer, TxInfo};
 use tower_http::{
     request_id::{
         MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
     },
     trace::{DefaultOnFailure, DefaultOnResponse, TraceLayer},
 };
+use truthcoin_dc::{
+    authorization::{self, Dst, Signature},
+    net::Peer,
+    state::{self, AmmPair, AmmPoolState},
+    types::{
+        Address, AssetId, Authorization, Block, BlockHash, EncryptionPubKey,
+        FilledOutputContent, PointedOutput, Transaction, Txid, VerifyingKey,
+        WithdrawalBundle, keys::Ecies,
+    },
+    wallet::Balance,
+};
+use truthcoin_dc_app_rpc_api::{AvailableSlotId, RpcServer, TxInfo};
 
 use crate::app::App;
 
@@ -589,26 +588,38 @@ impl RpcServer for RpcServerImpl {
         Ok(txid)
     }
 
-    async fn slots_list_all(&self) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::SlotInfo>> {
-        let slots = self.app.node.get_all_slot_quarters().map_err(custom_err)?;
-        let result = slots.into_iter().map(|(period, slots)| {
-            truthcoin_dc_app_rpc_api::SlotInfo { period, slots }
-        }).collect();
+    async fn slots_list_all(
+        &self,
+    ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::SlotInfo>> {
+        let slots =
+            self.app.node.get_all_slot_quarters().map_err(custom_err)?;
+        let result = slots
+            .into_iter()
+            .map(|(period, slots)| truthcoin_dc_app_rpc_api::SlotInfo {
+                period,
+                slots,
+            })
+            .collect();
         Ok(result)
     }
 
     async fn slots_get_quarter(&self, quarter: u32) -> RpcResult<u64> {
-        self.app.node.get_slots_for_quarter(quarter).map_err(custom_err)
+        self.app
+            .node
+            .get_slots_for_quarter(quarter)
+            .map_err(custom_err)
     }
 
-    async fn slots_status(&self) -> RpcResult<truthcoin_dc_app_rpc_api::SlotStatus> {
-        let is_testing_mode = truthcoin_dc::node::is_slots_testing_mode();
+    async fn slots_status(
+        &self,
+    ) -> RpcResult<truthcoin_dc_app_rpc_api::SlotStatus> {
+        let is_testing_mode = self.app.node.is_slots_testing_mode();
         let blocks_per_period = if is_testing_mode {
-            truthcoin_dc::node::get_slots_testing_config()
+            self.app.node.get_slots_testing_config()
         } else {
             0
         };
-        
+
         // Get current period based on current time or tip height
         let current_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -616,14 +627,21 @@ impl RpcServer for RpcServerImpl {
             .as_secs();
         let current_period = if is_testing_mode {
             // Get current block height from node tip
-            let tip_height = self.app.node.try_get_tip_height().map_err(custom_err)?.unwrap_or(0);
-            truthcoin_dc::node::block_height_to_testing_period(tip_height)
+            let tip_height = self
+                .app
+                .node
+                .try_get_tip_height()
+                .map_err(custom_err)?
+                .unwrap_or(0);
+            self.app.node.block_height_to_testing_period(tip_height)
         } else {
             truthcoin_dc::node::timestamp_to_quarter(current_timestamp)
+                .map_err(custom_err)?
         };
-        
-        let current_period_name = truthcoin_dc::node::quarter_to_string(current_period);
-        
+
+        let current_period_name =
+            self.app.node.quarter_to_string(current_period);
+
         Ok(truthcoin_dc_app_rpc_api::SlotStatus {
             is_testing_mode,
             blocks_per_period,
@@ -632,24 +650,231 @@ impl RpcServer for RpcServerImpl {
         })
     }
 
-    async fn slots_get_expired(&self) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::ExpiredSlotInfo>> {
-        let expired = self.app.node.get_expired_periods().map_err(custom_err)?;
-        let result = expired.into_iter().map(|(period, expired_at, slots)| {
-            truthcoin_dc_app_rpc_api::ExpiredSlotInfo { period, expired_at, slots }
-        }).collect();
-        Ok(result)
-    }
-
     async fn timestamp_to_quarter(&self, timestamp: u64) -> RpcResult<u32> {
-        Ok(truthcoin_dc::node::timestamp_to_quarter(timestamp))
+        Ok(truthcoin_dc::node::timestamp_to_quarter(timestamp)
+            .map_err(custom_err)?)
     }
 
     async fn quarter_to_string(&self, quarter: u32) -> RpcResult<String> {
-        Ok(truthcoin_dc::node::quarter_to_string(quarter))
+        Ok(self.app.node.quarter_to_string(quarter))
     }
 
-    async fn block_height_to_testing_period(&self, block_height: u32) -> RpcResult<u32> {
-        Ok(truthcoin_dc::node::block_height_to_testing_period(block_height))
+    async fn block_height_to_testing_period(
+        &self,
+        block_height: u32,
+    ) -> RpcResult<u32> {
+        Ok(self.app.node.block_height_to_testing_period(block_height))
+    }
+
+    async fn claim_decision_slot(
+        &self,
+        period_index: u32,
+        slot_index: u32,
+        is_standard: bool,
+        is_scaled: bool,
+        question: String,
+        min: Option<u16>,
+        max: Option<u16>,
+        fee_sats: u64,
+    ) -> RpcResult<Txid> {
+        use truthcoin_dc::state::slots::SlotId;
+
+        // Validate question length
+        if question.as_bytes().len() >= 1000 {
+            return Err(custom_err_msg(
+                "Question must be less than 1000 bytes",
+            ));
+        }
+
+        // Create SlotId and get bytes
+        let slot_id =
+            SlotId::new(period_index, slot_index).map_err(custom_err)?;
+        let slot_id_bytes = slot_id.as_bytes();
+
+        // Create transaction
+        let mut tx = Transaction::default();
+        let fee = Amount::from_sat(fee_sats);
+
+        // Use wallet to add decision slot claim to transaction
+        self.app
+            .wallet
+            .claim_decision_slot(
+                &mut tx,
+                slot_id_bytes,
+                is_standard,
+                is_scaled,
+                question,
+                min,
+                max,
+                fee,
+            )
+            .map_err(custom_err)?;
+
+        let txid = tx.txid();
+
+        // Sign and send the transaction
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+
+        Ok(txid)
+    }
+
+    async fn get_available_slots_in_period(
+        &self,
+        period_index: u32,
+    ) -> RpcResult<Vec<AvailableSlotId>> {
+        let available_slots = self
+            .app
+            .node
+            .get_available_slots_in_period(period_index)
+            .map_err(custom_err)?;
+
+        let result = available_slots
+            .into_iter()
+            .map(|slot_id| AvailableSlotId {
+                period_index: slot_id.period_index(),
+                slot_index: slot_id.slot_index(),
+                slot_id_hex: slot_id.to_hex(),
+            })
+            .collect();
+
+        Ok(result)
+    }
+
+    async fn get_slot_by_id(
+        &self,
+        slot_id_hex: String,
+    ) -> RpcResult<Option<truthcoin_dc_app_rpc_api::SlotDetails>> {
+        use truthcoin_dc::state::slots::SlotId;
+
+        // Parse slot ID from hex
+        let slot_id_bytes = hex::decode(&slot_id_hex)
+            .map_err(|_| custom_err_msg("Invalid slot ID hex format"))?;
+
+        if slot_id_bytes.len() != 3 {
+            return Err(custom_err_msg("Slot ID must be exactly 3 bytes"));
+        }
+
+        let slot_id_array: [u8; 3] = slot_id_bytes.try_into().unwrap();
+        let slot_id = SlotId::from_bytes(slot_id_array).map_err(custom_err)?;
+
+        // Get the slot from the node
+        let slot_opt = self.app.node.get_slot(slot_id).map_err(custom_err)?;
+
+        let result = slot_opt.map(|slot| {
+            let content = match slot.decision {
+                None => truthcoin_dc_app_rpc_api::SlotContentInfo::Empty,
+                Some(decision) => {
+                    truthcoin_dc_app_rpc_api::SlotContentInfo::Decision(
+                        truthcoin_dc_app_rpc_api::DecisionInfo {
+                            id: hex::encode(decision.id),
+                            market_maker_pubkey_hash: hex::encode(
+                                decision.market_maker_pubkey_hash,
+                            ),
+                            is_standard: decision.is_standard,
+                            is_scaled: decision.is_scaled,
+                            question: decision.question,
+                            min: decision.min,
+                            max: decision.max,
+                        },
+                    )
+                }
+            };
+
+            truthcoin_dc_app_rpc_api::SlotDetails {
+                slot_id_hex: slot_id.to_hex(),
+                period_index: slot_id.period_index(),
+                slot_index: slot_id.slot_index(),
+                content,
+            }
+        });
+
+        Ok(result)
+    }
+
+    async fn get_claimed_slots_in_period(
+        &self,
+        period_index: u32,
+    ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::ClaimedSlotSummary>> {
+        // Use the efficient database scan method
+        let claimed_slots_data = self
+            .app
+            .node
+            .get_claimed_slots_in_period(period_index)
+            .map_err(custom_err)?;
+
+        let claimed_slots = claimed_slots_data
+            .into_iter()
+            .filter_map(|slot| {
+                // This should always be a Decision since we filtered in get_claimed_slots_in_period
+                if let Some(decision) = slot.decision {
+                    let question_preview = if decision.question.len() > 100 {
+                        format!("{}...", &decision.question[..100])
+                    } else {
+                        decision.question.clone()
+                    };
+
+                    Some(truthcoin_dc_app_rpc_api::ClaimedSlotSummary {
+                        slot_id_hex: slot.slot_id.to_hex(),
+                        period_index: slot.slot_id.period_index(),
+                        slot_index: slot.slot_id.slot_index(),
+                        market_maker_pubkey_hash: hex::encode(
+                            decision.market_maker_pubkey_hash,
+                        ),
+                        is_standard: decision.is_standard,
+                        is_scaled: decision.is_scaled,
+                        question_preview,
+                    })
+                } else {
+                    None // Should never happen
+                }
+            })
+            .collect();
+
+        Ok(claimed_slots)
+    }
+
+    async fn get_voting_periods(
+        &self,
+    ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::VotingPeriodInfo>> {
+        let voting_periods =
+            self.app.node.get_voting_periods().map_err(custom_err)?;
+
+        let result = voting_periods
+            .into_iter()
+            .map(|(period, claimed_slots, total_slots)| {
+                truthcoin_dc_app_rpc_api::VotingPeriodInfo {
+                    period,
+                    claimed_slots,
+                    total_slots,
+                }
+            })
+            .collect();
+
+        Ok(result)
+    }
+
+    async fn is_slot_in_voting(&self, slot_id_hex: String) -> RpcResult<bool> {
+        use truthcoin_dc::state::slots::SlotId;
+
+        // Parse slot ID from hex
+        let slot_id_bytes = hex::decode(&slot_id_hex)
+            .map_err(|_| custom_err_msg("Invalid slot ID hex format"))?;
+
+        if slot_id_bytes.len() != 3 {
+            return Err(custom_err_msg("Slot ID must be exactly 3 bytes"));
+        }
+
+        let slot_id_array: [u8; 3] = slot_id_bytes.try_into().unwrap();
+        let slot_id = SlotId::from_bytes(slot_id_array).map_err(custom_err)?;
+
+        // Check if the slot is in voting period
+        let is_voting = self
+            .app
+            .node
+            .is_slot_in_voting(slot_id)
+            .map_err(custom_err)?;
+
+        Ok(is_voting)
     }
 }
 

@@ -10,11 +10,11 @@ use bip300301_enforcer_integration_tests::{
 };
 use bip300301_enforcer_lib::types::SidechainNumber;
 use futures::{TryFutureExt as _, channel::mpsc, future};
-use truthcoin_dc::types::{FilledOutputContent, PointedOutput};
-use truthcoin_dc_app_rpc_api::RpcClient as _;
 use reserve_port::ReservedPort;
 use thiserror::Error;
 use tokio::time::sleep;
+use truthcoin_dc::types::{FilledOutputContent, PointedOutput};
+use truthcoin_dc_app_rpc_api::RpcClient as _;
 
 use crate::util::TruthcoinApp;
 

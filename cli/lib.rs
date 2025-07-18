@@ -3,9 +3,10 @@ use std::{
     time::Duration,
 };
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use http::HeaderMap;
 use jsonrpsee::{core::client::ClientT, http_client::HttpClientBuilder};
+use tracing_subscriber::layer::SubscriberExt as _;
 use truthcoin_dc::{
     authorization::{Dst, Signature},
     types::{
@@ -14,7 +15,6 @@ use truthcoin_dc::{
     },
 };
 use truthcoin_dc_app_rpc_api::RpcClient;
-use tracing_subscriber::layer::SubscriberExt as _;
 use url::{Host, Url};
 
 #[derive(Clone, Debug, Subcommand)]
@@ -218,24 +218,59 @@ pub enum Command {
         #[arg(long)]
         mainchain_fee_sats: u64,
     },
-    /// Get all available slots by quarter/period
+    /// Get all available slots by period
     SlotsListAll,
-    /// Get slots for a specific quarter/period
+    /// Get slots for a specific period
     SlotsGetQuarter {
         quarter: u32,
     },
-    /// Get expired slots (marked for cleanup but not yet purged)
-    SlotsGetExpired,
-    /// Show slot system configuration and status
+    /// Show slot system status
     SlotsStatus,
-    /// Convert timestamp to quarter/period
+    /// Convert timestamp to period
     SlotsConvertTimestamp {
         timestamp: u64,
     },
-    /// Convert block height to testing period (testing mode only)
-    SlotsConvertBlockHeight {
-        block_height: u32,
+    /// Claim a decision slot
+    ClaimDecisionSlot {
+        #[arg(long)]
+        period_index: u32,
+        #[arg(long)]
+        slot_index: u32,
+        #[arg(long, action = ArgAction::Set)]
+        is_standard: bool,
+        #[arg(long, action = ArgAction::Set)]
+        is_scaled: bool,
+        #[arg(long)]
+        question: String,
+        #[arg(long)]
+        min: Option<u16>,
+        #[arg(long)]
+        max: Option<u16>,
+        #[arg(long)]
+        fee_sats: u64,
     },
+    /// Get available slots in a period
+    GetAvailableSlots {
+        #[arg(long)]
+        period_index: u32,
+    },
+    /// Get slot by ID
+    GetSlotById {
+        #[arg(long)]
+        slot_id_hex: String,
+    },
+    /// Get claimed slots in a period
+    GetClaimedSlots {
+        #[arg(long)]
+        period_index: u32,
+    },
+    /// Check if slot is in voting period
+    IsSlotInVoting {
+        #[arg(long)]
+        slot_id_hex: String,
+    },
+    /// Get periods currently in voting phase
+    GetVotingPeriods,
 }
 
 const DEFAULT_RPC_HOST: Host = Host::Ipv4(Ipv4Addr::LOCALHOST);
@@ -447,7 +482,8 @@ where
         }
         Command::OpenApiSchema => {
             let openapi =
-                <truthcoin_dc_app_rpc_api::RpcDoc as utoipa::OpenApi>::openapi();
+                <truthcoin_dc_app_rpc_api::RpcDoc as utoipa::OpenApi>::openapi(
+                );
             openapi.to_pretty_json()?
         }
         Command::PendingWithdrawalBundle => {
@@ -468,11 +504,13 @@ where
             format!("{wealth}")
         }
         Command::SignArbitraryMsg { verifying_key, msg } => {
-            let signature = rpc_client.sign_arbitrary_msg(verifying_key, msg).await?;
+            let signature =
+                rpc_client.sign_arbitrary_msg(verifying_key, msg).await?;
             format!("{signature}")
         }
         Command::SignArbitraryMsgAsAddr { address, msg } => {
-            let authorization = rpc_client.sign_arbitrary_msg_as_addr(address, msg).await?;
+            let authorization =
+                rpc_client.sign_arbitrary_msg_as_addr(address, msg).await?;
             serde_json::to_string_pretty(&authorization)?
         }
         Command::Stop => {
@@ -535,8 +573,12 @@ where
                 output.push_str("No slots minted yet.\n");
             } else {
                 for slot_info in slots {
-                    let period_name = rpc_client.quarter_to_string(slot_info.period).await?;
-                    output.push_str(&format!("{}: {} slots\n", period_name, slot_info.slots));
+                    let period_name =
+                        rpc_client.quarter_to_string(slot_info.period).await?;
+                    output.push_str(&format!(
+                        "{}: {} slots\n",
+                        period_name, slot_info.slots
+                    ));
                 }
             }
             output
@@ -546,54 +588,208 @@ where
             let period_name = rpc_client.quarter_to_string(quarter).await?;
             format!("{}: {} slots", period_name, slot_count)
         }
-        Command::SlotsGetExpired => {
-            let expired_slots = rpc_client.slots_get_expired().await?;
-            let mut output = String::new();
-            output.push_str("Expired Slots:\n");
-            output.push_str("=============\n\n");
-            if expired_slots.is_empty() {
-                output.push_str("No expired slots found.\n");
-            } else {
-                for slot_info in expired_slots {
-                    let period_name = rpc_client.quarter_to_string(slot_info.period).await?;
-                    output.push_str(&format!("{}: {} slots (expired at period {})\n", 
-                        period_name, slot_info.slots, slot_info.expired_at));
-                }
-            }
-            output
-        }
         Command::SlotsStatus => {
             let status = rpc_client.slots_status().await?;
             let mut output = String::new();
             output.push_str("Slot System Status:\n");
             output.push_str("==================\n\n");
-            
+
             if status.is_testing_mode {
                 output.push_str("Mode: TESTING\n");
-                output.push_str(&format!("Blocks per period: {}\n", status.blocks_per_period));
+                output.push_str(&format!(
+                    "Blocks per period: {}\n",
+                    status.blocks_per_period
+                ));
                 output.push_str("Slots are minted every N blocks instead of every quarter.\n");
             } else {
                 output.push_str("Mode: PRODUCTION\n");
                 output.push_str("Slots are minted every calendar quarter based on Bitcoin timestamps.\n");
             }
-            
-            output.push_str(&format!("\nCurrent period: {} ({})\n", status.current_period_name, status.current_period));
-            
+
+            output.push_str(&format!(
+                "\nCurrent period: {} ({})\n",
+                status.current_period_name, status.current_period
+            ));
+
             output
         }
         Command::SlotsConvertTimestamp { timestamp } => {
             let quarter = rpc_client.timestamp_to_quarter(timestamp).await?;
             let period_name = rpc_client.quarter_to_string(quarter).await?;
-            format!("Timestamp {} converts to: {} (Period {})", timestamp, period_name, quarter)
+            format!(
+                "Timestamp {} converts to: {} (Period {})",
+                timestamp, period_name, quarter
+            )
         }
-        Command::SlotsConvertBlockHeight { block_height } => {
-            let status = rpc_client.slots_status().await?;
-            if !status.is_testing_mode {
-                return Ok("Block height conversion is only available in testing mode.".to_string());
+        Command::GetAvailableSlots { period_index } => {
+            let available_slots = rpc_client
+                .get_available_slots_in_period(period_index)
+                .await?;
+            if available_slots.is_empty() {
+                format!("No available slots in period {}", period_index)
+            } else {
+                let mut result = format!(
+                    "Available slots in period {} ({} total):\n",
+                    period_index,
+                    available_slots.len()
+                );
+                for slot in available_slots {
+                    result.push_str(&format!(
+                        "  Slot {}: {}\n",
+                        slot.slot_index, slot.slot_id_hex
+                    ));
+                }
+                result
             }
-            let period = rpc_client.block_height_to_testing_period(block_height).await?;
-            let period_name = rpc_client.quarter_to_string(period).await?;
-            format!("Block height {} converts to: {} (Period {})", block_height, period_name, period)
+        }
+        Command::ClaimDecisionSlot {
+            period_index,
+            slot_index,
+            is_standard,
+            is_scaled,
+            question,
+            min,
+            max,
+            fee_sats,
+        } => {
+            let txid = rpc_client
+                .claim_decision_slot(
+                    period_index,
+                    slot_index,
+                    is_standard,
+                    is_scaled,
+                    question,
+                    min,
+                    max,
+                    fee_sats,
+                )
+                .await?;
+            format!(
+                "Decision slot claimed successfully. Transaction ID: {}",
+                txid
+            )
+        }
+        Command::GetSlotById { slot_id_hex } => {
+            let slot = rpc_client.get_slot_by_id(slot_id_hex.clone()).await?;
+            match slot {
+                Some(slot_details) => {
+                    let mut result = format!(
+                        "Slot {} (Period {}, Index {}):\n",
+                        slot_details.slot_id_hex,
+                        slot_details.period_index,
+                        slot_details.slot_index
+                    );
+
+                    match slot_details.content {
+                        truthcoin_dc_app_rpc_api::SlotContentInfo::Empty => {
+                            result.push_str(
+                                "  Status: EMPTY (available for claiming)\n",
+                            );
+                        }
+                        truthcoin_dc_app_rpc_api::SlotContentInfo::Decision(
+                            decision,
+                        ) => {
+                            result.push_str(&format!(
+                                "  Decision ID: {}\n",
+                                decision.id
+                            ));
+                            result.push_str(&format!(
+                                "  Market Maker: {}\n",
+                                decision.market_maker_pubkey_hash
+                            ));
+                            result.push_str(&format!(
+                                "  Type: {} | {}\n",
+                                if decision.is_standard {
+                                    "Standard"
+                                } else {
+                                    "Non-Standard"
+                                },
+                                if decision.is_scaled {
+                                    "Scaled"
+                                } else {
+                                    "Binary"
+                                }
+                            ));
+                            result.push_str(&format!(
+                                "  Question: {}\n",
+                                decision.question
+                            ));
+                            if let (Some(min), Some(max)) =
+                                (decision.min, decision.max)
+                            {
+                                result.push_str(&format!(
+                                    "  Range: {} to {}\n",
+                                    min, max
+                                ));
+                            }
+                        }
+                    }
+                    result
+                }
+                None => format!("Slot {} not found", slot_id_hex),
+            }
+        }
+        Command::GetClaimedSlots { period_index } => {
+            let claimed_slots =
+                rpc_client.get_claimed_slots_in_period(period_index).await?;
+            if claimed_slots.is_empty() {
+                format!("No claimed slots found in period {}", period_index)
+            } else {
+                let mut result = format!(
+                    "Claimed slots in period {} ({} total):\n",
+                    period_index,
+                    claimed_slots.len()
+                );
+                for slot in claimed_slots {
+                    result.push_str(&format!(
+                        "  Slot {} ({}): {} | {} | Market Maker: {} | \"{}\"\n",
+                        slot.slot_index,
+                        slot.slot_id_hex,
+                        if slot.is_standard {
+                            "Standard"
+                        } else {
+                            "Non-Standard"
+                        },
+                        if slot.is_scaled { "Scaled" } else { "Binary" },
+                        &slot.market_maker_pubkey_hash[..8], // Show first 8 chars of hash
+                        slot.question_preview
+                    ));
+                }
+                result
+            }
+        }
+        Command::IsSlotInVoting { slot_id_hex } => {
+            let is_voting =
+                rpc_client.is_slot_in_voting(slot_id_hex.clone()).await?;
+            if is_voting {
+                format!("Slot {} is in voting period", slot_id_hex)
+            } else {
+                format!("Slot {} is NOT in voting period", slot_id_hex)
+            }
+        }
+        Command::GetVotingPeriods => {
+            let voting_periods = rpc_client.get_voting_periods().await?;
+            if voting_periods.is_empty() {
+                "No periods currently in voting phase".to_string()
+            } else {
+                let mut result = format!(
+                    "Voting Periods ({} total):\n",
+                    voting_periods.len()
+                );
+                result.push_str("================================\n");
+                for period_info in voting_periods {
+                    result.push_str(&format!(
+                        "Period {}: {}/{} slots claimed ({:.1}%)\n",
+                        period_info.period,
+                        period_info.claimed_slots,
+                        period_info.total_slots,
+                        (period_info.claimed_slots as f64
+                            / period_info.total_slots as f64)
+                            * 100.0
+                    ));
+                }
+                result
+            }
         }
     })
 }

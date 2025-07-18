@@ -21,18 +21,14 @@ pub mod schema;
 mod transaction;
 
 pub use address::Address;
-pub use hashes::{
-    AssetId, BlockHash, Hash, M6id, MerkleRoot,
-    Txid,
-};
+pub use hashes::{AssetId, BlockHash, Hash, M6id, MerkleRoot, Txid};
 pub use keys::{EncryptionPubKey, VerifyingKey};
 pub use transaction::{
     AmmBurn, AmmMint, AmmSwap, AssetOutput, AssetOutputContent, Authorized,
     AuthorizedTransaction, BitcoinOutput, BitcoinOutputContent,
-    FilledOutput,
-    FilledOutputContent, FilledTransaction, InPoint, OutPoint, Output,
-    OutputContent, PointedOutput, SpentOutput, Transaction, TxData, TxInputs,
-    WithdrawalOutputContent,
+    ClaimDecisionSlot, FilledOutput, FilledOutputContent, FilledTransaction,
+    InPoint, OutPoint, Output, OutputContent, PointedOutput, SpentOutput,
+    Transaction, TxData, TxInputs, WithdrawalOutputContent,
 };
 
 pub const THIS_SIDECHAIN: u8 = 13;

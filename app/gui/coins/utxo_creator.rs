@@ -270,9 +270,11 @@ impl UtxoCreator {
                                 bitcoin_amount,
                             ))
                         }),
-                        AssetId::Votecoin => {
-                            self.value.parse::<u32>().ok().map(OutputContent::Votecoin)
-                        }
+                        AssetId::Votecoin => self
+                            .value
+                            .parse::<u32>()
+                            .ok()
+                            .map(OutputContent::Votecoin),
                     };
                     if ui
                         .add_enabled(

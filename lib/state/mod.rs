@@ -10,22 +10,21 @@ use crate::{
     authorization::Authorization,
     types::{
         Address, AmountOverflowError, Authorized, AuthorizedTransaction,
-        BlockHash, Body, FilledOutput, FilledTransaction,
-        GetAddress as _, GetBitcoinValue as _, Header, InPoint, M6id, OutPoint,
-        SpentOutput, Transaction, VERSION, Verify as _, Version,
-        WithdrawalBundle, WithdrawalBundleStatus,
-        proto::mainchain::TwoWayPegData,
+        BlockHash, Body, FilledOutput, FilledTransaction, GetAddress as _,
+        GetBitcoinValue as _, Header, InPoint, M6id, OutPoint, SpentOutput,
+        Transaction, VERSION, Verify as _, Version, WithdrawalBundle,
+        WithdrawalBundleStatus, proto::mainchain::TwoWayPegData,
     },
     util::Watchable,
 };
 
 mod amm;
-pub mod votecoin;
-pub mod slots;
 mod block;
 pub mod error;
 mod rollback;
+pub mod slots;
 mod two_way_peg_data;
+pub mod votecoin;
 
 pub use amm::{AmmPair, PoolState as AmmPoolState};
 pub use error::Error;
@@ -70,6 +69,8 @@ pub struct State {
     tip: DatabaseUnique<UnitKey, SerdeBincode<BlockHash>>,
     /// Current height
     height: DatabaseUnique<UnitKey, SerdeBincode<u32>>,
+    /// Current mainchain timestamp
+    mainchain_timestamp: DatabaseUnique<UnitKey, SerdeBincode<u64>>,
     /// Associates ordered pairs of assets to their AMM pool states
     amm_pools: amm::PoolsDb,
     votecoin: votecoin::Dbs,
@@ -100,12 +101,14 @@ pub struct State {
 }
 
 impl State {
-    pub const NUM_DBS: u32 = votecoin::Dbs::NUM_DBS + 15;
+    pub const NUM_DBS: u32 = votecoin::Dbs::NUM_DBS + slots::Dbs::NUM_DBS + 14;
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn()?;
         let tip = DatabaseUnique::create(env, &mut rwtxn, "tip")?;
         let height = DatabaseUnique::create(env, &mut rwtxn, "height")?;
+        let mainchain_timestamp =
+            DatabaseUnique::create(env, &mut rwtxn, "mainchain_timestamp")?;
         let amm_pools = DatabaseUnique::create(env, &mut rwtxn, "amm_pools")?;
         let votecoin = votecoin::Dbs::new(env, &mut rwtxn)?;
         let slots = slots::Dbs::new(env, &mut rwtxn)?;
@@ -138,6 +141,7 @@ impl State {
         Ok(Self {
             tip,
             height,
+            mainchain_timestamp,
             amm_pools,
             votecoin,
             slots,
@@ -200,6 +204,14 @@ impl State {
     pub fn try_get_height(&self, rotxn: &RoTxn) -> Result<Option<u32>, Error> {
         let height = self.height.try_get(rotxn, &())?;
         Ok(height)
+    }
+
+    pub fn try_get_mainchain_timestamp(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<Option<u64>, Error> {
+        let timestamp = self.mainchain_timestamp.try_get(rotxn, &())?;
+        Ok(timestamp)
     }
 
     pub fn get_utxos(
@@ -330,18 +342,20 @@ impl State {
         let votecoin_outputs: u32 = tx
             .votecoin_outputs()
             .filter_map(|output| {
-                if let crate::types::OutputContent::Votecoin(amount) = &output.content {
+                if let crate::types::OutputContent::Votecoin(amount) =
+                    &output.content
+                {
                     Some(*amount)
                 } else {
                     None
                 }
             })
             .sum();
-        
+
         // Check if we're in the genesis block (height 0)
         let current_height = self.try_get_height(rotxn)?.unwrap_or(0);
         let is_genesis = current_height == 0;
-        
+
         if is_genesis {
             // In genesis block, allow Votecoin creation (inputs can be 0, outputs > 0)
             // No validation needed as this is the initial supply distribution
@@ -358,13 +372,89 @@ impl State {
         }
     }
 
+    pub fn validate_decision_slot_claim(
+        &self,
+        _rotxn: &RoTxn,
+        tx: &FilledTransaction,
+        _override_height: Option<u32>,
+    ) -> Result<(), Error> {
+        use crate::state::slots::{Decision, SlotId};
+
+        let claim =
+            tx.claim_decision_slot()
+                .ok_or_else(|| Error::InvalidSlotId {
+                    reason: "Not a decision slot claim transaction".to_string(),
+                })?;
+
+        // Create SlotId from bytes
+        let slot_id = SlotId::from_bytes(claim.slot_id_bytes)?;
+
+        // Validate slot ID bytes match what we computed
+        if slot_id.as_bytes() != claim.slot_id_bytes {
+            return Err(Error::InvalidSlotId {
+                reason: "Slot ID bytes don't match computed slot ID"
+                    .to_string(),
+            });
+        }
+
+        // Validate that we have at least one input spending a market maker's funds
+        // This ensures only market makers can claim slots
+        if tx.inputs().is_empty() {
+            return Err(Error::InvalidSlotId {
+                reason: "Decision slot claim must have at least one input"
+                    .to_string(),
+            });
+        }
+
+        // Extract market maker address from the first UTXO
+        let first_utxo =
+            tx.spent_utxos.first().ok_or_else(|| Error::InvalidSlotId {
+                reason: "No spent UTXOs found".to_string(),
+            })?;
+
+        let market_maker_address = first_utxo.address;
+        let market_maker_address_bytes = market_maker_address.0;
+
+        // Validate ALL UTXOs belong to the same market maker (prevent collusion)
+        for (i, spent_utxo) in tx.spent_utxos.iter().enumerate() {
+            if spent_utxo.address != market_maker_address {
+                return Err(Error::InvalidSlotId {
+                    reason: format!(
+                        "All UTXOs must belong to the same market maker. UTXO {} has address {}, expected {}",
+                        i, spent_utxo.address, market_maker_address
+                    ),
+                });
+            }
+        }
+
+        // Create a decision to validate structure
+        let _decision = Decision::new(
+            market_maker_address_bytes,
+            claim.slot_id_bytes,
+            claim.is_standard,
+            claim.is_scaled,
+            claim.question.clone(),
+            claim.min,
+            claim.max,
+        )?;
+
+        Ok(())
+    }
+
     /// Validates a filled transaction, and returns the fee
     pub fn validate_filled_transaction(
         &self,
         rotxn: &RoTxn,
         tx: &FilledTransaction,
+        override_height: Option<u32>,
     ) -> Result<bitcoin::Amount, Error> {
         let () = self.validate_votecoin(rotxn, tx)?;
+
+        // Validate decision slot claims
+        if tx.is_claim_decision_slot() {
+            self.validate_decision_slot_claim(rotxn, tx, override_height)?;
+        }
+
         tx.bitcoin_fee()?.ok_or(Error::NotEnoughValueIn)
     }
 
@@ -388,7 +478,7 @@ impl State {
             return Err(Error::AuthorizationError);
         }
         let fee =
-            self.validate_filled_transaction(rotxn, &filled_transaction)?;
+            self.validate_filled_transaction(rotxn, &filled_transaction, None)?;
         Ok(fee)
     }
 
@@ -499,39 +589,88 @@ impl State {
         two_way_peg_data::disconnect(self, rwtxn, two_way_peg_data)
     }
 
-    /// Get all available slots by quarter (active periods only)
     pub fn get_all_slot_quarters(
         &self,
         rotxn: &RoTxn,
     ) -> Result<Vec<(u32, u64)>, Error> {
-        self.slots.get_active_periods(rotxn)
+        let current_ts = self.try_get_mainchain_timestamp(rotxn)?.unwrap_or(0);
+        let current_height = self.try_get_height(rotxn)?;
+        self.slots
+            .get_active_periods(rotxn, current_ts, current_height)
     }
 
-    /// Get slots for a specific quarter
     pub fn get_slots_for_quarter(
         &self,
         rotxn: &RoTxn,
         quarter: u32,
     ) -> Result<u64, Error> {
-        self.slots.total_for(rotxn, quarter)
+        let current_ts = self.try_get_mainchain_timestamp(rotxn)?.unwrap_or(0);
+        let current_height = self.try_get_height(rotxn)?;
+        self.slots
+            .total_for(rotxn, quarter, current_ts, current_height)
     }
 
-    /// Get slots around a timestamp (useful for current time)
-    pub fn get_slots_around_time(
+    pub fn get_available_slots_in_period(
         &self,
         rotxn: &RoTxn,
-        timestamp: u64,
-        range: u32,
-    ) -> Result<Vec<(u32, u64)>, Error> {
-        self.slots.get_slots_around_time(rotxn, timestamp, range)
+        period_index: u32,
+    ) -> Result<Vec<crate::state::slots::SlotId>, Error> {
+        let current_ts = self.try_get_mainchain_timestamp(rotxn)?.unwrap_or(0);
+        let current_height = self.try_get_height(rotxn)?;
+        self.slots.get_available_slots_in_period(
+            rotxn,
+            period_index,
+            current_ts,
+            current_height,
+        )
     }
 
-    /// Get expired periods (those marked for cleanup but not yet purged)
-    pub fn get_expired_periods(
+    pub fn purge_old_slots(&self, rwtxn: &mut RwTxn) -> Result<usize, Error> {
+        let current_ts = self.try_get_mainchain_timestamp(rwtxn)?.unwrap_or(0);
+        let current_height = self.try_get_height(rwtxn)?;
+        self.slots
+            .purge_old_slots(rwtxn, current_ts, current_height)
+    }
+
+    pub fn is_slot_in_voting(
         &self,
         rotxn: &RoTxn,
-    ) -> Result<Vec<(u32, u32, u64)>, Error> {
-        self.slots.get_expired_periods(rotxn)
+        slot_id: crate::state::slots::SlotId,
+    ) -> Result<bool, Error> {
+        let current_ts = self.try_get_mainchain_timestamp(rotxn)?.unwrap_or(0);
+        let current_height = self.try_get_height(rotxn)?;
+        Ok(self
+            .slots
+            .is_slot_in_voting(slot_id, current_ts, current_height))
+    }
+
+    pub fn get_voting_periods(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<Vec<(u32, u64, u64)>, Error> {
+        let current_ts = self.try_get_mainchain_timestamp(rotxn)?.unwrap_or(0);
+        let current_height = self.try_get_height(rotxn)?;
+        self.slots
+            .get_voting_periods(rotxn, current_ts, current_height)
+    }
+
+    pub fn get_period_summary(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<(Vec<(u32, u64)>, Vec<(u32, u64)>), Error> {
+        let current_ts = self.try_get_mainchain_timestamp(rotxn)?.unwrap_or(0);
+        let current_height = self.try_get_height(rotxn)?;
+        self.slots
+            .get_period_summary(rotxn, current_ts, current_height)
+    }
+
+    pub fn get_claimed_slot_count_in_period(
+        &self,
+        rotxn: &RoTxn,
+        period_index: u32,
+    ) -> Result<u64, Error> {
+        self.slots
+            .get_claimed_slot_count_in_period(rotxn, period_index)
     }
 }
 

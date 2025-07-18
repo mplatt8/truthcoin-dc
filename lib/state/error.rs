@@ -5,8 +5,8 @@ use thiserror::Error;
 use transitive::Transitive;
 
 use crate::types::{
-    AmountOverflowError, AmountUnderflowError, AssetId, BlockHash,
-    Hash, M6id, MerkleRoot, OutPoint, Txid, WithdrawalBundleError,
+    AmountOverflowError, AmountUnderflowError, AssetId, BlockHash, M6id,
+    MerkleRoot, OutPoint, WithdrawalBundleError,
 };
 
 /// Errors related to an AMM pool
@@ -45,10 +45,6 @@ pub enum Amm {
     #[error("Too few Votecoin to mint an AMM position")]
     TooFewVotecoinToMint,
 }
-
-
-
-
 
 #[derive(Debug, Error)]
 pub enum InvalidHeader {
@@ -113,6 +109,25 @@ pub enum Error {
     BadCoinbaseOutputContent,
     #[error("genesis slots have already been initialized")]
     GenesisAlreadyInitialized,
+    #[error("inconsistent decision type")]
+    InconsistentDecisionType,
+    #[error("invalid range: min must be less than max")]
+    InvalidRange,
+    #[error("invalid slot ID: {reason}")]
+    InvalidSlotId { reason: String },
+    #[error("invalid timestamp")]
+    InvalidTimestamp,
+    #[error("slot {slot_id:?} is already claimed")]
+    SlotAlreadyClaimed {
+        slot_id: crate::state::slots::SlotId,
+    },
+    #[error("slot {slot_id:?} is not available: {reason}")]
+    SlotNotAvailable {
+        slot_id: crate::state::slots::SlotId,
+        reason: String,
+    },
+    #[error("timestamp out of range")]
+    TimestampOutOfRange,
 
     #[error("bundle too heavy {weight} > {max_weight}")]
     BundleTooHeavy { weight: u64, max_weight: u64 },
@@ -132,7 +147,6 @@ pub enum Error {
     #[error("invalid header: {0}")]
     InvalidHeader(InvalidHeader),
 
-
     #[error("deposit block doesn't exist")]
     NoDepositBlock,
     #[error("total fees less than coinbase value")]
@@ -151,15 +165,8 @@ pub enum Error {
     #[error(transparent)]
     SignatureError(#[from] ed25519_dalek::SignatureError),
 
-
-
-    #[error(
-        "unbalanced Votecoin: {inputs} inputs, {outputs} outputs"
-    )]
-    UnbalancedVotecoin {
-        inputs: u32,
-        outputs: u32,
-    },
+    #[error("unbalanced Votecoin: {inputs} inputs, {outputs} outputs")]
+    UnbalancedVotecoin { inputs: u32, outputs: u32 },
 
     #[error("Unknown withdrawal bundle: {m6id}")]
     UnknownWithdrawalBundle { m6id: M6id },

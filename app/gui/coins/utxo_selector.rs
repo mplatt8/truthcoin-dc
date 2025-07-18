@@ -1,16 +1,13 @@
 use std::collections::HashSet;
 
 use eframe::egui;
+use strum::{EnumIter, IntoEnumIterator, IntoStaticStr};
 use truthcoin_dc::types::{
     AssetId, AssetOutputContent, BitcoinOutput, BitcoinOutputContent,
     FilledOutput, OutPoint, Output, Transaction, WithdrawalOutputContent,
 };
-use strum::{EnumIter, IntoEnumIterator, IntoStaticStr};
 
-use crate::{
-    app::App,
-    gui::util::UiExt,
-};
+use crate::{app::App, gui::util::UiExt};
 
 #[derive(
     Clone, Copy, Debug, Default, EnumIter, Eq, IntoStaticStr, PartialEq,

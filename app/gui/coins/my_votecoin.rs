@@ -1,7 +1,5 @@
 use eframe::egui;
 
-use truthcoin_dc::types::FilledOutput;
-
 use crate::{app::App, gui::util::UiExt};
 
 #[derive(Debug, Default)]
@@ -34,11 +32,15 @@ impl MyVotecoin {
             // Sort by amount (highest first)
             votecoin_utxos.sort_by(|(_, a), (_, b)| b.cmp(a));
 
-            let total_votecoin: u32 = votecoin_utxos.iter().map(|(_, amount)| amount).sum();
+            let total_votecoin: u32 =
+                votecoin_utxos.iter().map(|(_, amount)| amount).sum();
 
             ui.horizontal(|ui| {
                 ui.monospace("Total Votecoin: ");
-                ui.monospace_selectable_singleline(false, format!("{}", total_votecoin));
+                ui.monospace_selectable_singleline(
+                    false,
+                    format!("{}", total_votecoin),
+                );
             });
 
             ui.separator();

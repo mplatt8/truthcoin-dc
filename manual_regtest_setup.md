@@ -119,7 +119,7 @@ mkdir -p /tmp/regtest-data/{bitcoin,electrs,enforcer,truthcoin}
 ### headless needs a l2 wallet created
 ```bash
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 generate-mnemonic
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 set-seed-from-mneonic "twelve words separated by a space"
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 set-seed-from-mnemonic "peanut action luggage beach artist jacket bulb kiwi mobile steel good mechanic"
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-new-address
 
 ```
@@ -174,7 +174,7 @@ Get a Truthcoin address from your GUI or RPC, then:
 # Create deposit (replace ADDRESS with your Truthcoin address)
 grpcurl -plaintext -d '{
   "sidechain_id": 13,
-  "address": "YOUR_TRUTHCOIN_ADDRESS",
+  "address": "ADDRESS",
   "value_sats": 100000000,
   "fee_sats": 10000
 }' 127.0.0.1:50051 cusf.mainchain.v1.WalletService.CreateDepositTransaction

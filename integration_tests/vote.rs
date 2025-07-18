@@ -15,13 +15,13 @@ use bip300301_enforcer_integration_tests::{
 use futures::{
     FutureExt as _, StreamExt as _, channel::mpsc, future::BoxFuture,
 };
+use tokio::time::sleep;
+use tracing::Instrument as _;
 use truthcoin_dc::{
     authorization::{Dst, Signature},
     types::{Address, GetAddress as _, Txid},
 };
 use truthcoin_dc_app_rpc_api::RpcClient as _;
-use tokio::time::sleep;
-use tracing::Instrument as _;
 
 use crate::{
     setup::{Init, PostSetup},
@@ -134,26 +134,30 @@ async fn vote_task(
 ) -> anyhow::Result<()> {
     let (mut enforcer_post_setup, truthcoin_nodes) =
         setup(&bin_paths, res_tx.clone()).await?;
-    
+
     tracing::info!("Generating issuer verifying key");
     let issuer_vk = truthcoin_nodes
         .issuer
         .rpc_client
         .get_new_verifying_key()
         .await?;
-    
-    tracing::info!("Creating genesis block with initial Votecoin supply of {} units", INITIAL_VOTECOIN_SUPPLY);
+
+    tracing::info!(
+        "Creating genesis block with initial Votecoin supply of {} units",
+        INITIAL_VOTECOIN_SUPPLY
+    );
     // Mine a genesis block that will create the initial Votecoin supply
     // This block should contain a coinbase output with all Votecoin supply to the issuer
-    let _issuer_addr = truthcoin_nodes.issuer.rpc_client.get_new_address().await?;
-    
+    let _issuer_addr =
+        truthcoin_nodes.issuer.rpc_client.get_new_address().await?;
+
     // Mine the genesis block - this should automatically create the Votecoin supply
     // The node should be configured to mint the initial supply in the first block
     truthcoin_nodes
         .issuer
         .bmm_single(&mut enforcer_post_setup)
         .await?;
-    
+
     // Verify the initial supply was created correctly
     let utxos = truthcoin_nodes.issuer.rpc_client.list_utxos().await?;
     let total_votecoin: u32 = utxos
@@ -161,58 +165,51 @@ async fn vote_task(
         .filter_map(|utxo| utxo.output.content.votecoin())
         .sum();
     anyhow::ensure!(
-        total_votecoin == INITIAL_VOTECOIN_SUPPLY, 
-        "Expected initial Votecoin supply of {}, found {}", 
-        INITIAL_VOTECOIN_SUPPLY, 
+        total_votecoin == INITIAL_VOTECOIN_SUPPLY,
+        "Expected initial Votecoin supply of {}, found {}",
+        INITIAL_VOTECOIN_SUPPLY,
         total_votecoin
     );
-    tracing::info!("Verified initial Votecoin supply: {} units", total_votecoin);
-    
+    tracing::info!(
+        "Verified initial Votecoin supply: {} units",
+        total_votecoin
+    );
+
     tracing::info!("Setting up voter addresses");
     let voter_addr_0 =
         truthcoin_nodes.voter_0.rpc_client.get_new_address().await?;
     let voter_addr_1 =
         truthcoin_nodes.voter_1.rpc_client.get_new_address().await?;
-    
+
     tracing::info!("Distributing Votecoin to voters");
     // Transfer some Votecoin from issuer to voters
     let _: Txid = truthcoin_nodes
         .issuer
         .rpc_client
-        .transfer_votecoin(
-            voter_addr_0,
-            VOTER_ALLOCATION_0,
-            0,
-            None,
-        )
+        .transfer_votecoin(voter_addr_0, VOTER_ALLOCATION_0, 0, None)
         .await?;
     truthcoin_nodes
         .issuer
         .bmm_single(&mut enforcer_post_setup)
         .await?;
-    
+
     let _: Txid = truthcoin_nodes
         .issuer
         .rpc_client
-        .transfer_votecoin(
-            voter_addr_1,
-            VOTER_ALLOCATION_1,
-            0,
-            None,
-        )
+        .transfer_votecoin(voter_addr_1, VOTER_ALLOCATION_1, 0, None)
         .await?;
     truthcoin_nodes
         .issuer
         .bmm_single(&mut enforcer_post_setup)
         .await?;
-    
+
     tracing::info!("Signing vote call message");
     let vote_call_msg_sig: Signature = truthcoin_nodes
         .issuer
         .rpc_client
         .sign_arbitrary_msg(issuer_vk, VOTE_CALL_MSG.to_owned())
         .await?;
-    
+
     tracing::info!("Verifying vote call message signature");
     for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1] {
         anyhow::ensure!(
@@ -227,20 +224,21 @@ async fn vote_task(
                 .await?
         )
     }
-    
+
     tracing::info!("Taking snapshot of Votecoin holders");
     let vote_weights: HashMap<Address, u32> = {
         let mut weights = HashMap::new();
         let utxos = truthcoin_nodes.issuer.rpc_client.list_utxos().await?;
         for utxo in utxos {
             if let Some(votecoin_amount) = utxo.output.content.votecoin() {
-                *weights.entry(utxo.output.address).or_default() += votecoin_amount;
+                *weights.entry(utxo.output.address).or_default() +=
+                    votecoin_amount;
             }
         }
         weights
     };
     anyhow::ensure!(vote_weights.len() >= 2);
-    
+
     tracing::info!("Signing votes");
     let vote_auth_0 = truthcoin_nodes
         .voter_0
@@ -252,7 +250,7 @@ async fn vote_task(
         .rpc_client
         .sign_arbitrary_msg_as_addr(voter_addr_1, VOTE_NO_MSG.to_owned())
         .await?;
-    
+
     tracing::info!("Verifying votes");
     let (total_yes, total_no) = {
         let (mut total_yes, mut total_no) = (0, 0);
@@ -293,9 +291,11 @@ async fn vote_task(
     };
     anyhow::ensure!(total_yes == VOTER_ALLOCATION_0);
     anyhow::ensure!(total_no == VOTER_ALLOCATION_1);
-    
-    tracing::info!("Vote test completed successfully - Votecoin voting system working");
-    
+
+    tracing::info!(
+        "Vote test completed successfully - Votecoin voting system working"
+    );
+
     // Cleanup
     {
         drop(truthcoin_nodes);

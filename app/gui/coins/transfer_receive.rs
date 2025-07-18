@@ -1,10 +1,12 @@
 use eframe::egui::{self, Button};
-use truthcoin_dc::types::Address;
 use strum::{EnumIter, IntoEnumIterator};
+use truthcoin_dc::types::Address;
 
 use crate::{app::App, gui::util::UiExt};
 
-#[derive(Clone, Copy, Debug, Default, EnumIter, Eq, PartialEq, strum::Display)]
+#[derive(
+    Clone, Copy, Debug, Default, EnumIter, Eq, PartialEq, strum::Display,
+)]
 enum TransferType {
     #[default]
     Bitcoin,
@@ -36,7 +38,9 @@ fn create_votecoin_transfer(
     amount: u32,
     fee: bitcoin::Amount,
 ) -> anyhow::Result<()> {
-    let tx = app.wallet.create_votecoin_transfer(dest, amount, fee, None)?;
+    let tx = app
+        .wallet
+        .create_votecoin_transfer(dest, amount, fee, None)?;
     app.sign_and_send(tx)?;
     Ok(())
 }
@@ -123,7 +127,8 @@ impl Transfer {
                     let amount = bitcoin::Amount::from_str_in(
                         &self.amount,
                         bitcoin::Denomination::Bitcoin,
-                    ).expect("should not happen");
+                    )
+                    .expect("should not happen");
                     create_bitcoin_transfer(
                         app.unwrap(),
                         dest.expect("should not happen"),
@@ -132,7 +137,8 @@ impl Transfer {
                     )
                 }
                 TransferType::Votecoin => {
-                    let amount = self.amount.parse::<u32>().expect("should not happen");
+                    let amount =
+                        self.amount.parse::<u32>().expect("should not happen");
                     create_votecoin_transfer(
                         app.unwrap(),
                         dest.expect("should not happen"),
@@ -188,7 +194,7 @@ impl Receive {
             {
                 *self = Self::new(app)
             }
-            
+
             let has_valid_address = matches!(&self.address, Some(Ok(_)));
             if ui
                 .add_enabled(has_valid_address, Button::new("copy"))

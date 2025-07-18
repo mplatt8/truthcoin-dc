@@ -4,9 +4,8 @@ use serde_with::{DeserializeAs, IfIsHumanReadable, SerializeAs, serde_as};
 use utoipa::ToSchema;
 
 use crate::types::{
-    Address, AssetId, GetBitcoinValue,
-    InPoint, OutPoint, serde_display_fromstr_human_readable,
-    serde_hexstr_human_readable,
+    Address, AssetId, GetBitcoinValue, InPoint, OutPoint,
+    serde_display_fromstr_human_readable, serde_hexstr_human_readable,
 };
 
 /// Serialize [`bitcoin::Amount`] as sats
@@ -337,9 +336,7 @@ mod content {
         pub fn is_asset(&self) -> bool {
             matches!(
                 self,
-                Self::Votecoin(_)
-                    | Self::Bitcoin(_)
-                    | Self::Withdrawal { .. }
+                Self::Votecoin(_) | Self::Bitcoin(_) | Self::Withdrawal { .. }
             )
         }
 
@@ -470,8 +467,9 @@ mod content {
         #[inline(always)]
         fn get_bitcoin_value(&self) -> bitcoin::Amount {
             match self {
-                Self::AmmLpToken(_)
-                | Self::Votecoin(_) => bitcoin::Amount::ZERO,
+                Self::AmmLpToken(_) | Self::Votecoin(_) => {
+                    bitcoin::Amount::ZERO
+                }
                 Self::Bitcoin(value) => value.0,
                 Self::Withdrawal(withdrawal) => withdrawal.get_bitcoin_value(),
             }
@@ -483,7 +481,7 @@ pub use content::Content;
 mod filled_content {
     use serde::{Deserialize, Serialize};
 
-    use crate::types::{AssetId};
+    use crate::types::AssetId;
 
     /// Defines a FilledContent enum with the specified visibility, name,
     /// derives, and attributes for each variant
@@ -569,8 +567,6 @@ mod filled_content {
             }
         }
 
-
-
         /** Returns the LP token's corresponding asset pair and amount,
          *  if the filled output content corresponds to an LP token output. */
         pub fn lp_token_amount(&self) -> Option<(AssetId, AssetId, u64)> {
@@ -593,8 +589,6 @@ mod filled_content {
         pub fn is_bitcoin(&self) -> bool {
             matches!(self, Self::Bitcoin(_))
         }
-
-
 
         /// `true` if the output content corresponds to an LP token
         pub fn is_lp_token(&self) -> bool {
@@ -864,8 +858,6 @@ impl FilledOutput {
         self.content.asset_value()
     }
 
-
-
     /** Returns the LP token's corresponding asset pair and amount,
      *  if the filled output content corresponds to an LP token output. */
     pub fn lp_token_amount(&self) -> Option<(AssetId, AssetId, u64)> {
@@ -886,8 +878,6 @@ impl FilledOutput {
     pub fn is_bitcoin(&self) -> bool {
         self.content.is_bitcoin()
     }
-
-
 
     /// `true` if the output content corresponds to an LP token
     pub fn is_lp_token(&self) -> bool {

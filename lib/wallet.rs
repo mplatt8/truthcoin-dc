@@ -23,11 +23,10 @@ use crate::{
     authorization::{self, Authorization, Signature, get_address},
     types::{
         Address, AmountOverflowError, AmountUnderflowError, AssetId,
-        AuthorizedTransaction, BitcoinOutputContent,
-        EncryptionPubKey, FilledOutput,
-        GetBitcoinValue, InPoint, OutPoint, Output, OutputContent,
-        SpentOutput, Transaction, TxData, VERSION, VerifyingKey, Version,
-        WithdrawalOutputContent, keys::Ecies,
+        AuthorizedTransaction, BitcoinOutputContent, EncryptionPubKey,
+        FilledOutput, GetBitcoinValue, InPoint, OutPoint, Output,
+        OutputContent, SpentOutput, Transaction, TxData, VERSION, VerifyingKey,
+        Version, WithdrawalOutputContent, keys::Ecies,
     },
     util::Watchable,
 };
@@ -600,13 +599,9 @@ impl Wallet {
         let mut votecoin_utxos: Vec<_> = self
             .utxos
             .iter(&rotxn)?
-            .filter(|(_outpoint, output)| {
-                Ok(output.is_votecoin())
-            })
+            .filter(|(_outpoint, output)| Ok(output.is_votecoin()))
             .collect()?;
-        votecoin_utxos.sort_unstable_by_key(|(_, output)| {
-            output.votecoin()
-        });
+        votecoin_utxos.sort_unstable_by_key(|(_, output)| output.votecoin());
 
         let mut selected = HashMap::new();
         let mut total_value: u32 = 0;
@@ -627,8 +622,6 @@ impl Wallet {
         Ok((total_value, selected))
     }
 
-
-
     pub fn select_asset_utxos(
         &self,
         asset: AssetId,
@@ -639,7 +632,8 @@ impl Wallet {
                 .select_bitcoins(bitcoin::Amount::from_sat(amount))
                 .map(|(amount, utxos)| (amount.to_sat(), utxos)),
             AssetId::Votecoin => {
-                let (total, utxos) = self.select_votecoin_utxos(amount.try_into().unwrap())?;
+                let (total, utxos) =
+                    self.select_votecoin_utxos(amount.try_into().unwrap())?;
                 Ok((total as u64, utxos))
             }
         }
@@ -712,7 +706,9 @@ impl Wallet {
                         bitcoin::Amount::from_sat(change_amount0),
                     ))
                 }
-                AssetId::Votecoin => OutputContent::Votecoin(change_amount0.try_into().unwrap()),
+                AssetId::Votecoin => {
+                    OutputContent::Votecoin(change_amount0.try_into().unwrap())
+                }
             };
             Some(Output {
                 address,
@@ -730,7 +726,9 @@ impl Wallet {
                         bitcoin::Amount::from_sat(change_amount1),
                     ))
                 }
-                AssetId::Votecoin => OutputContent::Votecoin(change_amount1.try_into().unwrap()),
+                AssetId::Votecoin => {
+                    OutputContent::Votecoin(change_amount1.try_into().unwrap())
+                }
             };
             Some(Output {
                 address,
@@ -802,7 +800,9 @@ impl Wallet {
                 AssetId::Bitcoin => OutputContent::Bitcoin(
                     BitcoinOutputContent(bitcoin::Amount::from_sat(amount0)),
                 ),
-                AssetId::Votecoin => OutputContent::Votecoin(amount0.try_into().unwrap()),
+                AssetId::Votecoin => {
+                    OutputContent::Votecoin(amount0.try_into().unwrap())
+                }
             },
         };
         let asset1_output = Output {
@@ -812,7 +812,9 @@ impl Wallet {
                 AssetId::Bitcoin => OutputContent::Bitcoin(
                     BitcoinOutputContent(bitcoin::Amount::from_sat(amount1)),
                 ),
-                AssetId::Votecoin => OutputContent::Votecoin(amount1.try_into().unwrap()),
+                AssetId::Votecoin => {
+                    OutputContent::Votecoin(amount1.try_into().unwrap())
+                }
             },
         };
 
@@ -856,7 +858,9 @@ impl Wallet {
                         bitcoin::Amount::from_sat(amount_change),
                     ))
                 }
-                AssetId::Votecoin => OutputContent::Votecoin(amount_change.try_into().unwrap()),
+                AssetId::Votecoin => {
+                    OutputContent::Votecoin(amount_change.try_into().unwrap())
+                }
             };
             Some(Output {
                 address,
@@ -875,7 +879,9 @@ impl Wallet {
                         bitcoin::Amount::from_sat(amount_receive),
                     ))
                 }
-                AssetId::Votecoin => OutputContent::Votecoin(amount_receive.try_into().unwrap()),
+                AssetId::Votecoin => {
+                    OutputContent::Votecoin(amount_receive.try_into().unwrap())
+                }
             },
         };
         // The first unique asset in the inputs must be `asset_spend`.
@@ -888,6 +894,48 @@ impl Wallet {
             amount_receive,
             pair_asset: asset_receive,
         });
+        Ok(())
+    }
+
+    /// Given a regular transaction, add a decision slot claim.
+    pub fn claim_decision_slot(
+        &self,
+        tx: &mut Transaction,
+        slot_id_bytes: [u8; 3],
+        is_standard: bool,
+        is_scaled: bool,
+        question: String,
+        min: Option<u16>,
+        max: Option<u16>,
+        fee: bitcoin::Amount,
+    ) -> Result<(), Error> {
+        assert!(tx.is_regular(), "this function only accepts a regular tx");
+
+        // Select minimal bitcoins to pay the fee
+        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(fee)?;
+        let change = total_bitcoin - fee;
+
+        // Add the inputs to the transaction
+        tx.inputs.extend(bitcoin_utxos.keys());
+
+        // Add change output if needed
+        if change > bitcoin::Amount::ZERO {
+            tx.outputs.push(Output::new(
+                self.get_new_address()?,
+                OutputContent::Bitcoin(BitcoinOutputContent(change)),
+            ));
+        }
+
+        // Set the transaction data
+        tx.data = Some(TxData::ClaimDecisionSlot {
+            slot_id_bytes,
+            is_standard,
+            is_scaled,
+            question,
+            min,
+            max,
+        });
+
         Ok(())
     }
 

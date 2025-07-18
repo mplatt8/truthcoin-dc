@@ -1,39 +1,245 @@
-// lib/state/slots.rs
-use chrono::{DateTime, Utc, TimeZone, Datelike};
-use heed::types::SerdeBincode;
-use sneed::{Env, RwTxn, DatabaseUnique, UnitKey};
-use fallible_iterator::FallibleIterator;
 use crate::state::Error;
+use chrono::{Datelike, TimeZone, Utc};
+use fallible_iterator::FallibleIterator;
+use heed::types::SerdeBincode;
+use serde::{Deserialize, Serialize};
+use sneed::{DatabaseUnique, Env, RwTxn};
 
-/// Slots added to *each* tracked quarter every real‐world quarter
-const SLOTS_PER_PERIOD: u64 = 25;
-/// How many quarters ahead we track (including the current one)
-const FUTURE_PERIODS: u32 = 20;
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    PartialEq,
+    PartialOrd,
+    Ord,
+    Deserialize,
+    Serialize,
+)]
+pub struct SlotId([u8; 3]);
 
-/// Testing mode configuration
-const TESTING_MODE: bool = true; // Set to false for production
-/// In testing mode, mint slots every N blocks instead of every quarter
-const TESTING_BLOCKS_PER_PERIOD: u32 = 1; // Change this to adjust frequency
+const MAX_PERIOD_INDEX: u32 = (1 << 10) - 1;
+const MAX_SLOT_INDEX: u32 = (1 << 14) - 1;
+const STANDARD_SLOT_MAX: u32 = 499;
+const NONSTANDARD_SLOT_MIN: u32 = 500;
 
-/// Convert a Unix timestamp (secs) to a monotonic quarter index:
-/// e.g. year*4 + (month0/3): Jan–Mar→0, Apr–Jun→1, Jul–Sep→2, Oct–Dec→3
-fn quarter_index(ts_secs: u64) -> u32 {
-    let dt: DateTime<Utc> = Utc.timestamp_opt(ts_secs as i64, 0).unwrap();
-    let year = dt.year() as u32;
-    let quarter = dt.month0() / 3; // 0–3
-    year * 4 + quarter
+impl SlotId {
+    pub fn new(period: u32, index: u32) -> Result<Self, Error> {
+        if period > MAX_PERIOD_INDEX {
+            return Err(Error::InvalidSlotId {
+                reason: format!(
+                    "Period {} exceeds maximum {}",
+                    period, MAX_PERIOD_INDEX
+                ),
+            });
+        }
+        if index > MAX_SLOT_INDEX {
+            return Err(Error::InvalidSlotId {
+                reason: format!(
+                    "Slot index {} exceeds maximum {}",
+                    index, MAX_SLOT_INDEX
+                ),
+            });
+        }
+
+        // Encode: period (10 bits) || slot_index (14 bits)
+        let combined = (period << 14) | index;
+        let bytes = [
+            ((combined >> 16) & 0xFF) as u8,
+            ((combined >> 8) & 0xFF) as u8,
+            (combined & 0xFF) as u8,
+        ];
+
+        Ok(SlotId(bytes))
+    }
+
+    pub fn period_index(self) -> u32 {
+        let combined = u32::from_be_bytes([0, self.0[0], self.0[1], self.0[2]]);
+        combined >> 14
+    }
+
+    pub fn slot_index(self) -> u32 {
+        let combined = u32::from_be_bytes([0, self.0[0], self.0[1], self.0[2]]);
+        combined & MAX_SLOT_INDEX
+    }
+
+    pub fn as_bytes(self) -> [u8; 3] {
+        self.0
+    }
+
+    pub fn from_bytes(bytes: [u8; 3]) -> Result<Self, Error> {
+        let combined = u32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]);
+        let period = combined >> 14;
+        let index = combined & MAX_SLOT_INDEX;
+
+        if period > MAX_PERIOD_INDEX {
+            return Err(Error::InvalidSlotId {
+                reason: format!(
+                    "Period {} exceeds maximum {}",
+                    period, MAX_PERIOD_INDEX
+                ),
+            });
+        }
+        if index > MAX_SLOT_INDEX {
+            return Err(Error::InvalidSlotId {
+                reason: format!(
+                    "Slot index {} exceeds maximum {}",
+                    index, MAX_SLOT_INDEX
+                ),
+            });
+        }
+
+        Ok(SlotId(bytes))
+    }
+
+    pub fn to_hex(self) -> String {
+        hex::encode(self.0)
+    }
 }
 
-/// Convert quarter index back to human readable format
-pub fn quarter_to_string(quarter_idx: u32) -> String {
-    if TESTING_MODE {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Decision {
+    pub id: [u8; 32],
+    pub market_maker_pubkey_hash: [u8; 20],
+    pub slot_id_bytes: [u8; 3],
+    pub is_standard: bool,
+    pub is_scaled: bool,
+    pub question: String,
+    pub min: Option<u16>,
+    pub max: Option<u16>,
+}
+
+impl Decision {
+    pub fn new(
+        market_maker_pubkey_hash: [u8; 20],
+        slot_id_bytes: [u8; 3],
+        is_standard: bool,
+        is_scaled: bool,
+        question: String,
+        min: Option<u16>,
+        max: Option<u16>,
+    ) -> Result<Self, Error> {
+        if question.as_bytes().len() > 1000 {
+            return Err(Error::InvalidSlotId {
+                reason: "Question must be 1000 bytes or less".to_string(),
+            });
+        }
+
+        match (min, max, is_scaled) {
+            (Some(min_val), Some(max_val), true) => {
+                if min_val >= max_val {
+                    return Err(Error::InvalidRange);
+                }
+            }
+            (None, None, false) => {}
+            _ => return Err(Error::InconsistentDecisionType),
+        }
+
+        let mut decision = Decision {
+            id: [0; 32],
+            market_maker_pubkey_hash,
+            slot_id_bytes,
+            is_standard,
+            is_scaled,
+            question,
+            min,
+            max,
+        };
+
+        decision.id = decision.compute_id_hash();
+
+        Ok(decision)
+    }
+
+    fn compute_id_hash(&self) -> [u8; 32] {
+        use crate::types::hashes;
+
+        let hash_data = (
+            &self.market_maker_pubkey_hash,
+            &self.slot_id_bytes,
+            self.is_standard,
+            self.is_scaled,
+            &self.question,
+            self.min,
+            self.max,
+        );
+
+        hashes::hash(&hash_data)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Slot {
+    pub slot_id: SlotId,
+    pub decision: Option<Decision>,
+}
+
+const FUTURE_PERIODS: u32 = 20;
+
+#[derive(Clone, Debug)]
+pub struct SlotConfig {
+    pub testing_mode: bool,
+    pub testing_blocks_per_period: u32,
+}
+
+impl Default for SlotConfig {
+    fn default() -> Self {
+        Self {
+            testing_mode: true,
+            testing_blocks_per_period: 1,
+        }
+    }
+}
+
+impl SlotConfig {
+    pub fn production() -> Self {
+        Self {
+            testing_mode: false,
+            testing_blocks_per_period: 1,
+        }
+    }
+
+    pub fn testing(blocks_per_period: u32) -> Self {
+        if blocks_per_period == 0 {
+            panic!("blocks_per_period must be > 0");
+        }
+        Self {
+            testing_mode: true,
+            testing_blocks_per_period: blocks_per_period,
+        }
+    }
+}
+
+// Convert timestamp to quarter: year*4 + (month0/3)
+fn timestamp_to_quarter_index(ts_secs: u64) -> Result<u32, Error> {
+    if ts_secs > i64::MAX as u64 {
+        return Err(Error::InvalidTimestamp);
+    }
+
+    let dt = Utc
+        .timestamp_opt(ts_secs as i64, 0)
+        .single()
+        .ok_or(Error::InvalidTimestamp)?;
+
+    let year = dt.year();
+    if year < 0 || year > (u32::MAX / 4) as i32 {
+        return Err(Error::TimestampOutOfRange);
+    }
+
+    let quarter = dt.month0() / 3;
+    Ok((year as u32) * 4 + quarter)
+}
+
+pub fn quarter_to_string(quarter_idx: u32, config: &SlotConfig) -> String {
+    if config.testing_mode {
         format!("Testing Period {}", quarter_idx)
     } else {
         let year = quarter_idx / 4;
         let quarter = quarter_idx % 4;
         let quarter_name = match quarter {
             0 => "Q1",
-            1 => "Q2", 
+            1 => "Q2",
             2 => "Q3",
             3 => "Q4",
             _ => unreachable!(),
@@ -42,219 +248,559 @@ pub fn quarter_to_string(quarter_idx: u32) -> String {
     }
 }
 
-/// Convert block height to testing period index (for testing mode)
-fn block_height_to_period(block_height: u32) -> u32 {
-    block_height / TESTING_BLOCKS_PER_PERIOD
-}
-
-/// Get current period index based on mode
-fn get_current_period(timestamp_or_height: u64, block_height: Option<u32>) -> u32 {
-    if TESTING_MODE {
-        block_height_to_period(block_height.expect("Block height required in testing mode"))
+fn get_current_period(
+    timestamp: u64,
+    block_height: Option<u32>,
+    config: &SlotConfig,
+) -> Result<u32, Error> {
+    if config.testing_mode {
+        let height = block_height.unwrap_or(0);
+        Ok(height / config.testing_blocks_per_period)
     } else {
-        quarter_index(timestamp_or_height)
+        timestamp_to_quarter_index(timestamp)
     }
 }
 
 #[derive(Clone)]
 pub struct Dbs {
-    /// period_index → total slots
-    total: DatabaseUnique<SerdeBincode<u32>, SerdeBincode<u64>>,
-    /// last processed period
-    last: DatabaseUnique<UnitKey, SerdeBincode<u32>>,
-    /// track active window bounds: (start_period, end_period)
-    active_window: DatabaseUnique<UnitKey, SerdeBincode<(u32, u32)>>,
-    /// track when periods were expired: period → expiry_period
-    expired_periods: DatabaseUnique<SerdeBincode<u32>, SerdeBincode<u32>>,
+    period_slots: DatabaseUnique<SerdeBincode<u32>, SerdeBincode<Vec<Slot>>>,
+    config: SlotConfig,
 }
 
 impl Dbs {
+    pub const NUM_DBS: u32 = 1;
+
     pub fn new(env: &Env, rwtxn: &mut RwTxn<'_>) -> Result<Self, Error> {
+        Self::new_with_config(env, rwtxn, SlotConfig::default())
+    }
+
+    pub fn new_with_config(
+        env: &Env,
+        rwtxn: &mut RwTxn<'_>,
+        config: SlotConfig,
+    ) -> Result<Self, Error> {
         Ok(Self {
-            total: DatabaseUnique::create(env, rwtxn, "slots_total")?,
-            last: DatabaseUnique::create(env, rwtxn, "slots_last")?,
-            active_window: DatabaseUnique::create(env, rwtxn, "slots_active_window")?,
-            expired_periods: DatabaseUnique::create(env, rwtxn, "slots_expired_periods")?,
+            period_slots: DatabaseUnique::create(env, rwtxn, "period_slots")?,
+            config,
         })
     }
 
-    pub fn mint_genesis(&self, rwtxn: &mut RwTxn<'_>, ts_secs: u64, block_height: u32) -> Result<(), Error> {
-        // check if genesis has already been minted
-        if self.last.try_get(rwtxn, &())?.is_some() {
-            return Err(Error::GenesisAlreadyInitialized);
-        }
-        
-        let start_period = get_current_period(ts_secs, Some(block_height));
-        
-        // Create declining pattern: 500, 475, 450, ..., 25 (total: 5250 slots)
-        for offset in 0..FUTURE_PERIODS {
-            let period = start_period + offset;
-            let slots = 500 - (offset as u64 * 25); // 500, 475, 450, ..., 25
-            self.total.put(rwtxn, &period, &slots)?;
+    fn get_current_period(
+        &self,
+        ts_secs: u64,
+        block_height: Option<u32>,
+    ) -> Result<u32, Error> {
+        get_current_period(ts_secs, block_height, &self.config)
+    }
+
+    fn get_active_window(
+        &self,
+        ts_secs: u64,
+        block_height: Option<u32>,
+    ) -> Result<(u32, u32), Error> {
+        let current = self.get_current_period(ts_secs, block_height)?;
+        Ok((current, current + FUTURE_PERIODS - 1))
+    }
+
+    // Declining pattern: 500→475→450→...→25 over 20 future periods
+    fn calculate_available_slots(
+        &self,
+        period: u32,
+        current_period: u32,
+    ) -> u64 {
+        if period < current_period.saturating_sub(4) {
+            return 0;
         }
 
-        // Set active window bounds
-        let end_period = start_period + FUTURE_PERIODS - 1;
-        self.active_window.put(rwtxn, &(), &(start_period, end_period))?;
+        if period < current_period && period >= current_period.saturating_sub(4)
+        {
+            return 0;
+        }
 
-        // record mint through start_period
-        self.last.put(rwtxn, &(), &start_period)?;
+        if period < current_period {
+            return 0;
+        }
+
+        let offset = period - current_period;
+        if offset >= FUTURE_PERIODS {
+            return 0;
+        }
+
+        500u64.saturating_sub(offset as u64 * 25)
+    }
+
+    pub fn mint_genesis(
+        &self,
+        rwtxn: &mut RwTxn<'_>,
+        ts_secs: u64,
+        block_height: u32,
+    ) -> Result<(), Error> {
+        let current_period =
+            self.get_current_period(ts_secs, Some(block_height))?;
+        self.mint_periods_up_to(rwtxn, current_period + FUTURE_PERIODS - 1)?;
         Ok(())
     }
 
-    /// Add slots to all existing periods and advance the active window
-    pub fn mint_up_to(&self, rwtxn: &mut RwTxn<'_>, ts_secs: u64, block_height: u32) -> Result<(), Error> {
-        let curr_period = get_current_period(ts_secs, Some(block_height));
-        let last_period = self.last.try_get(rwtxn, &())?.unwrap_or(curr_period);
-
-        for p in (last_period + 1)..=curr_period {
-            // FIRST: Shift the active window and mark expired periods
-            self.shift_active_window(rwtxn, p)?;
-            
-            // SECOND: Add slots only to the NEW active periods (not expired ones)
-            self.add_slots_to_active_periods(rwtxn, SLOTS_PER_PERIOD)?;
-
-            // THIRD: Clean up old expired periods
-            self.cleanup_old_periods(rwtxn, p)?;
-        }
-
-        // update last‐processed period
-        self.last.put(rwtxn, &(), &curr_period)?;
+    pub fn mint_up_to(
+        &self,
+        rwtxn: &mut RwTxn<'_>,
+        ts_secs: u64,
+        block_height: u32,
+    ) -> Result<(), Error> {
+        let current_period =
+            self.get_current_period(ts_secs, Some(block_height))?;
+        let target_period = current_period + FUTURE_PERIODS - 1;
+        self.mint_periods_up_to(rwtxn, target_period)?;
         Ok(())
     }
 
-    fn add_slots_to_active_periods(&self, rwtxn: &mut RwTxn<'_>, slots_to_add: u64) -> Result<(), Error> {
-        // Get the CURRENT active window (after shifting)
-        let (start, end) = self.active_window.try_get(rwtxn, &())?.unwrap_or((0, FUTURE_PERIODS - 1));
-        
-        // Add slots to ALL active periods EXCEPT the newest one (which was just created with base amount)
-        for period in start..end { // Note: end is exclusive now
-            if let Some(current_slots) = self.total.try_get(rwtxn, &period)? {
-                self.total.put(rwtxn, &period, &(current_slots + slots_to_add))?;
-            }
-        }
-        Ok(())
-    }
-    
-    fn shift_active_window(&self, rwtxn: &mut RwTxn<'_>, new_period: u32) -> Result<(), Error> {
-        let (current_start, _) = self.active_window.try_get(rwtxn, &())?.unwrap_or((0, FUTURE_PERIODS - 1));
-        
-        let new_end_period = new_period + FUTURE_PERIODS - 1;
-        
-        // Create the new end period with 25 slots (this is the initial amount, not additional)
-        self.total.put(rwtxn, &new_end_period, &SLOTS_PER_PERIOD)?;
-        
-        // Mark the oldest active period as expired (will be cleaned up after 4 periods)
-        let oldest_active = current_start;
-        self.expired_periods.put(rwtxn, &oldest_active, &new_period)?; // expires at new_period
-        
-        // Update active window bounds
-        self.active_window.put(rwtxn, &(), &(new_period, new_end_period))?;
-        Ok(())
-    }
-    
-    fn cleanup_old_periods(&self, rwtxn: &mut RwTxn<'_>, current_period: u32) -> Result<(), Error> {
-        // Find periods that expired more than 4 periods ago
-        let cutoff_period = current_period.saturating_sub(4);
-        
-        let to_delete = {
-            let mut to_delete = Vec::new();
-            let mut iter = self.expired_periods.iter(rwtxn)?;
-            
-            while let Some((period, expired_at)) = iter.next()? {
-                if expired_at <= cutoff_period {
-                    to_delete.push(period);
+    fn mint_periods_up_to(
+        &self,
+        rwtxn: &mut RwTxn<'_>,
+        target_period: u32,
+    ) -> Result<(), Error> {
+        let mut highest_existing = 0u32;
+        {
+            let mut iter = self.period_slots.iter(rwtxn)?;
+            while let Some((period, _)) = iter.next()? {
+                if period > highest_existing {
+                    highest_existing = period;
                 }
             }
-            to_delete
-        }; // Iterator is dropped here
-        
-        for period in to_delete {
-            self.total.delete(rwtxn, &period)?;
-            self.expired_periods.delete(rwtxn, &period)?;
         }
+
+        for period in (highest_existing + 1)..=target_period {
+            if self.period_slots.try_get(rwtxn, &period)?.is_none() {
+                let empty_period: Vec<Slot> = Vec::new();
+                self.period_slots.put(rwtxn, &period, &empty_period)?;
+            }
+        }
+
         Ok(())
     }
 
-    /// How many slots have been minted for quarter `q` so far?
-    pub fn total_for(&self, rotxn: &sneed::RoTxn, q: u32) -> Result<u64, Error> {
-        Ok(self.total.try_get(rotxn, &q)?.unwrap_or(0))
+    pub fn total_for(
+        &self,
+        _rotxn: &sneed::RoTxn,
+        period: u32,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> Result<u64, Error> {
+        let current_period =
+            self.get_current_period(current_ts, current_height)?;
+        Ok(self.calculate_available_slots(period, current_period))
     }
 
-    /// Get only active periods (within the current 20-period window)
-    pub fn get_active_periods(&self, rotxn: &sneed::RoTxn) -> Result<Vec<(u32, u64)>, Error> {
-        let (start, end) = self.active_window.try_get(rotxn, &())?.unwrap_or((0, FUTURE_PERIODS - 1));
-        
+    pub fn get_active_periods(
+        &self,
+        _rotxn: &sneed::RoTxn,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> Result<Vec<(u32, u64)>, Error> {
+        let current_period =
+            self.get_current_period(current_ts, current_height)?;
         let mut periods = Vec::new();
-        for period in start..=end {
-            if let Some(slots) = self.total.try_get(rotxn, &period)? {
+
+        for period in current_period..=(current_period + FUTURE_PERIODS - 1) {
+            let slots = self.calculate_available_slots(period, current_period);
+            if slots > 0 {
                 periods.push((period, slots));
             }
         }
+
         Ok(periods)
     }
 
-    /// Convert timestamp to quarter index (public utility function)
-    pub fn timestamp_to_quarter(ts_secs: u64) -> u32 {
-        quarter_index(ts_secs)
+    pub fn timestamp_to_quarter(ts_secs: u64) -> Result<u32, Error> {
+        timestamp_to_quarter_index(ts_secs)
     }
 
-    /// Check if we're in testing mode
-    pub fn is_testing_mode() -> bool {
-        TESTING_MODE
+    pub fn is_testing_mode(&self) -> bool {
+        self.config.testing_mode
     }
 
-    /// Get the current testing period interval (blocks per period)
-    pub fn get_testing_blocks_per_period() -> u32 {
-        TESTING_BLOCKS_PER_PERIOD
+    pub fn get_testing_blocks_per_period(&self) -> u32 {
+        self.config.testing_blocks_per_period
     }
 
-    /// Convert block height to testing period (public utility function)
-    pub fn block_height_to_testing_period(block_height: u32) -> u32 {
-        block_height_to_period(block_height)
+    pub fn block_height_to_testing_period(&self, block_height: u32) -> u32 {
+        block_height / self.config.testing_blocks_per_period
     }
 
-    /// Get all quarters that have slots minted (active + expired, for admin/debug)
-    pub fn get_all_quarters_with_slots(&self, rotxn: &sneed::RoTxn) -> Result<Vec<(u32, u64)>, Error> {
-        let mut quarters = Vec::new();
-        let mut iter = self.total.iter(rotxn)?;
-        while let Some((quarter, slots)) = iter.next()? {
-            if slots > 0 {
-                quarters.push((quarter, slots));
+    pub fn get_config(&self) -> &SlotConfig {
+        &self.config
+    }
+
+    pub fn quarter_to_string(&self, quarter_idx: u32) -> String {
+        quarter_to_string(quarter_idx, &self.config)
+    }
+
+    pub fn is_period_too_old(
+        &self,
+        slot_period: u32,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> bool {
+        let current_period = self
+            .get_current_period(current_ts, current_height)
+            .unwrap_or(0);
+        slot_period < current_period.saturating_sub(4)
+    }
+
+    pub fn is_period_in_voting(
+        &self,
+        slot_period: u32,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> bool {
+        let current_period = self
+            .get_current_period(current_ts, current_height)
+            .unwrap_or(0);
+        slot_period < current_period
+            && slot_period >= current_period.saturating_sub(4)
+    }
+
+    pub fn is_slot_too_old(
+        &self,
+        slot_id: SlotId,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> bool {
+        self.is_period_too_old(
+            slot_id.period_index(),
+            current_ts,
+            current_height,
+        )
+    }
+
+    pub fn is_slot_in_voting(
+        &self,
+        slot_id: SlotId,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> bool {
+        self.is_period_in_voting(
+            slot_id.period_index(),
+            current_ts,
+            current_height,
+        )
+    }
+
+    pub fn purge_old_slots(
+        &self,
+        rwtxn: &mut sneed::RwTxn,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> Result<usize, Error> {
+        let current_period =
+            self.get_current_period(current_ts, current_height)?;
+        let cutoff_period = current_period.saturating_sub(4);
+        let voting_start = current_period.saturating_sub(4);
+        let voting_end = current_period;
+
+        let mut periods_to_purge = Vec::new();
+        let mut total_slots_purged = 0;
+
+        {
+            let mut iter = self.period_slots.iter(rwtxn)?;
+            while let Some((period, slots)) = iter.next()? {
+                let should_purge = if period < cutoff_period {
+                    true
+                } else if period >= voting_start && period < voting_end {
+                    slots.is_empty()
+                } else {
+                    false
+                };
+
+                if should_purge {
+                    total_slots_purged += slots.len();
+                    periods_to_purge.push(period);
+                }
             }
         }
-        Ok(quarters)
-    }
 
-    /// Get expired periods (those marked for cleanup but not yet purged)
-    pub fn get_expired_periods(&self, rotxn: &sneed::RoTxn) -> Result<Vec<(u32, u32, u64)>, Error> {
-        let mut expired = Vec::new();
-        let mut iter = self.expired_periods.iter(rotxn)?;
-        while let Some((period, expired_at)) = iter.next()? {
-            // Get the slots for this expired period
-            let slots = self.total.try_get(rotxn, &period)?.unwrap_or(0);
-            expired.push((period, expired_at, slots));
+        for period in periods_to_purge {
+            self.period_slots.delete(rwtxn, &period)?;
         }
-        Ok(expired)
+
+        Ok(total_slots_purged)
     }
 
-    /// Get slots for a range of quarters
-    pub fn get_slots_for_range(&self, rotxn: &sneed::RoTxn, start_quarter: u32, end_quarter: u32) -> Result<Vec<(u32, u64)>, Error> {
-        let mut quarters = Vec::new();
-        for q in start_quarter..=end_quarter {
-            let slots = self.total_for(rotxn, q)?;
-            if slots > 0 {
-                quarters.push((q, slots));
+    pub fn claim_slot(
+        &self,
+        rwtxn: &mut RwTxn<'_>,
+        slot_id: SlotId,
+        decision: Decision,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> Result<(), Error> {
+        let period_index = slot_id.period_index();
+        let slot_index = slot_id.slot_index();
+        let current_period =
+            self.get_current_period(current_ts, current_height)?;
+
+        if self.is_slot_too_old(slot_id, current_ts, current_height) {
+            return Err(Error::SlotNotAvailable {
+                slot_id,
+                reason: format!(
+                    "Slot period {} is too old and should be purged",
+                    period_index
+                ),
+            });
+        }
+
+        if self.is_slot_in_voting(slot_id, current_ts, current_height) {
+            return Err(Error::SlotNotAvailable {
+                slot_id,
+                reason: format!(
+                    "Period {} is in voting period - no new slots can be claimed",
+                    period_index
+                ),
+            });
+        }
+
+        if period_index > current_period + FUTURE_PERIODS - 1 {
+            return Err(Error::SlotNotAvailable {
+                slot_id,
+                reason: format!(
+                    "Slot period {} exceeds maximum allowed period {} (current + 20)",
+                    period_index,
+                    current_period + FUTURE_PERIODS - 1
+                ),
+            });
+        }
+
+        if decision.is_standard {
+            if slot_index > STANDARD_SLOT_MAX {
+                return Err(Error::SlotNotAvailable {
+                    slot_id,
+                    reason: format!(
+                        "Standard slots must have index <= {}, got {}",
+                        STANDARD_SLOT_MAX, slot_index
+                    ),
+                });
+            }
+
+            let (start_period, end_period) =
+                self.get_active_window(current_ts, current_height)?;
+            if period_index < start_period || period_index > end_period {
+                return Err(Error::SlotNotAvailable {
+                    slot_id,
+                    reason: format!(
+                        "Period {} is not in active window for new slots ({}-{})",
+                        period_index, start_period, end_period
+                    ),
+                });
+            }
+
+            let total_slots = self.total_for(
+                rwtxn,
+                period_index,
+                current_ts,
+                current_height,
+            )?;
+            if slot_index as u64 >= total_slots {
+                return Err(Error::SlotNotAvailable {
+                    slot_id,
+                    reason: format!(
+                        "Standard slot index {} exceeds available slots {} for period {}",
+                        slot_index, total_slots, period_index
+                    ),
+                });
+            }
+        } else {
+            if slot_index < NONSTANDARD_SLOT_MIN {
+                return Err(Error::SlotNotAvailable {
+                    slot_id,
+                    reason: format!(
+                        "Non-standard slots must have index >= {}, got {}",
+                        NONSTANDARD_SLOT_MIN, slot_index
+                    ),
+                });
             }
         }
-        Ok(quarters)
+
+        let mut period_slots = self
+            .period_slots
+            .try_get(rwtxn, &period_index)?
+            .unwrap_or_default();
+
+        for slot in &period_slots {
+            if slot.slot_id == slot_id {
+                return Err(Error::SlotAlreadyClaimed { slot_id });
+            }
+        }
+
+        let new_slot = Slot {
+            slot_id,
+            decision: Some(decision),
+        };
+        period_slots.push(new_slot);
+        self.period_slots.put(rwtxn, &period_index, &period_slots)?;
+
+        Ok(())
     }
 
-    /// Get slots for quarters around a timestamp (±range quarters)
-    pub fn get_slots_around_time(&self, rotxn: &sneed::RoTxn, ts_secs: u64, range: u32) -> Result<Vec<(u32, u64)>, Error> {
-        let center_quarter = quarter_index(ts_secs);
-        let start_quarter = center_quarter.saturating_sub(range);
-        let end_quarter = center_quarter + range;
-        self.get_slots_for_range(rotxn, start_quarter, end_quarter)
+    pub fn get_slot(
+        &self,
+        rotxn: &sneed::RoTxn,
+        slot_id: SlotId,
+    ) -> Result<Option<Slot>, Error> {
+        let period = slot_id.period_index();
+        if let Some(period_slots) = self.period_slots.try_get(rotxn, &period)? {
+            for slot in period_slots {
+                if slot.slot_id == slot_id {
+                    return Ok(Some(slot));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn get_available_slots_in_period(
+        &self,
+        rotxn: &sneed::RoTxn,
+        period_index: u32,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> Result<Vec<SlotId>, Error> {
+        let total_slots =
+            self.total_for(rotxn, period_index, current_ts, current_height)?;
+        let mut available_slots = Vec::new();
+
+        let max_slot_index =
+            std::cmp::min(total_slots, (STANDARD_SLOT_MAX + 1) as u64);
+        for slot_index in 0..max_slot_index {
+            let slot_id = SlotId::new(period_index, slot_index as u32)?;
+
+            match self.get_slot(rotxn, slot_id)? {
+                None => {
+                    available_slots.push(slot_id);
+                }
+                Some(slot) => match slot.decision {
+                    Some(_) => {}
+                    None => {
+                        available_slots.push(slot_id);
+                    }
+                },
+            }
+        }
+
+        Ok(available_slots)
+    }
+
+    pub fn get_claimed_slots_in_period(
+        &self,
+        rotxn: &sneed::RoTxn,
+        period_index: u32,
+    ) -> Result<Vec<Slot>, Error> {
+        let mut claimed_slots = Vec::new();
+
+        if let Some(period_slots) =
+            self.period_slots.try_get(rotxn, &period_index)?
+        {
+            for slot in period_slots {
+                if matches!(slot.decision, Some(_)) {
+                    claimed_slots.push(slot);
+                }
+            }
+        }
+
+        Ok(claimed_slots)
+    }
+
+    pub fn get_claimed_slot_count_in_period(
+        &self,
+        rotxn: &sneed::RoTxn,
+        period_index: u32,
+    ) -> Result<u64, Error> {
+        let mut count = 0;
+
+        if let Some(period_slots) =
+            self.period_slots.try_get(rotxn, &period_index)?
+        {
+            for slot in period_slots {
+                if matches!(slot.decision, Some(_)) {
+                    count += 1;
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
+    pub fn get_voting_periods(
+        &self,
+        rotxn: &sneed::RoTxn,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> Result<Vec<(u32, u64, u64)>, Error> {
+        let current_period =
+            self.get_current_period(current_ts, current_height)?;
+        let mut voting_periods = Vec::new();
+
+        let voting_start = current_period.saturating_sub(4);
+        let voting_end = current_period;
+
+        for period in voting_start..voting_end {
+            let count = self.get_claimed_slot_count_in_period(rotxn, period)?;
+            if count > 0 {
+                let total_slots = 500u64;
+                voting_periods.push((period, count, total_slots));
+            }
+        }
+
+        voting_periods.sort_by_key(|(period, _, _)| *period);
+        Ok(voting_periods)
+    }
+
+    pub fn get_period_summary(
+        &self,
+        rotxn: &sneed::RoTxn,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> Result<(Vec<(u32, u64)>, Vec<(u32, u64)>), Error> {
+        let active_periods =
+            self.get_active_periods(rotxn, current_ts, current_height)?;
+        let voting_periods_full =
+            self.get_voting_periods(rotxn, current_ts, current_height)?;
+        let voting_periods = voting_periods_full
+            .into_iter()
+            .map(|(period, claimed, _total)| (period, claimed))
+            .collect();
+
+        Ok((active_periods, voting_periods))
+    }
+
+    pub fn revert_claim_slot(
+        &self,
+        rwtxn: &mut RwTxn<'_>,
+        slot_id: SlotId,
+    ) -> Result<(), Error> {
+        let period_index = slot_id.period_index();
+
+        let mut period_slots = self
+            .period_slots
+            .try_get(rwtxn, &period_index)?
+            .unwrap_or_default();
+
+        let original_len = period_slots.len();
+        period_slots.retain(|slot| slot.slot_id != slot_id);
+
+        if period_slots.len() == original_len {
+            tracing::debug!(
+                "Attempted to revert slot {:?} that wasn't found",
+                slot_id
+            );
+            return Ok(());
+        }
+
+        if period_slots.is_empty() {
+            self.period_slots.delete(rwtxn, &period_index)?;
+        } else {
+            self.period_slots.put(rwtxn, &period_index, &period_slots)?;
+        }
+
+        Ok(())
     }
 }

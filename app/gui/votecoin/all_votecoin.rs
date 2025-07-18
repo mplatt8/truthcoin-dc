@@ -1,12 +1,6 @@
-use std::collections::HashMap;
-
 use eframe::egui;
-use truthcoin_dc::types::FilledOutput;
 
-use crate::{
-    app::App,
-    gui::util::UiExt,
-};
+use crate::{app::App, gui::util::UiExt};
 
 #[derive(Debug, Default)]
 pub(super) struct AllVotecoin {
@@ -17,14 +11,19 @@ impl AllVotecoin {
     fn show_votecoin(&mut self, ui: &mut egui::Ui, total_votecoin: u32) {
         ui.heading("Votecoin Balance");
         ui.separator();
-        
+
         ui.horizontal(|ui| {
             ui.monospace("Total Votecoin: ");
-            ui.monospace_selectable_singleline(false, format!("{}", total_votecoin));
+            ui.monospace_selectable_singleline(
+                false,
+                format!("{}", total_votecoin),
+            );
         });
-        
+
         ui.separator();
-        ui.label("Votecoin is a fixed supply token with 1,000,000 total units.");
+        ui.label(
+            "Votecoin is a fixed supply token with 1,000,000 total units.",
+        );
         ui.label("Each unit represents voting power in the system.");
     }
 

@@ -6,20 +6,20 @@ use fraction::Fraction;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use l2l_openapi::open_api;
 
+use serde::{Deserialize, Serialize};
 use truthcoin_dc::{
     authorization::{Dst, Signature},
     net::{Peer, PeerConnectionStatus},
     state::AmmPoolState,
     types::{
-        Address, AssetId, Authorization, BitcoinOutputContent, Block, BlockHash, Body,
-        EncryptionPubKey, FilledOutputContent, Header, MerkleRoot, OutPoint, Output,
-        OutputContent, PointedOutput, Transaction, TxData, TxIn, Txid,
-        VerifyingKey, WithdrawalBundle, WithdrawalOutputContent,
-        schema as truthcoin_schema,
+        Address, AssetId, Authorization, BitcoinOutputContent, Block,
+        BlockHash, Body, EncryptionPubKey, FilledOutputContent, Header,
+        MerkleRoot, OutPoint, Output, OutputContent, PointedOutput,
+        Transaction, TxData, TxIn, Txid, VerifyingKey, WithdrawalBundle,
+        WithdrawalOutputContent, schema as truthcoin_schema,
     },
     wallet::Balance,
 };
-use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 mod schema;
@@ -35,31 +35,65 @@ pub struct TxInfo {
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct SlotInfo {
-    /// Period/quarter number
     pub period: u32,
-    /// Number of slots available in this period
     pub slots: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
-pub struct ExpiredSlotInfo {
-    /// Period/quarter number
+pub struct SlotDetails {
+    pub slot_id_hex: String,
+    pub period_index: u32,
+    pub slot_index: u32,
+    pub content: SlotContentInfo,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub enum SlotContentInfo {
+    Empty,
+    Decision(DecisionInfo),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct DecisionInfo {
+    pub id: String,
+    pub market_maker_pubkey_hash: String,
+    pub is_standard: bool,
+    pub is_scaled: bool,
+    pub question: String,
+    pub min: Option<u16>,
+    pub max: Option<u16>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct ClaimedSlotSummary {
+    pub slot_id_hex: String,
+    pub period_index: u32,
+    pub slot_index: u32,
+    pub market_maker_pubkey_hash: String,
+    pub is_standard: bool,
+    pub is_scaled: bool,
+    pub question_preview: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct VotingPeriodInfo {
     pub period: u32,
-    /// Period when this expired (for cleanup tracking)
-    pub expired_at: u32,
-    /// Number of slots in this expired period
-    pub slots: u64,
+    pub claimed_slots: u64,
+    pub total_slots: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct AvailableSlotId {
+    pub period_index: u32,
+    pub slot_index: u32,
+    pub slot_id_hex: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct SlotStatus {
-    /// Whether the system is in testing mode (block-based) or production mode (time-based)
     pub is_testing_mode: bool,
-    /// In testing mode: blocks per period. In production mode: always 0
     pub blocks_per_period: u32,
-    /// Current period/quarter number
     pub current_period: u32,
-    /// Human-readable name for the current period
     pub current_period_name: String,
 }
 
@@ -68,9 +102,9 @@ pub struct SlotStatus {
     truthcoin_schema::BitcoinTransaction, truthcoin_schema::BitcoinOutPoint,
     truthcoin_schema::SocketAddr, Address, AssetId, Authorization,
     BitcoinOutputContent, BlockHash, Body, EncryptionPubKey,
-    ExpiredSlotInfo, FilledOutputContent, Header, MerkleRoot, OutPoint, Output, OutputContent,
+    FilledOutputContent, Header, MerkleRoot, OutPoint, Output, OutputContent,
     PeerConnectionStatus, Signature, SlotInfo, SlotStatus, Transaction, TxData, Txid, TxIn,
-    WithdrawalOutputContent, VerifyingKey,
+    VotingPeriodInfo, WithdrawalOutputContent, VerifyingKey,
 ])]
 #[rpc(client, server)]
 pub trait Rpc {
@@ -404,9 +438,51 @@ pub trait Rpc {
 
     /// Convert block height to testing period (testing mode only)
     #[method(name = "block_height_to_testing_period")]
-    async fn block_height_to_testing_period(&self, block_height: u32) -> RpcResult<u32>;
+    async fn block_height_to_testing_period(
+        &self,
+        block_height: u32,
+    ) -> RpcResult<u32>;
 
-    /// Get expired periods (those marked for cleanup but not yet purged)
-    #[method(name = "slots_get_expired")]
-    async fn slots_get_expired(&self) -> RpcResult<Vec<ExpiredSlotInfo>>;
+    /// Claim a decision slot with a new decision/question
+    #[method(name = "claim_decision_slot")]
+    async fn claim_decision_slot(
+        &self,
+        period_index: u32,
+        slot_index: u32,
+        is_standard: bool,
+        is_scaled: bool,
+        question: String,
+        min: Option<u16>,
+        max: Option<u16>,
+        fee_sats: u64,
+    ) -> RpcResult<Txid>;
+
+    /// Get all available (unclaimed) slot IDs in a specific period
+    #[method(name = "get_available_slots_in_period")]
+    async fn get_available_slots_in_period(
+        &self,
+        period_index: u32,
+    ) -> RpcResult<Vec<AvailableSlotId>>;
+
+    /// Get a specific slot by its ID
+    #[method(name = "get_slot_by_id")]
+    async fn get_slot_by_id(
+        &self,
+        slot_id_hex: String,
+    ) -> RpcResult<Option<SlotDetails>>;
+
+    /// Get all claimed slots for a specific period
+    #[method(name = "get_claimed_slots_in_period")]
+    async fn get_claimed_slots_in_period(
+        &self,
+        period_index: u32,
+    ) -> RpcResult<Vec<ClaimedSlotSummary>>;
+
+    /// Get periods currently in voting phase with claimed/total slot counts
+    #[method(name = "get_voting_periods")]
+    async fn get_voting_periods(&self) -> RpcResult<Vec<VotingPeriodInfo>>;
+
+    /// Check if a slot is in voting period
+    #[method(name = "is_slot_in_voting")]
+    async fn is_slot_in_voting(&self, slot_id_hex: String) -> RpcResult<bool>;
 }

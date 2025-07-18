@@ -1,4 +1,3 @@
-#![feature(let_chains)]
 #![feature(try_find)]
 
 use std::path::Path;

@@ -625,11 +625,11 @@ impl State {
         )
     }
 
-    pub fn purge_old_slots(&self, rwtxn: &mut RwTxn) -> Result<usize, Error> {
-        let current_ts = self.try_get_mainchain_timestamp(rwtxn)?.unwrap_or(0);
-        let current_height = self.try_get_height(rwtxn)?;
+    pub fn get_ossified_slots(&self, rotxn: &RoTxn) -> Result<Vec<crate::state::slots::Slot>, Error> {
+        let current_ts = self.try_get_mainchain_timestamp(rotxn)?.unwrap_or(0);
+        let current_height = self.try_get_height(rotxn)?;
         self.slots
-            .purge_old_slots(rwtxn, current_ts, current_height)
+            .get_ossified_slots(rotxn, current_ts, current_height)
     }
 
     pub fn is_slot_in_voting(

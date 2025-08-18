@@ -3,9 +3,7 @@ use eframe::egui;
 use crate::{app::App, gui::util::UiExt};
 
 #[derive(Debug, Default)]
-pub(super) struct AllVotecoin {
-    query: String,
-}
+pub(super) struct AllVotecoin {}
 
 impl AllVotecoin {
     fn show_votecoin(&mut self, ui: &mut egui::Ui, total_votecoin: u32) {

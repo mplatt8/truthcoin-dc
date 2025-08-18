@@ -944,12 +944,10 @@ where
         Ok(self.state.is_slot_in_voting(&rotxn, slot_id)?)
     }
 
-    /// Manually purge old slots (returns count of purged slots)
-    pub fn purge_old_slots(&self) -> Result<usize, Error> {
-        let mut rwtxn = self.env.write_txn()?;
-        let count = self.state.purge_old_slots(&mut rwtxn)?;
-        rwtxn.commit().map_err(RwTxnError::from)?;
-        Ok(count)
+    /// Get ossified slots (slots whose voting period has ended)
+    pub fn get_ossified_slots(&self) -> Result<Vec<crate::state::slots::Slot>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.get_ossified_slots(&rotxn)?)
     }
 
     /// Get periods that are currently in voting phase

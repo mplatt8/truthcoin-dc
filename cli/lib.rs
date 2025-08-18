@@ -271,6 +271,8 @@ pub enum Command {
     },
     /// Get periods currently in voting phase
     GetVotingPeriods,
+    /// Get ossified slots (slots whose voting period has ended)
+    GetOssifiedSlots,
 }
 
 const DEFAULT_RPC_HOST: Host = Host::Ipv4(Ipv4Addr::LOCALHOST);
@@ -787,6 +789,39 @@ where
                             / period_info.total_slots as f64)
                             * 100.0
                     ));
+                }
+                result
+            }
+        }
+        Command::GetOssifiedSlots => {
+            let ossified_slots = rpc_client.get_ossified_slots().await?;
+            if ossified_slots.is_empty() {
+                "No ossified slots found".to_string()
+            } else {
+                let mut result = format!(
+                    "Ossified Slots ({} total):\n",
+                    ossified_slots.len()
+                );
+                result.push_str("==========================\n");
+                for slot in ossified_slots {
+                    result.push_str(&format!(
+                        "Slot {} (Period {}, Index {}): ",
+                        slot.slot_id_hex, slot.period_index, slot.slot_index
+                    ));
+                    if let Some(decision) = slot.decision {
+                        let question_preview = if decision.question.len() > 50 {
+                            format!("{}...", &decision.question[..50])
+                        } else {
+                            decision.question
+                        };
+                        result.push_str(&format!(
+                            "{} - {}\n",
+                            if decision.is_standard { "Standard" } else { "Non-standard" },
+                            question_preview
+                        ));
+                    } else {
+                        result.push_str("Empty slot\n");
+                    }
                 }
                 result
             }

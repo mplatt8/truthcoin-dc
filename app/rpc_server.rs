@@ -876,6 +876,38 @@ impl RpcServer for RpcServerImpl {
 
         Ok(is_voting)
     }
+
+    async fn get_ossified_slots(&self) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::OssifiedSlotInfo>> {
+        let ossified_slots = self.app.node.get_ossified_slots().map_err(custom_err)?;
+
+        let result = ossified_slots
+            .into_iter()
+            .map(|slot| {
+                let decision = slot.decision.map(|decision| {
+                    truthcoin_dc_app_rpc_api::DecisionInfo {
+                        id: hex::encode(decision.id),
+                        market_maker_pubkey_hash: hex::encode(
+                            decision.market_maker_pubkey_hash,
+                        ),
+                        is_standard: decision.is_standard,
+                        is_scaled: decision.is_scaled,
+                        question: decision.question,
+                        min: decision.min,
+                        max: decision.max,
+                    }
+                });
+
+                truthcoin_dc_app_rpc_api::OssifiedSlotInfo {
+                    slot_id_hex: slot.slot_id.to_hex(),
+                    period_index: slot.slot_id.period_index(),
+                    slot_index: slot.slot_id.slot_index(),
+                    decision,
+                }
+            })
+            .collect();
+
+        Ok(result)
+    }
 }
 
 #[derive(Clone, Debug)]

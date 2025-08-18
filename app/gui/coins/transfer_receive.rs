@@ -201,7 +201,7 @@ impl Receive {
                 .clicked()
             {
                 if let Some(Ok(address)) = &self.address {
-                    ui.output_mut(|o| o.copied_text = address.to_string());
+                    ui.ctx().copy_text(address.to_string());
                 }
             }
         });

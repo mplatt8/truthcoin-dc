@@ -119,7 +119,7 @@ mkdir -p /tmp/regtest-data/{bitcoin,electrs,enforcer,truthcoin}
 ### headless needs a l2 wallet created
 ```bash
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 generate-mnemonic
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 set-seed-from-mnemonic "peanut action luggage beach artist jacket bulb kiwi mobile steel good mechanic"
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 set-seed-from-mnemonic "wise siren dizzy garden hamster depend van round banana nose tree utility"
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-new-address
 
 ```
@@ -174,7 +174,7 @@ Get a Truthcoin address from your GUI or RPC, then:
 # Create deposit (replace ADDRESS with your Truthcoin address)
 grpcurl -plaintext -d '{
   "sidechain_id": 13,
-  "address": "ADDRESS",
+  "address": "Q1Qs4uBcgWxLymD1smACn8kgZEb",
   "value_sats": 100000000,
   "fee_sats": 10000
 }' 127.0.0.1:50051 cusf.mainchain.v1.WalletService.CreateDepositTransaction
@@ -222,4 +222,191 @@ After completing the setup:
 rm -rf /tmp/regtest-data
 ```
 
-**Note**: All services automatically manage their own wallets. The enforcer receives mining rewards and handles Bitcoin operations. The Truthcoin app manages the sidechain and Votecoin. 
+**Note**: All services automatically manage their own wallets. The enforcer receives mining rewards and handles Bitcoin operations. The Truthcoin app manages the sidechain and Votecoin.
+
+## Available CLI RPC Commands
+
+All commands use the format: `./target/debug/truthcoin_dc_app_cli --rpc-port 18332 <COMMAND> [OPTIONS]`
+
+### Wallet Management
+```bash
+# Generate a new mnemonic seed phrase
+generate-mnemonic
+
+# Set wallet seed from mnemonic
+set-seed-from-mnemonic "your twelve word mnemonic phrase here"
+
+# Get a new address
+get-new-address
+
+# Get all wallet addresses
+get-wallet-addresses
+
+# Get a new encryption key
+get-new-encryption-key
+
+# Get a new verifying key  
+get-new-verifying-key
+
+# Get wallet UTXOs
+get-wallet-utxos
+
+# List owned UTXOs
+my-utxos
+
+# List unconfirmed owned UTXOs
+my-unconfirmed-utxos
+```
+
+### Balance and Wealth
+```bash
+# Get Bitcoin balance in sats
+bitcoin-balance
+
+# Get total sidechain wealth
+sidechain-wealth
+```
+
+### Transfers and Deposits
+```bash
+# Transfer Bitcoin to address
+transfer DEST_ADDRESS --value-sats 1000000 --fee-sats 1000
+
+# Transfer Votecoin to address
+transfer-votecoin DEST_ADDRESS --amount 100 --fee-sats 1000
+
+# Create deposit to address
+create-deposit DEST_ADDRESS --value-sats 1000000 --fee-sats 1000
+
+# Withdraw to mainchain address
+withdraw MAINCHAIN_ADDRESS --amount-sats 1000000 --fee-sats 1000 --mainchain-fee-sats 10000
+
+# Format deposit address
+format-deposit-address ADDRESS
+```
+
+### Mining and Blocks
+```bash
+# Mine a sidechain block
+mine [--fee-sats 1000]
+
+# Get current block count
+get-blockcount
+
+# Get block data by hash
+get-block BLOCK_HASH
+
+# Get best mainchain block hash
+get-best-mainchain-block-hash
+
+# Get best sidechain block hash  
+get-best-sidechain-block-hash
+
+# Get BMM inclusions for block hash
+get-bmm-inclusions BLOCK_HASH
+```
+
+### Transactions
+```bash
+# Get transaction by txid
+get-transaction TXID
+
+# Get transaction info
+get-transaction-info TXID
+
+# Remove transaction from mempool
+remove-from-mempool TXID
+
+# List all UTXOs
+list-utxos
+```
+
+### AMM (Automated Market Maker)
+```bash
+# Get AMM pool state
+get-amm-pool-state --asset0 bitcoin --asset1 votecoin
+
+# Get AMM price
+get-amm-price --base bitcoin --quote votecoin
+
+# AMM swap
+amm-swap --asset-spend bitcoin --asset-receive votecoin --amount-spend 1000000
+
+# Mint AMM position
+amm-mint --asset0 bitcoin --asset1 votecoin --amount0 1000000 --amount1 100
+
+# Burn AMM position
+amm-burn --asset0 bitcoin --asset1 votecoin --lp-token-amount 1000
+```
+
+### Slots and Decisions
+```bash
+# List all slots by period
+slots-list-all
+
+# Get slots for specific period  
+slots-get-quarter 42
+
+# Show slot system status
+slots-status
+
+# Convert timestamp to period
+slots-convert-timestamp 1640995200
+
+# Claim a decision slot
+claim-decision-slot --period-index 42 --slot-index 100 --is-standard true --is-scaled false --question "Will Bitcoin reach $100k?" --fee-sats 1000
+
+# Get available slots in period
+get-available-slots --period-index 42
+
+# Get slot by ID
+get-slot-by-id --slot-id-hex "2a0064"
+
+# Get claimed slots in period
+get-claimed-slots --period-index 42
+
+# Check if slot is in voting period
+is-slot-in-voting --slot-id-hex "2a0064"
+
+# Get periods currently in voting phase
+get-voting-periods
+
+# Get ossified slots (slots whose voting period has ended)
+get-ossified-slots
+```
+
+### Networking
+```bash
+# Connect to peer
+connect-peer 127.0.0.1:8333
+
+# List connected peers
+list-peers
+```
+
+### Encryption and Signing
+```bash
+# Encrypt message to pubkey
+encrypt-msg --encryption-pubkey PUBKEY --msg "secret message"
+
+# Decrypt message
+decrypt-msg --encryption-pubkey PUBKEY --msg ENCRYPTED_HEX [--utf8]
+
+# Sign arbitrary message with verifying key
+sign-arbitrary-msg --verifying-key KEY --msg "message to sign"
+
+# Sign arbitrary message as address
+sign-arbitrary-msg-as-addr --address ADDRESS --msg "message to sign"
+
+# Verify signature
+verify-signature --signature SIG --verifying-key KEY --dst DST --msg "original message"
+```
+
+### Withdrawals
+```bash
+# Get pending withdrawal bundle
+pending-withdrawal-bundle
+
+# Get height of latest failed withdrawal bundle
+latest-failed-withdrawal-bundle-height
+```

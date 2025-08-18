@@ -435,7 +435,7 @@ impl Dbs {
         quarter_to_string(quarter_idx, &self.config)
     }
 
-    pub fn is_period_too_old(
+    pub fn is_period_ossified(
         &self,
         slot_period: u32,
         current_ts: u64,
@@ -460,17 +460,19 @@ impl Dbs {
             && slot_period >= current_period.saturating_sub(4)
     }
 
-    pub fn is_slot_too_old(
+    pub fn is_slot_ossified(
         &self,
         slot_id: SlotId,
         current_ts: u64,
         current_height: Option<u32>,
     ) -> bool {
-        self.is_period_too_old(
-            slot_id.period_index(),
-            current_ts,
-            current_height,
-        )
+        // A slot is ossified when its voting period has ended
+        // (more than 4 periods old)
+        let period = slot_id.period_index();
+        let current_period = self
+            .get_current_period(current_ts, current_height)
+            .unwrap_or(0);
+        period < current_period.saturating_sub(4)
     }
 
     pub fn is_slot_in_voting(
@@ -486,44 +488,27 @@ impl Dbs {
         )
     }
 
-    pub fn purge_old_slots(
+    pub fn get_ossified_slots(
         &self,
-        rwtxn: &mut sneed::RwTxn,
+        rotxn: &sneed::RoTxn,
         current_ts: u64,
         current_height: Option<u32>,
-    ) -> Result<usize, Error> {
+    ) -> Result<Vec<Slot>, Error> {
         let current_period =
             self.get_current_period(current_ts, current_height)?;
-        let cutoff_period = current_period.saturating_sub(4);
-        let voting_start = current_period.saturating_sub(4);
-        let voting_end = current_period;
-
-        let mut periods_to_purge = Vec::new();
-        let mut total_slots_purged = 0;
-
-        {
-            let mut iter = self.period_slots.iter(rwtxn)?;
-            while let Some((period, slots)) = iter.next()? {
-                let should_purge = if period < cutoff_period {
-                    true
-                } else if period >= voting_start && period < voting_end {
-                    slots.is_empty()
-                } else {
-                    false
-                };
-
-                if should_purge {
-                    total_slots_purged += slots.len();
-                    periods_to_purge.push(period);
-                }
+        let ossified_cutoff = current_period.saturating_sub(4);
+        
+        let mut ossified_slots = Vec::new();
+        
+        let mut iter = self.period_slots.iter(rotxn)?;
+        while let Some((period, slots)) = iter.next()? {
+            if period < ossified_cutoff {
+                // These slots are ossified (voting has ended)
+                ossified_slots.extend(slots);
             }
         }
-
-        for period in periods_to_purge {
-            self.period_slots.delete(rwtxn, &period)?;
-        }
-
-        Ok(total_slots_purged)
+        
+        Ok(ossified_slots)
     }
 
     pub fn claim_slot(
@@ -539,11 +524,11 @@ impl Dbs {
         let current_period =
             self.get_current_period(current_ts, current_height)?;
 
-        if self.is_slot_too_old(slot_id, current_ts, current_height) {
+        if self.is_slot_ossified(slot_id, current_ts, current_height) {
             return Err(Error::SlotNotAvailable {
                 slot_id,
                 reason: format!(
-                    "Slot period {} is too old and should be purged",
+                    "Slot period {} is ossified (voting has ended)",
                     period_index
                 ),
             });

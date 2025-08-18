@@ -214,15 +214,7 @@ pub fn connect(
         .mainchain_timestamp
         .put(rwtxn, &(), &mainchain_timestamp)?;
 
-    // Purge old slots to keep the database clean
-    let purged_count = state.purge_old_slots(rwtxn)?;
-    if purged_count > 0 {
-        tracing::debug!(
-            "Purged {} old slots at height {}",
-            purged_count,
-            height
-        );
-    }
+    // No longer purging old slots - they become ossified instead
 
     Ok(())
 }

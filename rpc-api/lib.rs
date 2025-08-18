@@ -97,6 +97,14 @@ pub struct SlotStatus {
     pub current_period_name: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct OssifiedSlotInfo {
+    pub slot_id_hex: String,
+    pub period_index: u32,
+    pub slot_index: u32,
+    pub decision: Option<DecisionInfo>,
+}
+
 #[open_api(ref_schemas[
     truthcoin_schema::BitcoinAddr, truthcoin_schema::BitcoinBlockHash,
     truthcoin_schema::BitcoinTransaction, truthcoin_schema::BitcoinOutPoint,
@@ -485,4 +493,8 @@ pub trait Rpc {
     /// Check if a slot is in voting period
     #[method(name = "is_slot_in_voting")]
     async fn is_slot_in_voting(&self, slot_id_hex: String) -> RpcResult<bool>;
+
+    /// Get ossified slots (slots whose voting period has ended)
+    #[method(name = "get_ossified_slots")]
+    async fn get_ossified_slots(&self) -> RpcResult<Vec<OssifiedSlotInfo>>;
 }

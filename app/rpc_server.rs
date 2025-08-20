@@ -981,18 +981,18 @@ impl RpcServer for RpcServerImpl {
                 .get_market_decisions(&market)
                 .map_err(custom_err)?;
 
-            // Calculate current prices
-            let prices = market.calculate_prices();
-            let current_prices: Vec<f64> = prices.to_vec();
-
-            // Generate outcome descriptions
+            // Generate outcome descriptions (filter out invalid states for user display)
             let mut outcomes = Vec::new();
-            for (state_idx, _) in market.state_combos.iter().enumerate() {
-                match market.describe_outcome_by_state(state_idx, &decisions) {
+            let valid_state_combos = market.get_valid_state_combos_for_display();
+            for (state_idx, _combo) in valid_state_combos.iter() {
+                match market.describe_outcome_by_state(*state_idx, &decisions) {
                     Ok(description) => outcomes.push(description),
                     Err(_) => outcomes.push(format!("Outcome {}", state_idx)),
                 }
             }
+            
+            // Calculate prices only for valid states (normalized to sum to 1.0)
+            let current_prices = market.calculate_prices_for_display();
 
             // Calculate volume (for now using treasury as a proxy)
             let volume = market.treasury;
@@ -1048,18 +1048,20 @@ impl RpcServer for RpcServerImpl {
             .get_market_decisions(&market)
             .map_err(custom_err)?;
 
-        // Calculate current prices
-        let prices = market.calculate_prices();
-
-        // Generate detailed outcome information
+        // Generate detailed outcome information (filter out invalid states for user display)
         let mut outcomes = Vec::new();
-        for (state_idx, _) in market.state_combos.iter().enumerate() {
-            let name = match market.describe_outcome_by_state(state_idx, &decisions) {
+        let valid_state_combos = market.get_valid_state_combos_for_display();
+        
+        // Calculate prices only for valid states (normalized to sum to 1.0)
+        let prices = market.calculate_prices_for_display();
+        
+        for (i, (state_idx, _combo)) in valid_state_combos.iter().enumerate() {
+            let name = match market.describe_outcome_by_state(*state_idx, &decisions) {
                 Ok(description) => description,
                 Err(_) => format!("Outcome {}", state_idx),
             };
 
-            let current_price = prices[state_idx];
+            let current_price = prices[i];
             let probability = current_price; // Price equals probability in LMSR
             let volume = 0.0; // TODO: Calculate per-outcome volume when trading is implemented
 

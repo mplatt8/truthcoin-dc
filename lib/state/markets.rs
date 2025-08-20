@@ -872,7 +872,7 @@ impl Market {
         // Calculate storage fee with quadratic scaling (with bounds checking)
         let storage_fee_sats = calculate_storage_fee_with_scaling(share_vector_length)?;
         
-        // Initialize 1D share arrays with zeros
+        // Initialize 1D share arrays with zeros for equal probability initialization
         let shares = Array::zeros(share_vector_length);
         let final_prices = Array::zeros(share_vector_length);
         
@@ -987,6 +987,33 @@ impl Market {
         
         // Normalize to get prices
         exp_shares.mapv(|x| x / sum)
+    }
+    
+    /// Calculate prices only for valid states (excludes invalid state combinations)
+    /// This normalizes prices among valid outcomes only, for user display
+    pub fn calculate_prices_for_display(&self) -> Vec<f64> {
+        let all_prices = self.calculate_prices();
+        let valid_state_combos = self.get_valid_state_combos_for_display();
+        
+        // Extract prices for valid states only
+        let valid_prices: Vec<f64> = valid_state_combos
+            .iter()
+            .map(|(state_idx, _)| all_prices[*state_idx])
+            .collect();
+        
+        // Renormalize so valid prices sum to 1.0
+        let valid_sum: f64 = valid_prices.iter().sum();
+        if valid_sum > 0.0 {
+            valid_prices.iter().map(|p| p / valid_sum).collect()
+        } else {
+            // If all prices are zero, return equal probabilities
+            let count = valid_prices.len();
+            if count > 0 {
+                vec![1.0 / count as f64; count]
+            } else {
+                vec![]
+            }
+        }
     }
     
     /// Update market with new share quantities
@@ -1112,9 +1139,23 @@ impl Market {
         vec![self.shares.len()]
     }
     
-    /// Get valid state combinations
+    /// Get valid state combinations (includes invalid states for resolution)
     pub fn get_state_combos(&self) -> &Vec<Vec<usize>> {
         &self.state_combos
+    }
+    
+    /// Get only valid state combinations for user display (filters out invalid states)
+    /// Invalid states (value 2 for binary decisions) are excluded from user view
+    /// but remain available for resolution purposes
+    pub fn get_valid_state_combos_for_display(&self) -> Vec<(usize, &Vec<usize>)> {
+        self.state_combos
+            .iter()
+            .enumerate()
+            .filter(|(_, combo)| {
+                // Filter out combinations that contain invalid states (value 2)
+                !combo.iter().any(|&value| value == 2)
+            })
+            .collect()
     }
     
     /// Get D_Functions

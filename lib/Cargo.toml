@@ -37,6 +37,7 @@ hex-literal = "0.4.1"
 itertools = { workspace = true }
 jsonrpsee = { workspace = true }
 libes = { workspace = true }
+ndarray = "0.15.6"
 nonempty = { version = "0.11.0", features = ["serialize"] }
 num = "0.4.1"
 parking_lot = { workspace = true }

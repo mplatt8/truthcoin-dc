@@ -1004,6 +1004,40 @@ where
     pub fn quarter_to_string(&self, quarter: u32) -> String {
         self.state.slots().quarter_to_string(quarter)
     }
+
+    /// Get all markets from the database
+    pub fn get_all_markets(&self) -> Result<Vec<crate::state::Market>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.markets().get_all_markets(&rotxn)?)
+    }
+
+    /// Get markets by state (Trading, Voting, Resolved, etc.)
+    pub fn get_markets_by_state(&self, state: crate::state::MarketState) -> Result<Vec<crate::state::Market>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.markets().get_markets_by_state(&rotxn, state)?)
+    }
+
+    /// Get a specific market by its ID
+    pub fn get_market_by_id(&self, market_id: &crate::state::MarketId) -> Result<Option<crate::state::Market>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.markets().get_market(&rotxn, market_id)?)
+    }
+
+    /// Get market decisions for a specific market (for detailed outcome descriptions)
+    pub fn get_market_decisions(&self, market: &crate::state::Market) -> Result<std::collections::HashMap<crate::state::slots::SlotId, crate::state::slots::Decision>, Error> {
+        let rotxn = self.env.read_txn()?;
+        let mut decisions = std::collections::HashMap::new();
+        
+        for &slot_id in &market.decision_slots {
+            if let Some(slot) = self.state.slots().get_slot(&rotxn, slot_id)? {
+                if let Some(decision) = slot.decision {
+                    decisions.insert(slot_id, decision);
+                }
+            }
+        }
+        
+        Ok(decisions)
+    }
 }
 
 /// Convert timestamp to quarter index (utility function)

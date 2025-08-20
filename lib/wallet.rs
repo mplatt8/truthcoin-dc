@@ -21,6 +21,7 @@ use tokio_stream::{StreamMap, wrappers::WatchStream};
 
 use crate::{
     authorization::{self, Authorization, Signature, get_address},
+    state::markets::{parse_dimensions, DimensionSpec},
     types::{
         Address, AmountOverflowError, AmountUnderflowError, AssetId,
         AuthorizedTransaction, BitcoinOutputContent, EncryptionPubKey,
@@ -103,6 +104,8 @@ pub enum Error {
     SeedAlreadyExists,
     #[error(transparent)]
     VkDoesNotExist(#[from] Box<VkDoesNotExistError>),
+    #[error("Invalid slot ID: {reason}")]
+    InvalidSlotId { reason: String },
 }
 
 /// Marker type for Wallet Env
@@ -937,6 +940,146 @@ impl Wallet {
         });
 
         Ok(())
+    }
+
+    /// Create a market transaction
+    pub fn create_market(
+        &self,
+        title: String,
+        description: String,
+        decision_slots: Vec<String>,
+        market_type: String,
+        has_residual: Option<bool>,
+        b: Option<f64>,
+        trading_fee: Option<f64>,
+        tags: Option<Vec<String>>,
+        fee: bitcoin::Amount,
+    ) -> Result<Transaction, Error> {
+        // Select minimal bitcoins to pay the fee + storage fee
+        let storage_fee = self.estimate_market_storage_fee(&decision_slots)?;
+        let total_fee = fee.checked_add(storage_fee).ok_or(AmountOverflowError)?;
+        
+        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(total_fee)?;
+        let change = total_bitcoin - total_fee;
+
+        let inputs = bitcoin_utxos.into_keys().collect();
+        let mut outputs = Vec::new();
+
+        // Add change output if needed
+        if change > bitcoin::Amount::ZERO {
+            outputs.push(Output::new(
+                self.get_new_address()?,
+                OutputContent::Bitcoin(BitcoinOutputContent(change)),
+            ));
+        }
+
+        let mut tx = Transaction::new(inputs, outputs);
+
+        // Set the transaction data
+        tx.data = Some(TxData::CreateMarket {
+            title,
+            description,
+            decision_slots,
+            market_type,
+            has_residual,
+            b,
+            trading_fee,
+            tags,
+        });
+
+        Ok(tx)
+    }
+
+    /// Create a multidimensional market transaction with mixed dimension types
+    pub fn create_market_dimensional(
+        &self,
+        title: String,
+        description: String,
+        dimensions: String,
+        b: Option<f64>,
+        trading_fee: Option<f64>,
+        tags: Option<Vec<String>>,
+        fee: bitcoin::Amount,
+    ) -> Result<Transaction, Error> {
+        // Parse dimensions to estimate storage fee
+        let dimension_specs = parse_dimensions(&dimensions)
+            .map_err(|_| Error::InvalidSlotId {
+                reason: "Failed to parse dimension specification".to_string(),
+            })?;
+        
+        // Count total slots for storage fee estimation
+        let mut total_slots = 0;
+        for spec in &dimension_specs {
+            match spec {
+                DimensionSpec::Single(_) => total_slots += 1,
+                DimensionSpec::Categorical(slots) => total_slots += slots.len(),
+            }
+        }
+        
+        // Estimate storage fee based on dimensional complexity
+        let storage_fee = self.estimate_dimensional_storage_fee(total_slots, dimension_specs.len())?;
+        let total_fee = fee.checked_add(storage_fee).ok_or(AmountOverflowError)?;
+        
+        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(total_fee)?;
+        let change = total_bitcoin - total_fee;
+
+        let inputs = bitcoin_utxos.into_keys().collect();
+        let mut outputs = Vec::new();
+
+        // Add change output if needed
+        if change > bitcoin::Amount::ZERO {
+            outputs.push(Output::new(
+                self.get_new_address()?,
+                OutputContent::Bitcoin(BitcoinOutputContent(change)),
+            ));
+        }
+
+        let mut tx = Transaction::new(inputs, outputs);
+
+        // Set the transaction data - use new dimensional format
+        tx.data = Some(TxData::CreateMarketDimensional {
+            title,
+            description,
+            dimensions,
+            b,
+            trading_fee,
+            tags,
+        });
+
+        Ok(tx)
+    }
+
+    /// Estimate storage fee for dimensional market
+    fn estimate_dimensional_storage_fee(&self, total_slots: usize, num_dimensions: usize) -> Result<bitcoin::Amount, Error> {
+        // Dimensional markets have more complex outcome spaces
+        // Base cost scales with slot count, bonus cost for multi-dimensional complexity
+        let base_cost = (total_slots as u64) * 1000; // 1000 sats per slot
+        let complexity_cost = (num_dimensions as u64) * (num_dimensions as u64) * 100; // Quadratic complexity cost
+        
+        let total_cost = base_cost + complexity_cost;
+        Ok(bitcoin::Amount::from_sat(total_cost))
+    }
+
+    /// Estimate storage fee for market based on decision slots
+    fn estimate_market_storage_fee(&self, decision_slots: &[String]) -> Result<bitcoin::Amount, Error> {
+        // Simple validation: prevent creating markets with too many decision slots
+        // This is a rough approximation - the actual outcome count depends on the specific decisions
+        // but this provides early validation in the wallet layer
+        const MAX_DECISION_SLOTS: usize = 8; // Conservative limit - prevents most > 256 outcome scenarios
+        
+        if decision_slots.len() > MAX_DECISION_SLOTS {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Too many decision slots: {} (max {})", decision_slots.len(), MAX_DECISION_SLOTS)
+            )));
+        }
+        
+        // Base fee + quadratic scaling based on market complexity
+        // This is a simplified estimation - actual fee calculated in market creation
+        let base_fee = bitcoin::Amount::from_sat(1000); // BASE_MARKET_STORAGE_COST_SATS
+        let complexity_factor = decision_slots.len() as u64;
+        let complexity_fee = bitcoin::Amount::from_sat(complexity_factor * complexity_factor);
+        base_fee.checked_add(complexity_fee).ok_or(Error::AmountOverflow(AmountOverflowError))
     }
 
     pub fn spend_utxos(

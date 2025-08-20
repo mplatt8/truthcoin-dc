@@ -23,6 +23,7 @@ use truthcoin_dc::{
         FilledOutputContent, PointedOutput, Transaction, Txid, VerifyingKey,
         WithdrawalBundle, keys::Ecies,
     },
+    validation::{SlotValidator, PeriodCalculator},
     wallet::Balance,
 };
 use truthcoin_dc_app_rpc_api::{AvailableSlotId, RpcServer, TxInfo};
@@ -633,14 +634,13 @@ impl RpcServer for RpcServerImpl {
                 .try_get_tip_height()
                 .map_err(custom_err)?
                 .unwrap_or(0);
-            self.app.node.block_height_to_testing_period(tip_height)
+            let testing_blocks_per_period = self.app.node.get_slots_testing_config();
+            PeriodCalculator::block_height_to_testing_period(tip_height, testing_blocks_per_period)
         } else {
-            truthcoin_dc::node::timestamp_to_quarter(current_timestamp)
-                .map_err(custom_err)?
+            PeriodCalculator::timestamp_to_period(current_timestamp)
         };
 
-        let current_period_name =
-            self.app.node.quarter_to_string(current_period);
+        let current_period_name = PeriodCalculator::period_to_name(current_period);
 
         Ok(truthcoin_dc_app_rpc_api::SlotStatus {
             is_testing_mode,
@@ -651,19 +651,22 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn timestamp_to_quarter(&self, timestamp: u64) -> RpcResult<u32> {
-        Ok(truthcoin_dc::node::timestamp_to_quarter(timestamp)
-            .map_err(custom_err)?)
+        Ok(PeriodCalculator::timestamp_to_period(timestamp))
     }
 
     async fn quarter_to_string(&self, quarter: u32) -> RpcResult<String> {
-        Ok(self.app.node.quarter_to_string(quarter))
+        Ok(PeriodCalculator::period_to_name(quarter))
     }
 
     async fn block_height_to_testing_period(
         &self,
         block_height: u32,
     ) -> RpcResult<u32> {
-        Ok(self.app.node.block_height_to_testing_period(block_height))
+        let testing_blocks_per_period = self.app.node.get_slots_testing_config();
+        Ok(PeriodCalculator::block_height_to_testing_period(
+            block_height, 
+            testing_blocks_per_period
+        ))
     }
 
     async fn claim_decision_slot(
@@ -744,18 +747,9 @@ impl RpcServer for RpcServerImpl {
         &self,
         slot_id_hex: String,
     ) -> RpcResult<Option<truthcoin_dc_app_rpc_api::SlotDetails>> {
-        use truthcoin_dc::state::slots::SlotId;
-
-        // Parse slot ID from hex
-        let slot_id_bytes = hex::decode(&slot_id_hex)
-            .map_err(|_| custom_err_msg("Invalid slot ID hex format"))?;
-
-        if slot_id_bytes.len() != 3 {
-            return Err(custom_err_msg("Slot ID must be exactly 3 bytes"));
-        }
-
-        let slot_id_array: [u8; 3] = slot_id_bytes.try_into().unwrap();
-        let slot_id = SlotId::from_bytes(slot_id_array).map_err(custom_err)?;
+        // Use common validation utility
+        let slot_id = SlotValidator::parse_slot_id_from_hex(&slot_id_hex)
+            .map_err(custom_err)?;
 
         // Get the slot from the node
         let slot_opt = self.app.node.get_slot(slot_id).map_err(custom_err)?;
@@ -854,18 +848,10 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn is_slot_in_voting(&self, slot_id_hex: String) -> RpcResult<bool> {
-        use truthcoin_dc::state::slots::SlotId;
+        use truthcoin_dc::validation::SlotValidator;
 
-        // Parse slot ID from hex
-        let slot_id_bytes = hex::decode(&slot_id_hex)
-            .map_err(|_| custom_err_msg("Invalid slot ID hex format"))?;
-
-        if slot_id_bytes.len() != 3 {
-            return Err(custom_err_msg("Slot ID must be exactly 3 bytes"));
-        }
-
-        let slot_id_array: [u8; 3] = slot_id_bytes.try_into().unwrap();
-        let slot_id = SlotId::from_bytes(slot_id_array).map_err(custom_err)?;
+        // Parse slot ID using centralized validation
+        let slot_id = SlotValidator::parse_slot_id_from_hex(&slot_id_hex).map_err(custom_err)?;
 
         // Check if the slot is in voting period
         let is_voting = self
@@ -907,6 +893,209 @@ impl RpcServer for RpcServerImpl {
             .collect();
 
         Ok(result)
+    }
+
+    async fn create_market(
+        &self,
+        title: String,
+        description: String,
+        decision_slots: Vec<String>,
+        market_type: String,
+        has_residual: Option<bool>,
+        b: Option<f64>,
+        trading_fee: Option<f64>,
+        tags: Option<Vec<String>>,
+        fee_sats: u64,
+    ) -> RpcResult<String> {
+        let tx = self
+            .app
+            .wallet
+            .create_market(
+                title,
+                description,
+                decision_slots,
+                market_type,
+                has_residual,
+                b,
+                trading_fee,
+                tags,
+                bitcoin::Amount::from_sat(fee_sats),
+            )
+            .map_err(custom_err)?;
+        let txid = tx.txid();
+        
+        // Sign and send the transaction
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+        
+        // Return the transaction ID - the market ID will be derived from this transaction
+        Ok(format!("Market creation transaction submitted: {}", txid))
+    }
+
+    async fn create_market_dimensional(
+        &self,
+        title: String,
+        description: String,
+        dimensions: String,
+        b: Option<f64>,
+        trading_fee: Option<f64>,
+        tags: Option<Vec<String>>,
+        fee_sats: u64,
+    ) -> RpcResult<String> {
+        let tx = self
+            .app
+            .wallet
+            .create_market_dimensional(
+                title,
+                description,
+                dimensions,
+                b,
+                trading_fee,
+                tags,
+                bitcoin::Amount::from_sat(fee_sats),
+            )
+            .map_err(custom_err)?;
+        let txid = tx.txid();
+        
+        // Sign and send the transaction
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+        
+        // Return the transaction ID - the market ID will be derived from this transaction
+        Ok(format!("Dimensional market creation transaction submitted: {}", txid))
+    }
+
+    async fn list_markets(&self) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::MarketInfo>> {
+        // Get markets in Trading state only
+        let markets = self
+            .app
+            .node
+            .get_markets_by_state(truthcoin_dc::state::MarketState::Trading)
+            .map_err(custom_err)?;
+
+        let mut market_infos = Vec::new();
+
+        for market in markets {
+            // Get decisions for this market to generate outcome descriptions
+            let decisions = self
+                .app
+                .node
+                .get_market_decisions(&market)
+                .map_err(custom_err)?;
+
+            // Calculate current prices
+            let prices = market.calculate_prices();
+            let current_prices: Vec<f64> = prices.to_vec();
+
+            // Generate outcome descriptions
+            let mut outcomes = Vec::new();
+            for (state_idx, _) in market.state_combos.iter().enumerate() {
+                match market.describe_outcome_by_state(state_idx, &decisions) {
+                    Ok(description) => outcomes.push(description),
+                    Err(_) => outcomes.push(format!("Outcome {}", state_idx)),
+                }
+            }
+
+            // Calculate volume (for now using treasury as a proxy)
+            let volume = market.treasury;
+
+            // Convert market ID to hex string
+            let market_id_hex = hex::encode(market.id.as_bytes());
+
+            let market_info = truthcoin_dc_app_rpc_api::MarketInfo {
+                market_id: market_id_hex,
+                title: market.title,
+                description: market.description,
+                outcomes,
+                current_prices,
+                expires_at: market.expires_at_height,
+                volume,
+                state: format!("{:?}", market.state),
+            };
+
+            market_infos.push(market_info);
+        }
+
+        Ok(market_infos)
+    }
+
+    async fn view_market(&self, market_id: String) -> RpcResult<Option<truthcoin_dc_app_rpc_api::MarketDetails>> {
+        // Parse market ID from hex
+        let market_id_bytes = hex::decode(&market_id)
+            .map_err(|_| custom_err_msg("Invalid market ID hex format"))?;
+
+        if market_id_bytes.len() != 6 {
+            return Err(custom_err_msg("Market ID must be exactly 6 bytes"));
+        }
+
+        let mut id_array = [0u8; 6];
+        id_array.copy_from_slice(&market_id_bytes);
+        let market_id_struct = truthcoin_dc::state::MarketId::new(id_array);
+
+        // Get the market
+        let market = match self
+            .app
+            .node
+            .get_market_by_id(&market_id_struct)
+            .map_err(custom_err)?
+        {
+            Some(market) => market,
+            None => return Ok(None),
+        };
+
+        // Get decisions for detailed outcome descriptions
+        let decisions = self
+            .app
+            .node
+            .get_market_decisions(&market)
+            .map_err(custom_err)?;
+
+        // Calculate current prices
+        let prices = market.calculate_prices();
+
+        // Generate detailed outcome information
+        let mut outcomes = Vec::new();
+        for (state_idx, _) in market.state_combos.iter().enumerate() {
+            let name = match market.describe_outcome_by_state(state_idx, &decisions) {
+                Ok(description) => description,
+                Err(_) => format!("Outcome {}", state_idx),
+            };
+
+            let current_price = prices[state_idx];
+            let probability = current_price; // Price equals probability in LMSR
+            let volume = 0.0; // TODO: Calculate per-outcome volume when trading is implemented
+
+            outcomes.push(truthcoin_dc_app_rpc_api::MarketOutcome {
+                name,
+                current_price,
+                probability,
+                volume,
+            });
+        }
+
+        // Convert decision slots to hex strings
+        let decision_slots: Vec<String> = market
+            .decision_slots
+            .iter()
+            .map(|slot_id| slot_id.to_hex())
+            .collect();
+
+        let market_details = truthcoin_dc_app_rpc_api::MarketDetails {
+            market_id,
+            title: market.title,
+            description: market.description,
+            outcomes,
+            market_maker: market.creator_address.to_string(),
+            expiry: market.expires_at_height,
+            liquidity: market.treasury, // Treasury represents available liquidity
+            trading_state: format!("{:?}", market.state),
+            beta: market.b,
+            trading_fee: market.trading_fee,
+            tags: market.tags,
+            created_at_height: market.created_at_height,
+            treasury: market.treasury,
+            decision_slots,
+        };
+
+        Ok(Some(market_details))
     }
 }
 

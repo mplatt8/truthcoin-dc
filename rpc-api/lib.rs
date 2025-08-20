@@ -105,12 +105,51 @@ pub struct OssifiedSlotInfo {
     pub decision: Option<DecisionInfo>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct MarketInfo {
+    pub market_id: String,
+    pub title: String,
+    pub description: String,
+    pub outcomes: Vec<String>,
+    pub current_prices: Vec<f64>,
+    pub expires_at: Option<u64>,
+    pub volume: f64,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct MarketOutcome {
+    pub name: String,
+    pub current_price: f64,
+    pub probability: f64,
+    pub volume: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct MarketDetails {
+    pub market_id: String,
+    pub title: String,
+    pub description: String,
+    pub outcomes: Vec<MarketOutcome>,
+    pub market_maker: String,
+    pub expiry: Option<u64>,
+    pub liquidity: f64,
+    pub trading_state: String,
+    pub beta: f64,
+    pub trading_fee: f64,
+    pub tags: Vec<String>,
+    pub created_at_height: u64,
+    pub treasury: f64,
+    pub decision_slots: Vec<String>,
+}
+
 #[open_api(ref_schemas[
     truthcoin_schema::BitcoinAddr, truthcoin_schema::BitcoinBlockHash,
     truthcoin_schema::BitcoinTransaction, truthcoin_schema::BitcoinOutPoint,
     truthcoin_schema::SocketAddr, Address, AssetId, Authorization,
     BitcoinOutputContent, BlockHash, Body, EncryptionPubKey,
-    FilledOutputContent, Header, MerkleRoot, OutPoint, Output, OutputContent,
+    FilledOutputContent, Header, MarketDetails, MarketInfo, MarketOutcome,
+    MerkleRoot, OutPoint, Output, OutputContent,
     PeerConnectionStatus, Signature, SlotInfo, SlotStatus, Transaction, TxData, Txid, TxIn,
     VotingPeriodInfo, WithdrawalOutputContent, VerifyingKey,
 ])]
@@ -497,4 +536,42 @@ pub trait Rpc {
     /// Get ossified slots (slots whose voting period has ended)
     #[method(name = "get_ossified_slots")]
     async fn get_ossified_slots(&self) -> RpcResult<Vec<OssifiedSlotInfo>>;
+
+    /// Create a new prediction market
+    #[method(name = "create_market")]
+    async fn create_market(
+        &self,
+        title: String,
+        description: String,
+        decision_slots: Vec<String>, // Hex-encoded slot IDs
+        market_type: String, // "independent" or "categorical"
+        has_residual: Option<bool>, // Only for categorical markets
+        b: Option<f64>, // LMSR beta parameter
+        trading_fee: Option<f64>, // Trading fee percentage
+        tags: Option<Vec<String>>, // Categorization tags
+        fee_sats: u64, // Transaction fee
+    ) -> RpcResult<String>; // Returns market ID
+
+    /// Create a new multidimensional prediction market with mixed dimension types
+    #[method(name = "create_market_dimensional")]
+    async fn create_market_dimensional(
+        &self,
+        title: String,
+        description: String,
+        dimensions: String, // JSON-like dimension specification: "[slot1,[slot2,slot3],slot4]"
+        b: Option<f64>, // LMSR beta parameter
+        trading_fee: Option<f64>, // Trading fee percentage
+        tags: Option<Vec<String>>, // Categorization tags
+        fee_sats: u64, // Transaction fee
+    ) -> RpcResult<String>; // Returns market ID
+
+    /// List all markets in Trading state
+    #[open_api_method(output_schema(ToSchema = "Vec<MarketInfo>"))]
+    #[method(name = "list_markets")]
+    async fn list_markets(&self) -> RpcResult<Vec<MarketInfo>>;
+
+    /// View detailed information for a specific market
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "view_market")]
+    async fn view_market(&self, market_id: String) -> RpcResult<Option<MarketDetails>>;
 }

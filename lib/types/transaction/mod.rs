@@ -152,6 +152,40 @@ pub enum TransactionData {
         /// Max value (only for scaled decisions)
         max: Option<u16>,
     },
+    /// Create a prediction market
+    CreateMarket {
+        /// Market title
+        title: String,
+        /// Market description
+        description: String,
+        /// Decision slot IDs (hex-encoded)
+        decision_slots: Vec<String>,
+        /// Market type: "independent" or "categorical"
+        market_type: String,
+        /// Has residual outcome (for categorical markets)
+        has_residual: Option<bool>,
+        /// LMSR beta parameter
+        b: Option<f64>,
+        /// Trading fee percentage
+        trading_fee: Option<f64>,
+        /// Categorization tags
+        tags: Option<Vec<String>>,
+    },
+    /// Create a multidimensional prediction market with mixed dimension types
+    CreateMarketDimensional {
+        /// Market title
+        title: String,
+        /// Market description
+        description: String,
+        /// Dimension specification: "[slot1,[slot2,slot3],slot4]"
+        dimensions: String,
+        /// LMSR beta parameter
+        b: Option<f64>,
+        /// Trading fee percentage
+        trading_fee: Option<f64>,
+        /// Categorization tags
+        tags: Option<Vec<String>>,
+    },
 }
 
 pub type TxData = TransactionData;
@@ -175,6 +209,16 @@ impl TxData {
     /// `true` if the tx data corresponds to a decision slot claim
     pub fn is_claim_decision_slot(&self) -> bool {
         matches!(self, Self::ClaimDecisionSlot { .. })
+    }
+
+    /// `true` if the tx data corresponds to market creation
+    pub fn is_create_market(&self) -> bool {
+        matches!(self, Self::CreateMarket { .. })
+    }
+
+    /// `true` if the tx data corresponds to dimensional market creation
+    pub fn is_create_market_dimensional(&self) -> bool {
+        matches!(self, Self::CreateMarketDimensional { .. })
     }
 }
 
@@ -232,6 +276,44 @@ pub struct ClaimDecisionSlot {
     pub max: Option<u16>,
 }
 
+/// Struct describing a market creation
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateMarket {
+    /// Market title
+    pub title: String,
+    /// Market description
+    pub description: String,
+    /// Decision slot IDs (hex-encoded)
+    pub decision_slots: Vec<String>,
+    /// Market type: "independent" or "categorical"
+    pub market_type: String,
+    /// Has residual outcome (for categorical markets)
+    pub has_residual: Option<bool>,
+    /// LMSR beta parameter
+    pub b: Option<f64>,
+    /// Trading fee percentage
+    pub trading_fee: Option<f64>,
+    /// Categorization tags
+    pub tags: Option<Vec<String>>,
+}
+
+/// Struct describing a dimensional market creation
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreateMarketDimensional {
+    /// Market title
+    pub title: String,
+    /// Market description
+    pub description: String,
+    /// Dimension specification: "[slot1,[slot2,slot3],slot4]"
+    pub dimensions: String,
+    /// LMSR beta parameter
+    pub b: Option<f64>,
+    /// Trading fee percentage
+    pub trading_fee: Option<f64>,
+    /// Categorization tags
+    pub tags: Option<Vec<String>>,
+}
+
 #[derive(
     BorshSerialize, Clone, Debug, Default, Deserialize, Serialize, ToSchema,
 )]
@@ -272,37 +354,6 @@ impl Transaction {
         self.outputs.iter().filter(|output| output.is_votecoin())
     }
 
-    /// `true` if the tx data corresponds to an AMM burn
-    pub fn is_amm_burn(&self) -> bool {
-        match &self.data {
-            Some(tx_data) => tx_data.is_amm_burn(),
-            None => false,
-        }
-    }
-
-    /// `true` if the tx data corresponds to an AMM mint
-    pub fn is_amm_mint(&self) -> bool {
-        match &self.data {
-            Some(tx_data) => tx_data.is_amm_mint(),
-            None => false,
-        }
-    }
-
-    /// `true` if the tx data corresponds to an AMM swap
-    pub fn is_amm_swap(&self) -> bool {
-        match &self.data {
-            Some(tx_data) => tx_data.is_amm_swap(),
-            None => false,
-        }
-    }
-
-    /// `true` if the tx data corresponds to a decision slot claim
-    pub fn is_claim_decision_slot(&self) -> bool {
-        match &self.data {
-            Some(tx_data) => tx_data.is_claim_decision_slot(),
-            None => false,
-        }
-    }
 
     /// `true` if the tx data corresponds to a regular tx
     pub fn is_regular(&self) -> bool {
@@ -336,34 +387,26 @@ impl FilledTransaction {
         &self.transaction.inputs
     }
 
-    /// `true` if the tx data corresponds to an AMM burn
-    pub fn is_amm_burn(&self) -> bool {
-        self.transaction.is_amm_burn()
-    }
-
-    /// `true` if the tx data corresponds to an AMM mint
-    pub fn is_amm_mint(&self) -> bool {
-        self.transaction.is_amm_mint()
-    }
-
-    /// `true` if the tx data corresponds to an AMM swap
-    pub fn is_amm_swap(&self) -> bool {
-        self.transaction.is_amm_swap()
-    }
-
-    /// `true` if the tx data corresponds to a decision slot claim
-    pub fn is_claim_decision_slot(&self) -> bool {
-        self.transaction.is_claim_decision_slot()
-    }
-
-    /// `true` if the tx data corresponds to a regular tx
-    pub fn is_regular(&self) -> bool {
-        self.transaction.is_regular()
-    }
 
     /// Accessor for tx outputs
     pub fn outputs(&self) -> &TxOutputs {
         &self.transaction.outputs
+    }
+
+    /// `true` if the tx data corresponds to a decision slot claim
+    pub fn is_claim_decision_slot(&self) -> bool {
+        match &self.transaction.data {
+            Some(tx_data) => tx_data.is_claim_decision_slot(),
+            None => false,
+        }
+    }
+
+    /// `true` if the tx data corresponds to market creation
+    pub fn is_create_market(&self) -> bool {
+        match &self.transaction.data {
+            Some(tx_data) => tx_data.is_create_market(),
+            None => false,
+        }
     }
 
     /** If the tx is an AMM burn, returns the LP token's
@@ -452,6 +495,54 @@ impl FilledTransaction {
                 question: question.clone(),
                 min: *min,
                 max: *max,
+            }),
+            _ => None,
+        }
+    }
+
+    /// If the tx is a market creation, returns the corresponding [`CreateMarket`].
+    pub fn create_market(&self) -> Option<CreateMarket> {
+        match &self.transaction.data {
+            Some(TransactionData::CreateMarket {
+                title,
+                description,
+                decision_slots,
+                market_type,
+                has_residual,
+                b,
+                trading_fee,
+                tags,
+            }) => Some(CreateMarket {
+                title: title.clone(),
+                description: description.clone(),
+                decision_slots: decision_slots.clone(),
+                market_type: market_type.clone(),
+                has_residual: *has_residual,
+                b: *b,
+                trading_fee: *trading_fee,
+                tags: tags.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// If the tx is a dimensional market creation, returns the corresponding [`CreateMarketDimensional`].
+    pub fn create_market_dimensional(&self) -> Option<CreateMarketDimensional> {
+        match &self.transaction.data {
+            Some(TransactionData::CreateMarketDimensional {
+                title,
+                description,
+                dimensions,
+                b,
+                trading_fee,
+                tags,
+            }) => Some(CreateMarketDimensional {
+                title: title.clone(),
+                description: description.clone(),
+                dimensions: dimensions.clone(),
+                b: *b,
+                trading_fee: *trading_fee,
+                tags: tags.clone(),
             }),
             _ => None,
         }

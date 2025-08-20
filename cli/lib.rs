@@ -249,6 +249,23 @@ pub enum Command {
         #[arg(long)]
         fee_sats: u64,
     },
+    /// Create a prediction market
+    CreateMarket {
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        description: String,
+        #[arg(long)]
+        dimensions: String, // JSON-like dimension specification: "[slot1,[slot2,slot3],slot4]"
+        #[arg(long)]
+        b: Option<f64>, // LMSR beta parameter
+        #[arg(long)]
+        trading_fee: Option<f64>, // Trading fee percentage
+        #[arg(long)]
+        tags: Option<String>, // Comma-separated tags
+        #[arg(long)]
+        fee_sats: u64, // Transaction fee
+    },
     /// Get available slots in a period
     GetAvailableSlots {
         #[arg(long)]
@@ -273,6 +290,13 @@ pub enum Command {
     GetVotingPeriods,
     /// Get ossified slots (slots whose voting period has ended)
     GetOssifiedSlots,
+    /// List all markets in Trading state
+    ListMarkets,
+    /// View detailed information for a specific market
+    ViewMarket {
+        /// Market ID as hex-encoded hash
+        market_id: String,
+    },
 }
 
 const DEFAULT_RPC_HOST: Host = Host::Ipv4(Ipv4Addr::LOCALHOST);
@@ -671,6 +695,34 @@ where
                 txid
             )
         }
+        Command::CreateMarket {
+            title,
+            description,
+            dimensions,
+            b,
+            trading_fee,
+            tags,
+            fee_sats,
+        } => {
+            let tags_vec = tags.map(|t| 
+                t.split(',')
+                .map(|s| s.trim().to_string())
+                .collect()
+            );
+
+            let result = rpc_client
+                .create_market_dimensional(
+                    title,
+                    description,
+                    dimensions,
+                    b,
+                    trading_fee,
+                    tags_vec,
+                    fee_sats,
+                )
+                .await?;
+            format!("Market created successfully: {}", result)
+        }
         Command::GetSlotById { slot_id_hex } => {
             let slot = rpc_client.get_slot_by_id(slot_id_hex.clone()).await?;
             match slot {
@@ -824,6 +876,128 @@ where
                     }
                 }
                 result
+            }
+        }
+        Command::ListMarkets => {
+            let markets = rpc_client.list_markets().await?;
+            if markets.is_empty() {
+                "No markets in Trading state found.".to_string()
+            } else {
+                let mut output = String::new();
+                output.push_str("Markets in Trading State:\n");
+                output.push_str("┌──────────────────┬──────────────────────────┬─────────────────────────┬──────────────┬────────────┐\n");
+                output.push_str("│ Market ID        │ Title                    │ Outcomes                │ Prices       │ State      │\n");
+                output.push_str("├──────────────────┼──────────────────────────┼─────────────────────────┼──────────────┼────────────┤\n");
+                
+                for market in &markets {
+                    // Truncate market ID to first 8 characters
+                    // With 6-byte MarketId (12 hex chars), no truncation needed
+                    let short_id = market.market_id.clone();
+                    
+                    // Truncate title to fit column
+                    let short_title = if market.title.len() > 22 {
+                        format!("{}...", &market.title[..19])
+                    } else {
+                        market.title.clone()
+                    };
+                    
+                    // Format outcomes (limit to 2-3 for display)
+                    let outcomes_display = if market.outcomes.len() <= 2 {
+                        market.outcomes.join(", ")
+                    } else {
+                        format!("{}, {}...", market.outcomes[0], market.outcomes[1])
+                    };
+                    let short_outcomes = if outcomes_display.len() > 21 {
+                        format!("{}...", &outcomes_display[..18])
+                    } else {
+                        outcomes_display
+                    };
+                    
+                    // Format prices
+                    let prices_display = if market.current_prices.len() <= 3 {
+                        market.current_prices.iter()
+                            .map(|p| format!("{:.3}", p))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    } else {
+                        format!("{:.3}, {:.3}...", market.current_prices[0], market.current_prices[1])
+                    };
+                    let short_prices = if prices_display.len() > 12 {
+                        format!("{}...", &prices_display[..9])
+                    } else {
+                        prices_display
+                    };
+                    
+                    output.push_str(&format!(
+                        "│ {:16} │ {:24} │ {:23} │ {:12} │ {:10} │\n",
+                        short_id, short_title, short_outcomes, short_prices, market.state
+                    ));
+                }
+                
+                output.push_str("└──────────────────┴──────────────────────────┴─────────────────────────┴──────────────┴────────────┘\n");
+                output.push_str(&format!("\nTotal markets: {}", markets.len()));
+                output
+            }
+        }
+        Command::ViewMarket { market_id } => {
+            let market_details = rpc_client.view_market(market_id.clone()).await?;
+            match market_details {
+                Some(details) => {
+                    let mut output = String::new();
+                    output.push_str(&format!("Market Details: {}\n\n", details.market_id));
+                    
+                    output.push_str(&format!("Title: {}\n", details.title));
+                    output.push_str(&format!("Description: {}\n", details.description));
+                    output.push_str(&format!("Market Maker: {}\n", details.market_maker));
+                    output.push_str(&format!("State: {}\n", details.trading_state));
+                    
+                    if let Some(expiry) = details.expiry {
+                        output.push_str(&format!("Expires: Block {}\n", expiry));
+                    } else {
+                        output.push_str("Expires: No expiry set\n");
+                    }
+                    
+                    output.push_str(&format!("Beta Parameter: {:.2}\n", details.beta));
+                    output.push_str(&format!("Trading Fee: {:.1}%\n", details.trading_fee * 100.0));
+                    output.push_str(&format!("Created at Height: {}\n", details.created_at_height));
+                    
+                    if !details.tags.is_empty() {
+                        output.push_str(&format!("Tags: {}\n", details.tags.join(", ")));
+                    }
+                    
+                    output.push_str("\nOutcomes:\n");
+                    let mut total_volume = 0.0;
+                    for (i, outcome) in details.outcomes.iter().enumerate() {
+                        output.push_str(&format!(
+                            "  {}. {:20} Price: {:6.3}  Probability: {:5.1}%  Volume: {:.0} sats\n",
+                            i + 1,
+                            outcome.name,
+                            outcome.current_price,
+                            outcome.probability * 100.0,
+                            outcome.volume
+                        ));
+                        total_volume += outcome.volume;
+                    }
+                    
+                    output.push_str(&format!("\nTotal Volume: {:.0} sats\n", total_volume));
+                    output.push_str(&format!("Total Liquidity: {:.0} sats\n", details.liquidity));
+                    output.push_str(&format!("Treasury: {:.0} sats\n", details.treasury));
+                    
+                    if !details.decision_slots.is_empty() {
+                        output.push_str("\nDecision Slots:\n");
+                        for slot_id in &details.decision_slots {
+                            let short_slot = if slot_id.len() > 16 {
+                                format!("{}...{}", &slot_id[..8], &slot_id[slot_id.len()-8..])
+                            } else {
+                                slot_id.clone()
+                            };
+                            output.push_str(&format!("  - {}\n", short_slot));
+                        }
+                    }
+                    
+                    output
+                }
+                None => format!("Market {} not found", market_id),
             }
         }
     })

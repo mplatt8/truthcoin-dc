@@ -3,7 +3,7 @@ use chrono::{Datelike, TimeZone, Utc};
 use fallible_iterator::FallibleIterator;
 use heed::types::SerdeBincode;
 use serde::{Deserialize, Serialize};
-use sneed::{DatabaseUnique, Env, RwTxn};
+use sneed::{DatabaseUnique, Env, RwTxn, RoTxn};
 
 #[derive(
     Clone,
@@ -285,7 +285,7 @@ impl Dbs {
         })
     }
 
-    fn get_current_period(
+    pub fn get_current_period(
         &self,
         ts_secs: u64,
         block_height: Option<u32>,
@@ -511,11 +511,13 @@ impl Dbs {
         Ok(ossified_slots)
     }
 
-    pub fn claim_slot(
+    /// Validate that a slot can be claimed without actually claiming it
+    /// This is the single source of truth for slot claim validation
+    pub fn validate_slot_claim(
         &self,
-        rwtxn: &mut RwTxn<'_>,
+        rotxn: &RoTxn,
         slot_id: SlotId,
-        decision: Decision,
+        decision: &Decision,
         current_ts: u64,
         current_height: Option<u32>,
     ) -> Result<(), Error> {
@@ -579,7 +581,7 @@ impl Dbs {
             }
 
             let total_slots = self.total_for(
-                rwtxn,
+                rotxn,
                 period_index,
                 current_ts,
                 current_height,
@@ -605,9 +607,10 @@ impl Dbs {
             }
         }
 
-        let mut period_slots = self
+        // Check if slot is already claimed
+        let period_slots = self
             .period_slots
-            .try_get(rwtxn, &period_index)?
+            .try_get(rotxn, &period_index)?
             .unwrap_or_default();
 
         for slot in &period_slots {
@@ -615,6 +618,27 @@ impl Dbs {
                 return Err(Error::SlotAlreadyClaimed { slot_id });
             }
         }
+
+        Ok(())
+    }
+
+    pub fn claim_slot(
+        &self,
+        rwtxn: &mut RwTxn<'_>,
+        slot_id: SlotId,
+        decision: Decision,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> Result<(), Error> {
+        // Use the single source of truth for validation
+        self.validate_slot_claim(rwtxn, slot_id, &decision, current_ts, current_height)?;
+
+        // Now perform the actual claim
+        let period_index = slot_id.period_index();
+        let mut period_slots = self
+            .period_slots
+            .try_get(rwtxn, &period_index)?
+            .unwrap_or_default();
 
         let new_slot = Slot {
             slot_id,

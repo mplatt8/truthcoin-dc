@@ -12,4 +12,5 @@ pub mod node;
 pub mod state;
 pub mod types;
 pub mod util;
+pub mod validation;
 pub mod wallet;

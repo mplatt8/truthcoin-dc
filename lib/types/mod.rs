@@ -26,7 +26,7 @@ pub use keys::{EncryptionPubKey, VerifyingKey};
 pub use transaction::{
     AmmBurn, AmmMint, AmmSwap, AssetOutput, AssetOutputContent, Authorized,
     AuthorizedTransaction, BitcoinOutput, BitcoinOutputContent,
-    ClaimDecisionSlot, FilledOutput, FilledOutputContent, FilledTransaction,
+    ClaimDecisionSlot, CreateMarket, FilledOutput, FilledOutputContent, FilledTransaction,
     InPoint, OutPoint, Output, OutputContent, PointedOutput, SpentOutput,
     Transaction, TxData, TxInputs, WithdrawalOutputContent,
 };

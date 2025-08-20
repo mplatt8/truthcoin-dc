@@ -7,7 +7,7 @@ use sneed::{RoTxn, RwTxn};
 
 use crate::{
     state::{
-        Error, State, WITHDRAWAL_BUNDLE_FAILURE_GAP, WithdrawalBundleInfo,
+        Error, State, UtxoManager, WITHDRAWAL_BUNDLE_FAILURE_GAP, WithdrawalBundleInfo,
         rollback::{HeightStamped, RollBack},
     },
     types::{
@@ -126,7 +126,7 @@ fn connect_withdrawal_bundle_submitted(
             "Withdrawal bundle successfully submitted"
         );
         for (outpoint, spend_output) in bundle.spend_utxos() {
-            state.utxos.delete(rwtxn, outpoint)?;
+            state.delete_utxo_with_address_index(rwtxn, outpoint)?;
             let spent_output = SpentOutput {
                 output: spend_output.clone(),
                 inpoint: InPoint::Withdrawal { m6id },
@@ -213,7 +213,8 @@ fn connect_withdrawal_bundle_confirmed(
                 };
                 state.stxos.put(rwtxn, outpoint, &spent_output)?;
             }
-            state.utxos.clear(rwtxn)?;
+            // Clear both primary UTXO database and address index atomically
+            state.clear_utxos_and_address_index(rwtxn)?;
             bundle =
                 WithdrawalBundleInfo::UnknownConfirmed { spend_utxos: utxos };
         } else {
@@ -263,7 +264,7 @@ fn connect_withdrawal_bundle_failed(
         WithdrawalBundleInfo::Known(bundle) => {
             for (outpoint, output) in bundle.spend_utxos() {
                 state.stxos.delete(rwtxn, outpoint)?;
-                state.utxos.put(rwtxn, outpoint, output)?;
+                state.insert_utxo_with_address_index(rwtxn, outpoint, output)?;
             }
             let latest_failed_m6id = if let Some(mut latest_failed_m6id) =
                 state.latest_failed_withdrawal_bundle.try_get(rwtxn, &())?
@@ -336,7 +337,7 @@ fn connect_2wpd_event(
         BlockEvent::Deposit(deposit) => {
             let outpoint = OutPoint::Deposit(deposit.outpoint);
             let output = deposit.output.clone();
-            state.utxos.put(rwtxn, &outpoint, &output)?;
+            state.insert_utxo_with_address_index(rwtxn, &outpoint, &output)?;
             *latest_deposit_block_hash = Some(event_block_hash);
         }
         BlockEvent::WithdrawalBundle(withdrawal_bundle_event) => {
@@ -462,7 +463,7 @@ fn disconnect_withdrawal_bundle_submitted(
                         outpoint: *outpoint,
                     });
                 };
-                state.utxos.put(rwtxn, outpoint, output)?;
+                state.insert_utxo_with_address_index(rwtxn, outpoint, output)?;
             }
             state.pending_withdrawal_bundle.put(
                 rwtxn,
@@ -505,7 +506,7 @@ fn disconnect_withdrawal_bundle_confirmed(
         WithdrawalBundleInfo::Known(_) | WithdrawalBundleInfo::Unknown => (),
         WithdrawalBundleInfo::UnknownConfirmed { spend_utxos } => {
             for (outpoint, output) in spend_utxos {
-                state.utxos.put(rwtxn, &outpoint, &output)?;
+                state.insert_utxo_with_address_index(rwtxn, &outpoint, &output)?;
                 if !state.stxos.delete(rwtxn, &outpoint)? {
                     return Err(Error::NoStxo { outpoint });
                 };
@@ -555,7 +556,7 @@ fn disconnect_withdrawal_bundle_failed(
                     inpoint: InPoint::Withdrawal { m6id },
                 };
                 state.stxos.put(rwtxn, outpoint, &spent_output)?;
-                if state.utxos.delete(rwtxn, outpoint)? {
+                if state.delete_utxo_with_address_index(rwtxn, outpoint)? {
                     return Err(Error::NoUtxo {
                         outpoint: *outpoint,
                     });
@@ -631,7 +632,7 @@ fn disconnect_event(
     match event {
         BlockEvent::Deposit(deposit) => {
             let outpoint = OutPoint::Deposit(deposit.outpoint);
-            if !state.utxos.delete(rwtxn, &outpoint)? {
+            if !state.delete_utxo_with_address_index(rwtxn, &outpoint)? {
                 return Err(Error::NoUtxo { outpoint });
             }
             *latest_deposit_block_hash = Some(event_block_hash);

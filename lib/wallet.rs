@@ -537,92 +537,100 @@ impl Wallet {
         Ok(Transaction::new(inputs, outputs))
     }
 
+    /// Select confirmed Bitcoin UTXOs only, following Bitcoin Hivemind's requirement
+    /// that only confirmed UTXOs can be spent in block construction.
+    /// This prevents the "utxo doesn't exist" error when trying to spend mempool UTXOs.
     pub fn select_bitcoins(
         &self,
         value: bitcoin::Amount,
     ) -> Result<(bitcoin::Amount, HashMap<OutPoint, Output>), Error> {
         let rotxn = self.env.read_txn()?;
-        let mut bitcoin_utxos: Vec<(_, Output)> = self
-            .utxos
-            .iter(&rotxn)
-            .map_err(DbError::from)?
-            .filter_map(|(outpoint, output)| {
-                if output.is_bitcoin() {
-                    Ok(Some((outpoint, output.into())))
-                } else {
-                    Ok(None)
-                }
-            })
-            .collect()
-            .map_err(DbError::from)?;
-        bitcoin_utxos
-            .sort_unstable_by_key(|(_, output)| output.get_bitcoin_value());
-        let mut unconfirmed_bitcoin_utxos: Vec<_> = self
-            .unconfirmed_utxos
-            .iter(&rotxn)
-            .map_err(DbError::from)?
-            .filter(|(_outpoint, output)| Ok(output.is_bitcoin()))
-            .collect()
-            .map_err(DbError::from)?;
-        unconfirmed_bitcoin_utxos
-            .sort_unstable_by_key(|(_, output)| output.get_bitcoin_value());
 
-        let mut selected = HashMap::new();
-        let mut total = bitcoin::Amount::ZERO;
-        for (outpoint, output) in
-            bitcoin_utxos.into_iter().chain(unconfirmed_bitcoin_utxos)
-        {
-            if output.content.is_withdrawal()
-                || output.is_votecoin()
-                || output.get_bitcoin_value() == bitcoin::Amount::ZERO
+        // Pre-allocate with estimated capacity to reduce reallocations
+        let mut bitcoin_utxos = Vec::with_capacity(64); // Reasonable starting capacity
+
+        // CRITICAL FIX: Only select CONFIRMED UTXOs (utxos database), NOT unconfirmed_utxos
+        // This prevents spending mempool UTXOs that haven't been mined yet
+        let mut iter = self.utxos.iter(&rotxn).map_err(DbError::from)?;
+        while let Some((outpoint, filled_output)) = iter.next().map_err(DbError::from)? {
+            if filled_output.is_bitcoin()
+                && !filled_output.content.is_withdrawal()
+                && !filled_output.is_votecoin()
+                && filled_output.get_bitcoin_value() > bitcoin::Amount::ZERO
             {
-                continue;
+                // Convert FilledOutput to Output for uniform handling
+                let output: Output = filled_output.into();
+                bitcoin_utxos.push((outpoint, output));
             }
-            if total >= value {
-                break;
-            }
+        }
+
+        // REMOVED: No longer include unconfirmed_utxos to prevent mempool UTXO spending
+        // This enforces Bitcoin Hivemind's confirmed-only spending requirement
+
+        // Sort by value for optimal selection (smallest first for exact change)
+        bitcoin_utxos.sort_unstable_by_key(|(_, output): &(OutPoint, Output)| output.get_bitcoin_value());
+
+        // Greedy selection with early termination
+        let mut selected = HashMap::with_capacity(bitcoin_utxos.len().min(10)); // Most selections use few UTXOs
+        let mut total = bitcoin::Amount::ZERO;
+
+        for (outpoint, output) in bitcoin_utxos {
             total = total
                 .checked_add(output.get_bitcoin_value())
                 .ok_or(AmountOverflowError)?;
-            selected.insert(outpoint, output.clone());
+            selected.insert(outpoint, output);
+
+            // Early termination when we have enough
+            if total >= value {
+                return Ok((total, selected));
+            }
         }
-        if total >= value {
-            Ok((total, selected))
-        } else {
-            Err(Error::NotEnoughFunds)
-        }
+
+        Err(Error::NotEnoughFunds)
     }
 
-    // Select UTXOs for Votecoin
+    /// Select confirmed Votecoin UTXOs only, following Bitcoin Hivemind's requirement
+    /// that only confirmed UTXOs can be spent in block construction.
     pub fn select_votecoin_utxos(
         &self,
         value: u32,
     ) -> Result<(u32, HashMap<OutPoint, Output>), Error> {
         let rotxn = self.env.read_txn()?;
-        let mut votecoin_utxos: Vec<_> = self
-            .utxos
-            .iter(&rotxn)?
-            .filter(|(_outpoint, output)| Ok(output.is_votecoin()))
-            .collect()?;
-        votecoin_utxos.sort_unstable_by_key(|(_, output)| output.votecoin());
 
-        let mut selected = HashMap::new();
+        // Pre-allocate and collect in a single pass with filtering
+        let mut votecoin_utxos = Vec::with_capacity(32); // Reasonable starting capacity for votecoin UTXOs
+
+        // CRITICAL FIX: Only select CONFIRMED Votecoin UTXOs, not unconfirmed ones
+        let mut iter = self.utxos.iter(&rotxn)?;
+        while let Some((outpoint, filled_output)) = iter.next()? {
+            if filled_output.is_votecoin() && !filled_output.content.is_withdrawal() {
+                if let Some(votecoin_value) = filled_output.votecoin() {
+                    // Convert FilledOutput to Output for uniform handling
+                    let output: Output = filled_output.into();
+                    votecoin_utxos.push((outpoint, output, votecoin_value));
+                }
+            }
+        }
+
+        // Sort by votecoin value (smallest first for optimal selection)
+        votecoin_utxos.sort_unstable_by_key(|(_, _, votecoin_value)| *votecoin_value);
+
+        // Greedy selection with early termination
+        let mut selected = HashMap::with_capacity(votecoin_utxos.len().min(8)); // Votecoin selections typically use few UTXOs
         let mut total_value: u32 = 0;
-        for (outpoint, output) in &votecoin_utxos {
-            if output.content.is_withdrawal() {
-                continue;
+
+        for (outpoint, output, votecoin_value) in votecoin_utxos {
+            total_value = total_value.checked_add(votecoin_value)
+                .ok_or(Error::AmountOverflow(AmountOverflowError))?;
+            selected.insert(outpoint, output);
+
+            // Early termination when we have enough (>= not > for correct logic)
+            if total_value >= value {
+                return Ok((total_value, selected));
             }
-            if total_value > value {
-                break;
-            }
-            let votecoin_value = output.votecoin().unwrap();
-            total_value += votecoin_value;
-            selected.insert(*outpoint, output.clone().into());
         }
-        if total_value < value {
-            return Err(Error::NotEnoughFunds);
-        }
-        Ok((total_value, selected))
+
+        Err(Error::NotEnoughFunds)
     }
 
     pub fn select_asset_utxos(
@@ -642,263 +650,10 @@ impl Wallet {
         }
     }
 
-    // Select control coin for the specified LP token
-    pub fn select_amm_lp_tokens(
-        &self,
-        asset0: AssetId,
-        asset1: AssetId,
-        amount: u64,
-    ) -> Result<(u64, HashMap<OutPoint, FilledOutput>), Error> {
-        let rotxn = self.env.read_txn()?;
-        let mut amm_lp_token_utxos: Vec<_> = self
-            .utxos
-            .iter(&rotxn)?
-            .filter(|(_outpoint, output)| {
-                Ok(output.lp_token_amount().is_some_and(
-                    |(pool_asset0, pool_asset1, _)| {
-                        pool_asset0 == asset0 && pool_asset1 == asset1
-                    },
-                ))
-            })
-            .collect()?;
-        amm_lp_token_utxos.sort_unstable_by_key(|(_, output)| {
-            output.lp_token_amount().map(|(_, _, amount)| amount)
-        });
-        let mut selected = HashMap::new();
-        let mut total_amount: u64 = 0;
-        for (outpoint, output) in &amm_lp_token_utxos {
-            if total_amount > amount {
-                break;
-            }
-            let (_, _, lp_token_amount) = output.lp_token_amount().unwrap();
-            total_amount += lp_token_amount;
-            selected.insert(*outpoint, output.clone());
-        }
-        if total_amount < amount {
-            return Err(Error::NotEnoughFunds);
-        }
-        Ok((total_amount, selected))
-    }
+    // Select LP tokens with optimized collection and selection
 
-    /// Given a regular transaction, add an AMM mint.
-    pub fn amm_mint(
-        &self,
-        tx: &mut Transaction,
-        asset0: AssetId,
-        asset1: AssetId,
-        amount0: u64,
-        amount1: u64,
-        lp_token_mint: u64,
-    ) -> Result<(), Error> {
-        assert!(tx.is_regular(), "this function only accepts a regular tx");
-        // address for the LP token output
-        let lp_token_addr = self.get_new_address()?;
 
-        let (input_amount0, asset0_utxos) =
-            self.select_asset_utxos(asset0, amount0)?;
-        let (input_amount1, asset1_utxos) =
-            self.select_asset_utxos(asset1, amount1)?;
 
-        let change_amount0 = input_amount0 - amount0;
-        let change_amount1 = input_amount1 - amount1;
-        let change_output0 = if change_amount0 != 0 {
-            let address = self.get_new_address()?;
-            let content = match asset0 {
-                AssetId::Bitcoin => {
-                    OutputContent::Bitcoin(BitcoinOutputContent(
-                        bitcoin::Amount::from_sat(change_amount0),
-                    ))
-                }
-                AssetId::Votecoin => {
-                    OutputContent::Votecoin(change_amount0.try_into().unwrap())
-                }
-            };
-            Some(Output {
-                address,
-                memo: Vec::new(),
-                content,
-            })
-        } else {
-            None
-        };
-        let change_output1 = if change_amount1 != 0 {
-            let address = self.get_new_address()?;
-            let content = match asset1 {
-                AssetId::Bitcoin => {
-                    OutputContent::Bitcoin(BitcoinOutputContent(
-                        bitcoin::Amount::from_sat(change_amount1),
-                    ))
-                }
-                AssetId::Votecoin => {
-                    OutputContent::Votecoin(change_amount1.try_into().unwrap())
-                }
-            };
-            Some(Output {
-                address,
-                memo: Vec::new(),
-                content,
-            })
-        } else {
-            None
-        };
-        let lp_token_output = Output {
-            address: lp_token_addr,
-            content: OutputContent::AmmLpToken(lp_token_mint),
-            memo: Vec::new(),
-        };
-
-        /* The first two unique assets in the inputs must be
-         * `asset0` and `asset1` */
-        tx.inputs.extend(asset0_utxos.keys());
-        tx.inputs.extend(asset1_utxos.keys());
-        tx.inputs
-            .rotate_right(asset0_utxos.len() + asset1_utxos.len());
-
-        tx.outputs.extend(change_output0);
-        tx.outputs.extend(change_output1);
-        tx.outputs.push(lp_token_output);
-
-        tx.data = Some(TxData::AmmMint {
-            amount0,
-            amount1,
-            lp_token_mint,
-        });
-        Ok(())
-    }
-
-    // Given a regular transaction, add an AMM burn.
-    pub fn amm_burn(
-        &self,
-        tx: &mut Transaction,
-        asset0: AssetId,
-        asset1: AssetId,
-        amount0: u64,
-        amount1: u64,
-        lp_token_burn: u64,
-    ) -> Result<(), Error> {
-        assert!(tx.is_regular(), "this function only accepts a regular tx");
-        // address for receiving asset0
-        let asset0_addr = self.get_new_address()?;
-        // address for receiving asset1
-        let asset1_addr = self.get_new_address()?;
-
-        let (input_lp_token_amount, lp_token_utxos) =
-            self.select_amm_lp_tokens(asset0, asset1, lp_token_burn)?;
-
-        let lp_token_change_amount = input_lp_token_amount - lp_token_burn;
-        let lp_token_change_output = if lp_token_change_amount != 0 {
-            let address = self.get_new_address()?;
-            Some(Output {
-                address,
-                content: OutputContent::AmmLpToken(lp_token_change_amount),
-                memo: Vec::new(),
-            })
-        } else {
-            None
-        };
-        let asset0_output = Output {
-            address: asset0_addr,
-            memo: Vec::new(),
-            content: match asset0 {
-                AssetId::Bitcoin => OutputContent::Bitcoin(
-                    BitcoinOutputContent(bitcoin::Amount::from_sat(amount0)),
-                ),
-                AssetId::Votecoin => {
-                    OutputContent::Votecoin(amount0.try_into().unwrap())
-                }
-            },
-        };
-        let asset1_output = Output {
-            address: asset1_addr,
-            memo: Vec::new(),
-            content: match asset1 {
-                AssetId::Bitcoin => OutputContent::Bitcoin(
-                    BitcoinOutputContent(bitcoin::Amount::from_sat(amount1)),
-                ),
-                AssetId::Votecoin => {
-                    OutputContent::Votecoin(amount1.try_into().unwrap())
-                }
-            },
-        };
-
-        /* The AMM lp token input must occur before any other AMM lp token
-         * inputs. */
-        tx.inputs.extend(lp_token_utxos.keys());
-        tx.inputs.rotate_right(lp_token_utxos.len());
-
-        tx.outputs.extend(lp_token_change_output);
-        tx.outputs.push(asset0_output);
-        tx.outputs.push(asset1_output);
-
-        tx.data = Some(TxData::AmmBurn {
-            amount0,
-            amount1,
-            lp_token_burn,
-        });
-        Ok(())
-    }
-
-    // Given a regular transaction, add an AMM swap.
-    pub fn amm_swap(
-        &self,
-        tx: &mut Transaction,
-        asset_spend: AssetId,
-        asset_receive: AssetId,
-        amount_spend: u64,
-        amount_receive: u64,
-    ) -> Result<(), Error> {
-        assert!(tx.is_regular(), "this function only accepts a regular tx");
-        // Address for receiving `asset_receive`
-        let receive_addr = self.get_new_address()?;
-        let (input_amount_spend, spend_utxos) =
-            self.select_asset_utxos(asset_spend, amount_spend)?;
-        let amount_change = input_amount_spend - amount_spend;
-        let change_output = if amount_change != 0 {
-            let address = self.get_new_address()?;
-            let content = match asset_spend {
-                AssetId::Bitcoin => {
-                    OutputContent::Bitcoin(BitcoinOutputContent(
-                        bitcoin::Amount::from_sat(amount_change),
-                    ))
-                }
-                AssetId::Votecoin => {
-                    OutputContent::Votecoin(amount_change.try_into().unwrap())
-                }
-            };
-            Some(Output {
-                address,
-                memo: Vec::new(),
-                content,
-            })
-        } else {
-            None
-        };
-        let receive_output = Output {
-            address: receive_addr,
-            memo: Vec::new(),
-            content: match asset_receive {
-                AssetId::Bitcoin => {
-                    OutputContent::Bitcoin(BitcoinOutputContent(
-                        bitcoin::Amount::from_sat(amount_receive),
-                    ))
-                }
-                AssetId::Votecoin => {
-                    OutputContent::Votecoin(amount_receive.try_into().unwrap())
-                }
-            },
-        };
-        // The first unique asset in the inputs must be `asset_spend`.
-        tx.inputs.extend(spend_utxos.keys());
-        tx.inputs.rotate_right(spend_utxos.len());
-        tx.outputs.extend(change_output);
-        tx.outputs.push(receive_output);
-        tx.data = Some(TxData::AmmSwap {
-            amount_spent: amount_spend,
-            amount_receive,
-            pair_asset: asset_receive,
-        });
-        Ok(())
-    }
 
     /// Given a regular transaction, add a decision slot claim.
     pub fn claim_decision_slot(
@@ -942,112 +697,7 @@ impl Wallet {
         Ok(())
     }
 
-    /// Create a market transaction
-    pub fn create_market(
-        &self,
-        title: String,
-        description: String,
-        decision_slots: Vec<String>,
-        market_type: String,
-        has_residual: Option<bool>,
-        b: Option<f64>,
-        trading_fee: Option<f64>,
-        tags: Option<Vec<String>>,
-        fee: bitcoin::Amount,
-    ) -> Result<Transaction, Error> {
-        // Select minimal bitcoins to pay the fee + storage fee
-        let storage_fee = self.estimate_market_storage_fee(&decision_slots)?;
-        let total_fee = fee.checked_add(storage_fee).ok_or(AmountOverflowError)?;
-        
-        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(total_fee)?;
-        let change = total_bitcoin - total_fee;
 
-        let inputs = bitcoin_utxos.into_keys().collect();
-        let mut outputs = Vec::new();
-
-        // Add change output if needed
-        if change > bitcoin::Amount::ZERO {
-            outputs.push(Output::new(
-                self.get_new_address()?,
-                OutputContent::Bitcoin(BitcoinOutputContent(change)),
-            ));
-        }
-
-        let mut tx = Transaction::new(inputs, outputs);
-
-        // Set the transaction data
-        tx.data = Some(TxData::CreateMarket {
-            title,
-            description,
-            decision_slots,
-            market_type,
-            has_residual,
-            b,
-            trading_fee,
-            tags,
-        });
-
-        Ok(tx)
-    }
-
-    /// Create a multidimensional market transaction with mixed dimension types
-    pub fn create_market_dimensional(
-        &self,
-        title: String,
-        description: String,
-        dimensions: String,
-        b: Option<f64>,
-        trading_fee: Option<f64>,
-        tags: Option<Vec<String>>,
-        fee: bitcoin::Amount,
-    ) -> Result<Transaction, Error> {
-        // Parse dimensions to estimate storage fee
-        let dimension_specs = parse_dimensions(&dimensions)
-            .map_err(|_| Error::InvalidSlotId {
-                reason: "Failed to parse dimension specification".to_string(),
-            })?;
-        
-        // Count total slots for storage fee estimation
-        let mut total_slots = 0;
-        for spec in &dimension_specs {
-            match spec {
-                DimensionSpec::Single(_) => total_slots += 1,
-                DimensionSpec::Categorical(slots) => total_slots += slots.len(),
-            }
-        }
-        
-        // Estimate storage fee based on dimensional complexity
-        let storage_fee = self.estimate_dimensional_storage_fee(total_slots, dimension_specs.len())?;
-        let total_fee = fee.checked_add(storage_fee).ok_or(AmountOverflowError)?;
-        
-        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(total_fee)?;
-        let change = total_bitcoin - total_fee;
-
-        let inputs = bitcoin_utxos.into_keys().collect();
-        let mut outputs = Vec::new();
-
-        // Add change output if needed
-        if change > bitcoin::Amount::ZERO {
-            outputs.push(Output::new(
-                self.get_new_address()?,
-                OutputContent::Bitcoin(BitcoinOutputContent(change)),
-            ));
-        }
-
-        let mut tx = Transaction::new(inputs, outputs);
-
-        // Set the transaction data - use new dimensional format
-        tx.data = Some(TxData::CreateMarketDimensional {
-            title,
-            description,
-            dimensions,
-            b,
-            trading_fee,
-            tags,
-        });
-
-        Ok(tx)
-    }
 
     /// Estimate storage fee for dimensional market
     fn estimate_dimensional_storage_fee(&self, total_slots: usize, num_dimensions: usize) -> Result<bitcoin::Amount, Error> {
@@ -1080,6 +730,188 @@ impl Wallet {
         let complexity_factor = decision_slots.len() as u64;
         let complexity_fee = bitcoin::Amount::from_sat(complexity_factor * complexity_factor);
         base_fee.checked_add(complexity_fee).ok_or(Error::AmountOverflow(AmountOverflowError))
+    }
+
+    /// Market creation method supporting all market types
+    /// Implements Bitcoin Hivemind Section 3.1 - Market Creation with code path
+    pub fn create_market(
+        &self,
+        title: String,
+        description: String,
+        market_type: String,
+        decision_slots: Option<Vec<String>>,
+        dimensions: Option<String>,
+        has_residual: Option<bool>,
+        b: Option<f64>,
+        trading_fee: Option<f64>,
+        tags: Option<Vec<String>>,
+        initial_liquidity: Option<u64>,
+        fee: bitcoin::Amount,
+    ) -> Result<Transaction, Error> {
+        // Determine transaction data type and estimate storage fee based on market type
+        let (tx_data, storage_fee) = match market_type.as_str() {
+            "dimensional" => {
+                let dimensions = dimensions.ok_or_else(|| Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Dimensional markets require dimensions specification"
+                )))?;
+                
+                // Parse dimensions to estimate storage fee
+                let dimension_specs = parse_dimensions(&dimensions)
+                    .map_err(|_| Error::InvalidSlotId {
+                        reason: "Failed to parse dimension specification".to_string(),
+                    })?;
+                
+                // Count total slots for storage fee estimation
+                let mut total_slots = 0;
+                for spec in &dimension_specs {
+                    match spec {
+                        DimensionSpec::Single(_) => total_slots += 1,
+                        DimensionSpec::Categorical(slots) => total_slots += slots.len(),
+                    }
+                }
+                
+                let storage_fee = self.estimate_dimensional_storage_fee(total_slots, dimension_specs.len())?;
+                let tx_data = TxData::CreateMarketDimensional {
+                    title,
+                    description,
+                    dimensions,
+                    b: b.unwrap_or(7.0),
+                    trading_fee,
+                    tags,
+                };
+                
+                (tx_data, storage_fee)
+            }
+            "independent" | "categorical" => {
+                let decision_slots = decision_slots.ok_or_else(|| Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Independent and categorical markets require decision_slots specification"
+                )))?;
+                
+                let storage_fee = self.estimate_market_storage_fee(&decision_slots)?;
+                let tx_data = TxData::CreateMarket {
+                    title,
+                    description,
+                    decision_slots,
+                    market_type,
+                    has_residual,
+                    b: b.unwrap_or(7.0),
+                    trading_fee,
+                    tags,
+                };
+                
+                (tx_data, storage_fee)
+            }
+            _ => return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Unsupported market type: {}", market_type)
+            ))),
+        };
+        
+        // Calculate total cost: transaction fee + storage fee + initial liquidity
+        let mut total_cost = fee.checked_add(storage_fee).ok_or(AmountOverflowError)?;
+        
+        // Add initial liquidity cost if specified
+        if let Some(liquidity_sats) = initial_liquidity {
+            let liquidity_amount = bitcoin::Amount::from_sat(liquidity_sats);
+            total_cost = total_cost.checked_add(liquidity_amount).ok_or(AmountOverflowError)?;
+        }
+        
+        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(total_cost)?;
+        let change = total_bitcoin - total_cost;
+
+        let inputs = bitcoin_utxos.into_keys().collect();
+        let mut outputs = Vec::new();
+
+        // Add change output if needed
+        if change > bitcoin::Amount::ZERO {
+            outputs.push(Output::new(
+                self.get_new_address()?,
+                OutputContent::Bitcoin(BitcoinOutputContent(change)),
+            ));
+        }
+
+        let mut tx = Transaction::new(inputs, outputs);
+        tx.data = Some(tx_data);
+
+        Ok(tx)
+    }
+
+    /// Buy shares in a prediction market using LMSR
+    pub fn buy_shares(
+        &self,
+        market_id: crate::state::markets::MarketId,
+        outcome_index: usize,
+        shares_amount: f64,
+        max_cost: u64,
+        fee: bitcoin::Amount,
+    ) -> Result<Transaction, Error> {
+        // Estimate maximum cost including slippage protection
+        let estimated_cost = bitcoin::Amount::from_sat(max_cost);
+        let total_cost = fee.checked_add(estimated_cost).ok_or(AmountOverflowError)?;
+        
+        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(total_cost)?;
+        let change = total_bitcoin - total_cost;
+
+        let inputs = bitcoin_utxos.into_keys().collect();
+        let mut outputs = Vec::new();
+
+        // Add change output if needed
+        if change > bitcoin::Amount::ZERO {
+            outputs.push(Output::new(
+                self.get_new_address()?,
+                OutputContent::Bitcoin(BitcoinOutputContent(change)),
+            ));
+        }
+
+        let mut tx = Transaction::new(inputs, outputs);
+
+        // Set the transaction data
+        tx.data = Some(TxData::BuyShares {
+            market_id: *market_id.as_bytes(),
+            outcome_index: outcome_index as u32,
+            shares_to_buy: shares_amount,
+            max_cost,
+        });
+
+        Ok(tx)
+    }
+
+    /// Redeem shares in a resolved prediction market
+    pub fn redeem_shares(
+        &self,
+        market_id: crate::state::markets::MarketId,
+        outcome_index: usize,
+        shares_amount: f64,
+        fee: bitcoin::Amount,
+    ) -> Result<Transaction, Error> {
+        // Select minimal bitcoins to pay the transaction fee only
+        // Payout will be received as new bitcoin outputs based on market resolution
+        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(fee)?;
+        let change = total_bitcoin - fee;
+
+        let inputs = bitcoin_utxos.into_keys().collect();
+        let mut outputs = Vec::new();
+
+        // Add change output if needed
+        if change > bitcoin::Amount::ZERO {
+            outputs.push(Output::new(
+                self.get_new_address()?,
+                OutputContent::Bitcoin(BitcoinOutputContent(change)),
+            ));
+        }
+
+        let mut tx = Transaction::new(inputs, outputs);
+
+        // Set the transaction data
+        tx.data = Some(TxData::RedeemShares {
+            market_id: *market_id.as_bytes(),
+            outcome_index: outcome_index as u32,
+            shares_to_redeem: shares_amount,
+        });
+
+        Ok(tx)
     }
 
     pub fn spend_utxos(
@@ -1239,26 +1071,38 @@ impl Wallet {
         Ok(addresses)
     }
 
+    /// Authorize a transaction with strict validation against mempool UTXO spending.
+    /// Following Bitcoin Hivemind's requirement that only confirmed UTXOs can be spent.
     pub fn authorize(
         &self,
         transaction: Transaction,
     ) -> Result<AuthorizedTransaction, Error> {
         let rotxn = self.env.read_txn()?;
         let mut authorizations = vec![];
+
         for input in &transaction.inputs {
-            let spent_utxo = if let Some(utxo) =
+            // CRITICAL VALIDATION: First try confirmed UTXOs only
+            let spent_utxo: Output = if let Some(filled_utxo) =
                 self.utxos.try_get(&rotxn, input).map_err(DbError::from)?
             {
-                utxo.into()
-            } else if let Some(utxo) = self
-                .unconfirmed_utxos
-                .try_get(&rotxn, input)
-                .map_err(DbError::from)?
-            {
-                utxo
+                // Convert FilledOutput to Output for authorization
+                filled_utxo.into()
             } else {
+                // Check if this is an attempt to spend an unconfirmed UTXO
+                if let Some(_unconfirmed_utxo) = self
+                    .unconfirmed_utxos
+                    .try_get(&rotxn, input)
+                    .map_err(DbError::from)?
+                {
+                    tracing::error!(
+                        "Attempted to spend unconfirmed UTXO {:?}. Only confirmed UTXOs can be spent according to Bitcoin Hivemind protocol.",
+                        input
+                    );
+                    return Err(Error::NoUtxo); // Reject spending mempool UTXOs
+                }
                 return Err(Error::NoUtxo);
             };
+
             let index = self
                 .address_to_index
                 .try_get(&rotxn, &spent_utxo.address)

@@ -5,6 +5,7 @@
 
 pub mod archive;
 pub mod authorization;
+pub mod math;
 pub mod mempool;
 pub mod miner;
 pub mod net;

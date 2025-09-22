@@ -1,7 +1,7 @@
-use std::{cmp::Ordering, net::SocketAddr};
+use std::net::SocketAddr;
 
 use bitcoin::Amount;
-use fraction::Fraction;
+use bip39;
 use jsonrpsee::{
     core::{RpcResult, async_trait},
     server::{RpcServiceBuilder, Server},
@@ -17,11 +17,10 @@ use tower_http::{
 use truthcoin_dc::{
     authorization::{self, Dst, Signature},
     net::Peer,
-    state::{self, AmmPair, AmmPoolState},
     types::{
-        Address, AssetId, Authorization, Block, BlockHash, EncryptionPubKey,
+        Address, Authorization, Block, BlockHash, EncryptionPubKey,
         FilledOutputContent, PointedOutput, Transaction, Txid, VerifyingKey,
-        WithdrawalBundle, keys::Ecies,
+        WithdrawalBundle,
     },
     validation::{SlotValidator, PeriodCalculator},
     wallet::Balance,
@@ -42,204 +41,27 @@ where
     custom_err_msg(format!("{error:#}"))
 }
 
+/// Standardized market ID parsing and validation
+/// Ensures consistent error handling across all market endpoints
+fn parse_market_id(market_id: &str) -> RpcResult<truthcoin_dc::state::MarketId> {
+    let market_id_bytes = hex::decode(market_id)
+        .map_err(|_| custom_err_msg("Invalid market ID hex format"))?;
+    
+    if market_id_bytes.len() != 6 {
+        return Err(custom_err_msg("Market ID must be exactly 6 bytes"));
+    }
+    
+    let mut id_array = [0u8; 6];
+    id_array.copy_from_slice(&market_id_bytes);
+    Ok(truthcoin_dc::state::MarketId::new(id_array))
+}
+
 pub struct RpcServerImpl {
     app: App,
 }
 
 #[async_trait]
 impl RpcServer for RpcServerImpl {
-    async fn amm_burn(
-        &self,
-        asset0: AssetId,
-        asset1: AssetId,
-        lp_token_amount: u64,
-    ) -> RpcResult<Txid> {
-        let amm_pair = AmmPair::new(asset0, asset1);
-        let amm_pool_state = self.get_amm_pool_state(asset0, asset1).await?;
-        let next_amm_pool_state =
-            amm_pool_state.burn(lp_token_amount).map_err(custom_err)?;
-        let amount0 = amm_pool_state.reserve0 - next_amm_pool_state.reserve0;
-        let amount1 = amm_pool_state.reserve1 - next_amm_pool_state.reserve1;
-        let mut tx = Transaction::default();
-        let () = self
-            .app
-            .wallet
-            .amm_burn(
-                &mut tx,
-                amm_pair.asset0(),
-                amm_pair.asset1(),
-                amount0,
-                amount1,
-                lp_token_amount,
-            )
-            .map_err(custom_err)?;
-        let txid = tx.txid();
-        let () = self.app.sign_and_send(tx).map_err(custom_err)?;
-        Ok(txid)
-    }
-
-    async fn amm_mint(
-        &self,
-        asset0: AssetId,
-        asset1: AssetId,
-        amount0: u64,
-        amount1: u64,
-    ) -> RpcResult<Txid> {
-        let amm_pool_state = self.get_amm_pool_state(asset0, asset1).await?;
-        let next_amm_pool_state =
-            amm_pool_state.mint(amount0, amount1).map_err(custom_err)?;
-        let lp_token_mint = next_amm_pool_state.outstanding_lp_tokens
-            - amm_pool_state.outstanding_lp_tokens;
-        let mut tx = Transaction::default();
-        let () = self
-            .app
-            .wallet
-            .amm_mint(&mut tx, asset0, asset1, amount0, amount1, lp_token_mint)
-            .map_err(custom_err)?;
-        let txid = tx.txid();
-        let () = self.app.sign_and_send(tx).map_err(custom_err)?;
-        Ok(txid)
-    }
-
-    async fn amm_swap(
-        &self,
-        asset_spend: AssetId,
-        asset_receive: AssetId,
-        amount_spend: u64,
-    ) -> RpcResult<u64> {
-        let pair = match asset_spend.cmp(&asset_receive) {
-            Ordering::Less => (asset_spend, asset_receive),
-            Ordering::Equal => {
-                let err = state::error::Amm::InvalidSwap;
-                return Err(custom_err(err));
-            }
-            Ordering::Greater => (asset_receive, asset_spend),
-        };
-        let amm_pool_state = self.get_amm_pool_state(pair.0, pair.1).await?;
-        let amount_receive = (if asset_spend < asset_receive {
-            amm_pool_state.swap_asset0_for_asset1(amount_spend).map(
-                |new_amm_pool_state| {
-                    new_amm_pool_state.reserve1 - amm_pool_state.reserve1
-                },
-            )
-        } else {
-            amm_pool_state.swap_asset1_for_asset0(amount_spend).map(
-                |new_amm_pool_state| {
-                    new_amm_pool_state.reserve0 - amm_pool_state.reserve0
-                },
-            )
-        })
-        .map_err(custom_err)?;
-        let mut tx = Transaction::default();
-        let () = self
-            .app
-            .wallet
-            .amm_swap(
-                &mut tx,
-                asset_spend,
-                asset_receive,
-                amount_spend,
-                amount_receive,
-            )
-            .map_err(custom_err)?;
-        let authorized_tx =
-            self.app.wallet.authorize(tx).map_err(custom_err)?;
-        self.app
-            .node
-            .submit_transaction(authorized_tx)
-            .map_err(custom_err)?;
-        Ok(amount_receive)
-    }
-
-    async fn bitcoin_balance(&self) -> RpcResult<Balance> {
-        self.app.wallet.get_bitcoin_balance().map_err(custom_err)
-    }
-
-    async fn connect_peer(&self, addr: SocketAddr) -> RpcResult<()> {
-        self.app.node.connect_peer(addr).map_err(custom_err)
-    }
-
-    async fn create_deposit(
-        &self,
-        address: Address,
-        value_sats: u64,
-        fee_sats: u64,
-    ) -> RpcResult<bitcoin::Txid> {
-        let app = self.app.clone();
-        tokio::task::spawn_blocking(move || {
-            app.deposit(
-                address,
-                bitcoin::Amount::from_sat(value_sats),
-                bitcoin::Amount::from_sat(fee_sats),
-            )
-            .map_err(custom_err)
-        })
-        .await
-        .unwrap()
-    }
-
-    async fn decrypt_msg(
-        &self,
-        encryption_pubkey: EncryptionPubKey,
-        msg: String,
-    ) -> RpcResult<String> {
-        let ciphertext = hex::decode(msg).map_err(custom_err)?;
-        self.app
-            .wallet
-            .decrypt_msg(&encryption_pubkey, &ciphertext)
-            .map(hex::encode)
-            .map_err(custom_err)
-    }
-
-    async fn encrypt_msg(
-        &self,
-        encryption_pubkey: EncryptionPubKey,
-        msg: String,
-    ) -> RpcResult<String> {
-        Ecies::new(encryption_pubkey.0)
-            .encrypt(msg.as_bytes())
-            .map(hex::encode)
-            .map_err(|err| custom_err(anyhow::anyhow!("{err:?}")))
-    }
-
-    async fn format_deposit_address(
-        &self,
-        address: Address,
-    ) -> RpcResult<String> {
-        let deposit_address = address.format_for_deposit();
-        Ok(deposit_address)
-    }
-
-    async fn generate_mnemonic(&self) -> RpcResult<String> {
-        let mnemonic = bip39::Mnemonic::new(
-            bip39::MnemonicType::Words12,
-            bip39::Language::English,
-        );
-        Ok(mnemonic.to_string())
-    }
-
-    async fn get_amm_pool_state(
-        &self,
-        asset0: AssetId,
-        asset1: AssetId,
-    ) -> RpcResult<AmmPoolState> {
-        let amm_pair = AmmPair::new(asset0, asset1);
-        self.app
-            .node
-            .get_amm_pool_state(amm_pair)
-            .map_err(custom_err)
-    }
-
-    async fn get_amm_price(
-        &self,
-        base: AssetId,
-        quote: AssetId,
-    ) -> RpcResult<Option<Fraction>> {
-        self.app
-            .node
-            .try_get_amm_price(base, quote)
-            .map_err(custom_err)
-    }
 
     async fn get_block(&self, block_hash: BlockHash) -> RpcResult<Block> {
         let block = self
@@ -375,7 +197,7 @@ impl RpcServer for RpcServerImpl {
         let height = self
             .app
             .node
-            .get_latest_failed_withdrawal_bundle_height()
+            .get_latest_failed_bundle_height()
             .map_err(custom_err)?;
         Ok(height)
     }
@@ -895,75 +717,8 @@ impl RpcServer for RpcServerImpl {
         Ok(result)
     }
 
-    async fn create_market(
-        &self,
-        title: String,
-        description: String,
-        decision_slots: Vec<String>,
-        market_type: String,
-        has_residual: Option<bool>,
-        b: Option<f64>,
-        trading_fee: Option<f64>,
-        tags: Option<Vec<String>>,
-        fee_sats: u64,
-    ) -> RpcResult<String> {
-        let tx = self
-            .app
-            .wallet
-            .create_market(
-                title,
-                description,
-                decision_slots,
-                market_type,
-                has_residual,
-                b,
-                trading_fee,
-                tags,
-                bitcoin::Amount::from_sat(fee_sats),
-            )
-            .map_err(custom_err)?;
-        let txid = tx.txid();
-        
-        // Sign and send the transaction
-        self.app.sign_and_send(tx).map_err(custom_err)?;
-        
-        // Return the transaction ID - the market ID will be derived from this transaction
-        Ok(format!("Market creation transaction submitted: {}", txid))
-    }
 
-    async fn create_market_dimensional(
-        &self,
-        title: String,
-        description: String,
-        dimensions: String,
-        b: Option<f64>,
-        trading_fee: Option<f64>,
-        tags: Option<Vec<String>>,
-        fee_sats: u64,
-    ) -> RpcResult<String> {
-        let tx = self
-            .app
-            .wallet
-            .create_market_dimensional(
-                title,
-                description,
-                dimensions,
-                b,
-                trading_fee,
-                tags,
-                bitcoin::Amount::from_sat(fee_sats),
-            )
-            .map_err(custom_err)?;
-        let txid = tx.txid();
-        
-        // Sign and send the transaction
-        self.app.sign_and_send(tx).map_err(custom_err)?;
-        
-        // Return the transaction ID - the market ID will be derived from this transaction
-        Ok(format!("Dimensional market creation transaction submitted: {}", txid))
-    }
-
-    async fn list_markets(&self) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::MarketInfo>> {
+    async fn list_markets(&self) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::MarketSummary>> {
         // Get markets in Trading state only
         let markets = self
             .app
@@ -971,64 +726,36 @@ impl RpcServer for RpcServerImpl {
             .get_markets_by_state(truthcoin_dc::state::MarketState::Trading)
             .map_err(custom_err)?;
 
-        let mut market_infos = Vec::new();
+        let mut market_summaries = Vec::new();
 
         for market in markets {
-            // Get decisions for this market to generate outcome descriptions
-            let decisions = self
-                .app
-                .node
-                .get_market_decisions(&market)
-                .map_err(custom_err)?;
-
-            // Generate outcome descriptions (filter out invalid states for user display)
-            let mut outcomes = Vec::new();
-            let valid_state_combos = market.get_valid_state_combos_for_display();
-            for (state_idx, _combo) in valid_state_combos.iter() {
-                match market.describe_outcome_by_state(*state_idx, &decisions) {
-                    Ok(description) => outcomes.push(description),
-                    Err(_) => outcomes.push(format!("Outcome {}", state_idx)),
-                }
-            }
-            
-            // Calculate prices only for valid states (normalized to sum to 1.0)
-            let current_prices = market.calculate_prices_for_display();
-
-            // Calculate volume (for now using treasury as a proxy)
-            let volume = market.treasury;
-
             // Convert market ID to hex string
             let market_id_hex = hex::encode(market.id.as_bytes());
 
-            let market_info = truthcoin_dc_app_rpc_api::MarketInfo {
+            // Create lightweight summary
+            let market_summary = truthcoin_dc_app_rpc_api::MarketSummary {
                 market_id: market_id_hex,
-                title: market.title,
-                description: market.description,
-                outcomes,
-                current_prices,
-                expires_at: market.expires_at_height,
-                volume,
-                state: format!("{:?}", market.state),
+                title: market.title.clone(),
+                description: if market.description.len() > 100 {
+                    format!("{}...", &market.description[..97])
+                } else {
+                    market.description.clone()
+                },
+                outcome_count: market.get_outcome_count(),
+                state: format!("{:?}", market.state()),
+                volume: market.treasury(), // Using treasury as volume proxy
+                created_at_height: market.created_at_height,
             };
 
-            market_infos.push(market_info);
+            market_summaries.push(market_summary);
         }
 
-        Ok(market_infos)
+        Ok(market_summaries)
     }
 
-    async fn view_market(&self, market_id: String) -> RpcResult<Option<truthcoin_dc_app_rpc_api::MarketDetails>> {
-        // Parse market ID from hex
-        let market_id_bytes = hex::decode(&market_id)
-            .map_err(|_| custom_err_msg("Invalid market ID hex format"))?;
-
-        if market_id_bytes.len() != 6 {
-            return Err(custom_err_msg("Market ID must be exactly 6 bytes"));
-        }
-
-        let mut id_array = [0u8; 6];
-        id_array.copy_from_slice(&market_id_bytes);
-        let market_id_struct = truthcoin_dc::state::MarketId::new(id_array);
+    async fn view_market(&self, market_id: String) -> RpcResult<Option<truthcoin_dc_app_rpc_api::MarketData>> {
+        // Parse and validate market ID using standardized function
+        let market_id_struct = parse_market_id(&market_id)?;
 
         // Get the market
         let market = match self
@@ -1050,11 +777,33 @@ impl RpcServer for RpcServerImpl {
 
         // Generate detailed outcome information (filter out invalid states for user display)
         let mut outcomes = Vec::new();
-        let valid_state_combos = market.get_valid_state_combos_for_display();
+        let valid_state_combos = market.get_valid_state_combos();
         
-        // Calculate prices only for valid states (normalized to sum to 1.0)
-        let prices = market.calculate_prices_for_display();
+        // Get mempool-adjusted shares if they exist (for real-time price updates)
+        let prices = if let Some(mempool_shares) = self.app.node.get_mempool_shares(&market_id_struct).map_err(custom_err)? {
+            // Calculate prices with mempool-adjusted shares
+            let all_prices = market.calculate_prices(&mempool_shares);
+            
+            // Extract prices for valid states only and renormalize
+            let valid_prices: Vec<f64> = valid_state_combos
+                .iter()
+                .map(|(state_idx, _)| all_prices[*state_idx])
+                .collect();
+            
+            let valid_sum: f64 = valid_prices.iter().sum();
+            if valid_sum > 0.0 {
+                valid_prices.iter().map(|p| p / valid_sum).collect()
+            } else {
+                vec![1.0 / valid_prices.len() as f64; valid_prices.len()]
+            }
+        } else {
+            // No mempool adjustments, use confirmed state
+            market.calculate_prices_for_display()
+        };
         
+        // Get actual volume data from the market
+        let total_volume = market.total_volume_sats as f64;
+
         for (i, (state_idx, _combo)) in valid_state_combos.iter().enumerate() {
             let name = match market.describe_outcome_by_state(*state_idx, &decisions) {
                 Ok(description) => description,
@@ -1063,13 +812,19 @@ impl RpcServer for RpcServerImpl {
 
             let current_price = prices[i];
             let probability = current_price; // Price equals probability in LMSR
-            let volume = 0.0; // TODO: Calculate per-outcome volume when trading is implemented
+            // Get per-outcome volume
+            let volume = if i < market.outcome_volumes_sats.len() {
+                market.outcome_volumes_sats[i] as f64
+            } else {
+                0.0
+            };
 
             outcomes.push(truthcoin_dc_app_rpc_api::MarketOutcome {
                 name,
                 current_price,
                 probability,
                 volume,
+                index: i,
             });
         }
 
@@ -1080,24 +835,445 @@ impl RpcServer for RpcServerImpl {
             .map(|slot_id| slot_id.to_hex())
             .collect();
 
-        let market_details = truthcoin_dc_app_rpc_api::MarketDetails {
+        let market_data = truthcoin_dc_app_rpc_api::MarketData {
             market_id,
-            title: market.title,
-            description: market.description,
+            title: market.title.clone(),
+            description: market.description.clone(),
             outcomes,
+            state: format!("{:?}", market.state()),
             market_maker: market.creator_address.to_string(),
-            expiry: market.expires_at_height,
-            liquidity: market.treasury, // Treasury represents available liquidity
-            trading_state: format!("{:?}", market.state),
-            beta: market.b,
-            trading_fee: market.trading_fee,
-            tags: market.tags,
+            expires_at: market.expires_at_height,
+            beta: market.b(),
+            trading_fee: market.trading_fee(),
+            tags: market.tags.clone(),
             created_at_height: market.created_at_height,
-            treasury: market.treasury,
+            treasury: market.treasury(),
+            total_volume,
+            liquidity: market.treasury(), // Treasury represents available liquidity
             decision_slots,
         };
 
-        Ok(Some(market_details))
+        Ok(Some(market_data))
+    }
+
+
+    async fn redeem_shares(
+        &self,
+        market_id: String,
+        outcome_index: usize,
+        shares_amount: f64,
+        fee_sats: u64,
+    ) -> RpcResult<String> {
+        // Parse and validate market ID using standardized function
+        let market_id_struct = parse_market_id(&market_id)?;
+
+        // Create the transaction
+        let tx = self
+            .app
+            .wallet
+            .redeem_shares(
+                market_id_struct,
+                outcome_index,
+                shares_amount,
+                bitcoin::Amount::from_sat(fee_sats),
+            )
+            .map_err(custom_err)?;
+
+        let txid = tx.txid();
+
+        // Sign and send the transaction
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+
+        Ok(format!("{}", txid))
+    }
+
+    /// Create a new prediction market with optional liquidity
+    async fn create_market(
+        &self,
+        request: truthcoin_dc_app_rpc_api::CreateMarketRequest,
+    ) -> RpcResult<String> {
+        // Use consolidated market creation method
+        let tx = self.app.wallet.create_market(
+            request.title,
+            request.description,
+            request.market_type,
+            if request.decision_slots.is_empty() { None } else { Some(request.decision_slots) },
+            request.dimensions,
+            request.has_residual,
+            request.beta,
+            request.trading_fee,
+            request.tags,
+            request.initial_liquidity,
+            bitcoin::Amount::from_sat(request.fee_sats),
+        ).map_err(custom_err)?;
+
+        let txid = tx.txid();
+        
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+
+        // Market ID is derived from the first 6 bytes of the transaction hash
+        let market_id_bytes = &txid.as_slice()[..6];
+        let market_id_hex = hex::encode(market_id_bytes);
+
+        Ok(market_id_hex)
+    }
+
+    async fn calculate_initial_liquidity(
+        &self,
+        request: truthcoin_dc_app_rpc_api::CalculateInitialLiquidityRequest,
+    ) -> RpcResult<truthcoin_dc_app_rpc_api::InitialLiquidityCalculation> {
+        let beta = request.beta;
+
+        // Validate beta parameter
+        if beta <= 0.0 {
+            return Err(custom_err_msg(format!(
+                "Beta parameter must be positive, got: {}", beta
+            )));
+        }
+
+        // Calculate number of outcomes based on market configuration
+        let (num_outcomes, market_config, outcome_breakdown) = if let Some(num) = request.num_outcomes {
+            // Simple preview mode with explicit number of outcomes
+            if num < 2 {
+                return Err(custom_err_msg(
+                    "Number of outcomes must be at least 2".to_string()
+                ));
+            }
+            (num, format!("Preview: {} outcomes", num), format!("{} outcomes specified", num))
+        } else if let Some(ref decision_slots) = request.decision_slots {
+            // Calculate based on actual decision slots
+            match request.market_type.as_str() {
+                "independent" => {
+                    // Each binary decision contributes 2^1 = 2 outcomes, combined = 2^n total outcomes
+                    let num = 2_usize.pow(decision_slots.len() as u32);
+                    (num, format!("Independent: {} binary decisions", decision_slots.len()),
+                     format!("{} binary decisions = 2^{} = {} total outcome combinations",
+                             decision_slots.len(), decision_slots.len(), num))
+                },
+                "categorical" => {
+                    // Categorical market: each slot represents one outcome, plus optional residual
+                    let base_outcomes = decision_slots.len();
+                    let has_residual = request.has_residual.unwrap_or(false);
+                    let total = if has_residual { base_outcomes + 1 } else { base_outcomes };
+                    (total, format!("Categorical: {} categories{}", base_outcomes,
+                                  if has_residual { " + residual" } else { "" }),
+                     format!("{} categories{} = {} total outcomes", base_outcomes,
+                            if has_residual { " + 1 residual" } else { "" }, total))
+                },
+                "dimensional" => {
+                    // Dimensional markets require dimension specification
+                    if let Some(ref dims) = request.dimensions {
+                        // For now, return a reasonable estimate
+                        // In practice, this would parse the dimension specification
+                        let estimated_outcomes = decision_slots.len() * 2; // Conservative estimate
+                        (estimated_outcomes, format!("Dimensional: {} dimensions", decision_slots.len()),
+                         format!("Estimated {} outcomes from {} dimensions (actual calculation requires dimension parsing)",
+                                estimated_outcomes, decision_slots.len()))
+                    } else {
+                        return Err(custom_err_msg(
+                            "Dimensional markets require dimension specification".to_string()
+                        ));
+                    }
+                },
+                _ => return Err(custom_err_msg(format!(
+                    "Unknown market type: {}", request.market_type
+                )))
+            }
+        } else {
+            return Err(custom_err_msg(
+                "Either decision_slots or num_outcomes must be provided".to_string()
+            ));
+        };
+
+        // Apply the formula: Initial Liquidity = β × ln(Number of States in the Market)
+        let initial_liquidity_f64 = beta * (num_outcomes as f64).ln();
+        let initial_liquidity_sats = initial_liquidity_f64.ceil() as u64; // Round up to ensure sufficient liquidity
+
+        Ok(truthcoin_dc_app_rpc_api::InitialLiquidityCalculation {
+            beta,
+            num_outcomes,
+            initial_liquidity_sats,
+            min_treasury_sats: initial_liquidity_sats, // Same value
+            market_config,
+            outcome_breakdown,
+        })
+    }
+
+    /// Get comprehensive share positions for a user
+    async fn get_user_share_positions(
+        &self,
+        address: Address,
+    ) -> RpcResult<truthcoin_dc_app_rpc_api::UserHoldings> {
+        let node = &self.app.node;
+        
+        // Get user positions from database
+        let positions_data = node
+            .get_user_share_positions(&address)
+            .map_err(custom_err)?;
+
+        let mut positions = Vec::new();
+        let mut total_value = 0.0;
+        let mut total_cost_basis = 0.0;
+        let mut active_markets = std::collections::HashSet::new();
+        let mut last_updated_height = 0u64;
+
+        // Extract unique market IDs for batch retrieval (eliminates N+1 queries)
+        let unique_market_ids: Vec<truthcoin_dc::state::MarketId> = positions_data
+            .iter()
+            .map(|(market_id, _, _)| market_id.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        // Batch retrieve all required markets in single database transaction
+        let markets_map = node
+            .get_markets_batch(&unique_market_ids)
+            .map_err(custom_err)?;
+
+        // Pre-calculate prices for all markets to avoid repeated LMSR computations
+        let mut prices_cache = std::collections::HashMap::new();
+        for (market_id, market) in &markets_map {
+            prices_cache.insert(market_id.clone(), market.get_current_prices());
+        }
+
+        for (market_id, outcome_index, position_data) in positions_data {
+            // Use pre-fetched market and cached prices
+            if let (Some(market), Some(current_prices)) = (markets_map.get(&market_id), prices_cache.get(&market_id)) {
+                let outcome_price = current_prices.get(outcome_index as usize).copied().unwrap_or(0.0);
+                
+                let shares_held = position_data;
+                let current_value = shares_held * outcome_price;
+                
+                // Get outcome name from market state combinations
+                let outcome_name = if let Some(combo) = market.state_combos.get(outcome_index as usize) {
+                    format!("Outcome {}: {:?}", outcome_index, combo)
+                } else {
+                    format!("Outcome {}", outcome_index)
+                };
+
+                positions.push(truthcoin_dc_app_rpc_api::SharePosition {
+                    market_id: market_id.to_string(),
+                    outcome_index: outcome_index as usize,
+                    outcome_name,
+                    shares_held: shares_held,
+                    avg_purchase_price: outcome_price,
+                    current_price: outcome_price,
+                    current_value,
+                    unrealized_pnl: 0.0,
+                    cost_basis: current_value,
+                });
+
+                total_value += current_value;
+                total_cost_basis += current_value;
+                active_markets.insert(market_id);
+                last_updated_height = last_updated_height.max(1);
+            }
+        }
+
+        let total_unrealized_pnl = total_value - total_cost_basis;
+
+        Ok(truthcoin_dc_app_rpc_api::UserHoldings {
+            address: address.to_string(),
+            positions,
+            total_value,
+            total_cost_basis,
+            total_unrealized_pnl,
+            active_markets: active_markets.len(),
+            last_updated_height,
+        })
+    }
+
+    /// Get share positions for a specific market and user
+    async fn get_market_share_positions(
+        &self,
+        address: Address,
+        market_id: String,
+    ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::SharePosition>> {
+        // Parse and validate market ID using standardized function
+        let market_id_struct = parse_market_id(&market_id)?;
+
+        let node = &self.app.node;
+        
+        // Get positions for this specific market
+        let positions_data = node
+            .get_market_user_positions(&address, &market_id_struct)
+            .map_err(custom_err)?;
+
+        let mut positions = Vec::new();
+
+        // Get market to calculate current prices
+        if let Ok(Some(market)) = node.get_market_by_id(&market_id_struct) {
+            let current_prices = market.get_current_prices();
+            
+            for (outcome_index, position_data) in positions_data {
+                let outcome_price = current_prices.get(outcome_index as usize).copied().unwrap_or(0.0);
+                let shares_held = position_data;
+                let current_value = shares_held * outcome_price;
+                
+                let outcome_name = if let Some(combo) = market.state_combos.get(outcome_index as usize) {
+                    format!("Outcome {}: {:?}", outcome_index, combo)
+                } else {
+                    format!("Outcome {}", outcome_index)
+                };
+
+                positions.push(truthcoin_dc_app_rpc_api::SharePosition {
+                    market_id: market_id.clone(),
+                    outcome_index: outcome_index as usize,
+                    outcome_name,
+                    shares_held: shares_held,
+                    avg_purchase_price: outcome_price,
+                    current_price: outcome_price,
+                    current_value,
+                    unrealized_pnl: 0.0,
+                    cost_basis: current_value,
+                });
+            }
+        }
+
+        Ok(positions)
+    }
+
+    /// Calculate share purchase cost using current market snapshot
+    async fn calculate_share_cost(
+        &self,
+        market_id: String,
+        outcome_index: usize,
+        shares_amount: f64,
+    ) -> RpcResult<u64> {
+        // Parse and validate market ID using standardized function
+        let market_id_struct = parse_market_id(&market_id)?;
+
+        let node = &self.app.node;
+        
+        // Get market and calculate cost using snapshot LMSR
+        if let Ok(Some(market)) = node.get_market_by_id(&market_id_struct) {
+            // Calculate cost using snapshot LMSR without mutating market state
+            let cost_sats = market.calculate_buy_cost(outcome_index as u32, shares_amount)
+                .map_err(custom_err)?;
+            
+            Ok(cost_sats)
+        } else {
+            Err(custom_err_msg("Market not found"))
+        }
+    }
+
+    /// Buy shares using LMSR calculations for optimal pricing
+    async fn buy_shares(
+        &self,
+        market_id: String,
+        outcome_index: usize,
+        shares_amount: f64,
+        max_cost: u64,
+        fee_sats: u64,
+    ) -> RpcResult<String> {
+        // First calculate the exact cost using snapshot
+        let calculated_cost = self.calculate_share_cost(
+            market_id.clone(),
+            outcome_index,
+            shares_amount,
+        ).await?;
+
+        // Check slippage protection
+        if calculated_cost > max_cost {
+            return Err(custom_err_msg(format!(
+                "Share cost {} exceeds maximum cost {} (slippage protection)",
+                calculated_cost, max_cost
+            )));
+        }
+
+        // Parse and validate market ID using standardized function
+        let market_id_struct = parse_market_id(&market_id)?;
+
+        // Create the transaction using snapshot pricing
+        let tx = self
+            .app
+            .wallet
+            .buy_shares(
+                market_id_struct,
+                outcome_index,
+                shares_amount,
+                max_cost, // Use user's max_cost for slippage protection
+                bitcoin::Amount::from_sat(fee_sats),
+            )
+            .map_err(custom_err)?;
+
+        let txid = tx.txid();
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+
+        Ok(format!("{}", txid))
+    }
+
+    async fn bitcoin_balance(&self) -> RpcResult<Balance> {
+        self.app.wallet.get_bitcoin_balance().map_err(custom_err)
+    }
+
+    async fn create_deposit(
+        &self,
+        address: Address,
+        value_sats: u64,
+        fee_sats: u64,
+    ) -> RpcResult<bitcoin::Txid> {
+        // Create a transfer transaction (deposit is essentially a transfer to an address)
+        let tx = self.app.wallet.create_transfer(
+            address,
+            bitcoin::Amount::from_sat(value_sats),
+            bitcoin::Amount::from_sat(fee_sats),
+            None, // no memo
+        ).map_err(custom_err)?;
+        
+        let txid = tx.txid();
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+        
+        // Convert truthcoin_dc::types::Txid to bitcoin::Txid
+        let bitcoin_txid = bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(txid.0));
+        Ok(bitcoin_txid)
+    }
+
+    async fn connect_peer(&self, addr: SocketAddr) -> RpcResult<()> {
+        self.app.node.connect_peer(addr).map_err(custom_err)
+    }
+
+    async fn decrypt_msg(
+        &self,
+        encryption_pubkey: EncryptionPubKey,
+        ciphertext: String,
+    ) -> RpcResult<String> {
+        let ciphertext_bytes = hex::decode(&ciphertext).map_err(|e| {
+            ErrorObject::owned(-32602, "Invalid hex string", Some(e.to_string()))
+        })?;
+        
+        let decrypted_bytes = self.app
+            .wallet
+            .decrypt_msg(&encryption_pubkey, &ciphertext_bytes)
+            .map_err(custom_err)?;
+        
+        Ok(hex::encode(decrypted_bytes))
+    }
+
+    async fn encrypt_msg(
+        &self,
+        _encryption_pubkey: EncryptionPubKey,
+        _msg: String,
+    ) -> RpcResult<String> {
+        // For now, return an error indicating this feature is not implemented
+        Err(ErrorObject::owned(
+            -32601,
+            "Encryption not implemented",
+            Some("Use external encryption tools")
+        ))
+    }
+
+    async fn format_deposit_address(&self, address: Address) -> RpcResult<String> {
+        // Format the address as string
+        Ok(format!("{}", address))
+    }
+
+    async fn generate_mnemonic(&self) -> RpcResult<String> {
+        let mnemonic = bip39::Mnemonic::new(
+            bip39::MnemonicType::Words12,
+            bip39::Language::English,
+        );
+        Ok(mnemonic.to_string())
     }
 }
 

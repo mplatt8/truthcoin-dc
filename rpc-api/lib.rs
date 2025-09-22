@@ -2,7 +2,6 @@
 
 use std::net::SocketAddr;
 
-use fraction::Fraction;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use l2l_openapi::open_api;
 
@@ -10,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use truthcoin_dc::{
     authorization::{Dst, Signature},
     net::{Peer, PeerConnectionStatus},
-    state::AmmPoolState,
     types::{
         Address, AssetId, Authorization, BitcoinOutputContent, Block,
         BlockHash, Body, EncryptionPubKey, FilledOutputContent, Header,
@@ -23,8 +21,6 @@ use truthcoin_dc::{
 use utoipa::ToSchema;
 
 mod schema;
-#[cfg(test)]
-mod test;
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct TxInfo {
@@ -105,83 +101,199 @@ pub struct OssifiedSlotInfo {
     pub decision: Option<DecisionInfo>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
-pub struct MarketInfo {
-    pub market_id: String,
-    pub title: String,
-    pub description: String,
-    pub outcomes: Vec<String>,
-    pub current_prices: Vec<f64>,
-    pub expires_at: Option<u64>,
-    pub volume: f64,
-    pub state: String,
-}
-
+/// Unified market outcome representation according to Bitcoin Hivemind specification
+/// Contains price, probability, and trading volume data for a specific market outcome
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct MarketOutcome {
+    /// Outcome name/description  
     pub name: String,
+    /// Current LMSR-derived price (0.0 to 1.0)
     pub current_price: f64,
+    /// Market-implied probability (normalized price)
     pub probability: f64,
+    /// Total trading volume for this outcome in sats
     pub volume: f64,
+    /// Index position in the market's outcome vector
+    pub index: usize,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
-pub struct MarketDetails {
+/// Unified market information structure consolidating MarketInfo and MarketDetails
+/// This structure provides comprehensive market data for all use cases according to
+/// Bitcoin Hivemind whitepaper Section 3.2 - Market Mechanics
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]  
+pub struct MarketData {
+    /// Unique 6-byte market identifier (hex-encoded)
     pub market_id: String,
+    /// Human-readable market title
     pub title: String,
+    /// Detailed market description
     pub description: String,
+    /// All possible outcomes with current pricing
     pub outcomes: Vec<MarketOutcome>,
+    /// Current market state (Trading, Voting, Resolved, etc.)
+    pub state: String,
+    /// Market creator address
     pub market_maker: String,
-    pub expiry: Option<u64>,
-    pub liquidity: f64,
-    pub trading_state: String,
+    /// Optional market expiration height
+    pub expires_at: Option<u64>,
+    /// LMSR beta parameter controlling liquidity
     pub beta: f64,
+    /// Trading fee percentage (e.g., 0.005 = 0.5%)
     pub trading_fee: f64,
+    /// Market categorization tags
     pub tags: Vec<String>,
+    /// Block height when market was created  
     pub created_at_height: u64,
+    /// Current LMSR cost function value (treasury)
     pub treasury: f64,
+    /// Total trading volume across all outcomes in sats
+    pub total_volume: f64,
+    /// Current liquidity depth
+    pub liquidity: f64,
+    /// Decision slot IDs that define market dimensions
     pub decision_slots: Vec<String>,
+}
+
+/// Lightweight market summary for list views
+/// Provides essential market data for overview displays
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct MarketSummary {
+    /// Unique 6-byte market identifier (hex-encoded)
+    pub market_id: String,
+    /// Human-readable market title  
+    pub title: String,
+    /// Brief description (truncated if necessary)
+    pub description: String,
+    /// Number of outcomes
+    pub outcome_count: usize,
+    /// Current market state
+    pub state: String,
+    /// Total trading volume in sats
+    pub volume: f64,
+    /// Market creation height
+    pub created_at_height: u64,
+}
+
+/// User's share position in a specific market outcome
+/// Tracks individual holdings according to Hivemind Section 4.3 - Share Accounting
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct SharePosition {
+    /// Market identifier
+    pub market_id: String,
+    /// Outcome index within the market
+    pub outcome_index: usize,
+    /// Outcome name/description
+    pub outcome_name: String,
+    /// Number of shares held
+    pub shares_held: f64,
+    /// Average purchase price of held shares
+    pub avg_purchase_price: f64,
+    /// Current market price of this outcome
+    pub current_price: f64,
+    /// Current valuation of position (shares_held * current_price)
+    pub current_value: f64,
+    /// Unrealized profit/loss (current_value - cost_basis)
+    pub unrealized_pnl: f64,
+    /// Total cost basis of position (shares_held * avg_purchase_price)
+    pub cost_basis: f64,
+}
+
+/// Complete user holdings across all markets
+/// Provides comprehensive portfolio view for share position management
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct UserHoldings {
+    /// User's address
+    pub address: String,
+    /// Individual share positions across all markets
+    pub positions: Vec<SharePosition>,
+    /// Total portfolio value in sats
+    pub total_value: f64,
+    /// Total cost basis across all positions  
+    pub total_cost_basis: f64,
+    /// Total unrealized profit/loss
+    pub total_unrealized_pnl: f64,
+    /// Number of different markets with positions
+    pub active_markets: usize,
+    /// Last update block height
+    pub last_updated_height: u64,
+}
+
+/// Market creation request with optional initial liquidity provision
+/// Unified structure combining simple and dimensional market creation
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct CreateMarketRequest {
+    /// Market title
+    pub title: String,
+    /// Detailed description
+    pub description: String,
+    /// Market type: "independent", "categorical", or "dimensional"
+    pub market_type: String,
+    /// Decision slot IDs (hex-encoded)
+    pub decision_slots: Vec<String>,
+    /// For dimensional markets: JSON dimension specification
+    pub dimensions: Option<String>,
+    /// For categorical markets: whether to include residual outcome
+    pub has_residual: Option<bool>,
+    /// LMSR beta parameter (optional, defaults to 7.0)
+    pub beta: Option<f64>,
+    /// Trading fee percentage (optional, defaults to 0.5%)
+    pub trading_fee: Option<f64>,
+    /// Market tags for categorization
+    pub tags: Option<Vec<String>>,
+    /// Initial liquidity provision in sats (optional)
+    pub initial_liquidity: Option<u64>,
+    /// Transaction fee in sats
+    pub fee_sats: u64,
+}
+
+/// Request for calculating initial liquidity based on market parameters
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct CalculateInitialLiquidityRequest {
+    /// LMSR beta parameter
+    pub beta: f64,
+    /// Market type: "independent", "categorical", or "dimensional"
+    pub market_type: String,
+    /// Decision slot IDs or number of outcomes (for preview)
+    pub decision_slots: Option<Vec<String>>,
+    /// Number of outcomes (alternative to decision_slots for preview)
+    pub num_outcomes: Option<usize>,
+    /// For dimensional markets: JSON dimension specification
+    pub dimensions: Option<String>,
+    /// For categorical markets: whether to include residual outcome
+    pub has_residual: Option<bool>,
+}
+
+/// Response containing calculated initial liquidity information
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct InitialLiquidityCalculation {
+    /// LMSR beta parameter used
+    pub beta: f64,
+    /// Number of market outcomes/states
+    pub num_outcomes: usize,
+    /// Calculated initial liquidity using formula: b * ln(num_outcomes)
+    pub initial_liquidity_sats: u64,
+    /// Minimum treasury value (same as initial_liquidity_sats)
+    pub min_treasury_sats: u64,
+    /// Market configuration used for calculation
+    pub market_config: String,
+    /// Breakdown of how outcomes were calculated
+    pub outcome_breakdown: String,
 }
 
 #[open_api(ref_schemas[
     truthcoin_schema::BitcoinAddr, truthcoin_schema::BitcoinBlockHash,
     truthcoin_schema::BitcoinTransaction, truthcoin_schema::BitcoinOutPoint,
     truthcoin_schema::SocketAddr, Address, AssetId, Authorization,
-    BitcoinOutputContent, BlockHash, Body, EncryptionPubKey,
-    FilledOutputContent, Header, MarketDetails, MarketInfo, MarketOutcome,
+    BitcoinOutputContent, BlockHash, Body, CalculateInitialLiquidityRequest,
+    CreateMarketRequest, EncryptionPubKey, FilledOutputContent, Header,
+    InitialLiquidityCalculation, MarketData, MarketOutcome, MarketSummary,
     MerkleRoot, OutPoint, Output, OutputContent,
-    PeerConnectionStatus, Signature, SlotInfo, SlotStatus, Transaction, TxData, Txid, TxIn,
+    PeerConnectionStatus, SharePosition, Signature, SlotInfo, SlotStatus, 
+    Transaction, TxData, Txid, TxIn, UserHoldings,
     VotingPeriodInfo, WithdrawalOutputContent, VerifyingKey,
 ])]
 #[rpc(client, server)]
 pub trait Rpc {
-    /// Burn an AMM position
-    #[method(name = "amm_burn")]
-    async fn amm_burn(
-        &self,
-        asset0: AssetId,
-        asset1: AssetId,
-        lp_token_amount: u64,
-    ) -> RpcResult<Txid>;
-
-    /// Mint an AMM position
-    #[method(name = "amm_mint")]
-    async fn amm_mint(
-        &self,
-        asset0: AssetId,
-        asset1: AssetId,
-        amount0: u64,
-        amount1: u64,
-    ) -> RpcResult<Txid>;
-
-    /// Returns the amount of `asset_receive` to receive
-    #[method(name = "amm_swap")]
-    async fn amm_swap(
-        &self,
-        asset_spend: AssetId,
-        asset_receive: AssetId,
-        amount_spend: u64,
-    ) -> RpcResult<u64>;
 
     /// Balance in sats
     #[open_api_method(output_schema(ToSchema))]
@@ -239,25 +351,6 @@ pub trait Rpc {
     #[method(name = "generate_mnemonic")]
     async fn generate_mnemonic(&self) -> RpcResult<String>;
 
-    /// Get the state of the specified AMM pool
-    #[open_api_method(output_schema(ToSchema))]
-    #[method(name = "get_amm_pool_state")]
-    async fn get_amm_pool_state(
-        &self,
-        asset0: AssetId,
-        asset1: AssetId,
-    ) -> RpcResult<AmmPoolState>;
-
-    /// Get the current price for the specified pair
-    #[open_api_method(output_schema(
-        PartialSchema = "schema::Optional<schema::Fraction>"
-    ))]
-    #[method(name = "get_amm_price")]
-    async fn get_amm_price(
-        &self,
-        base: AssetId,
-        quote: AssetId,
-    ) -> RpcResult<Option<Fraction>>;
 
     /// Get block data
     #[open_api_method(output_schema(ToSchema))]
@@ -537,41 +630,78 @@ pub trait Rpc {
     #[method(name = "get_ossified_slots")]
     async fn get_ossified_slots(&self) -> RpcResult<Vec<OssifiedSlotInfo>>;
 
-    /// Create a new prediction market
+    /// Create a new prediction market supporting all market types
+    /// according to Bitcoin Hivemind whitepaper Section 3.1 - Market Creation
     #[method(name = "create_market")]
     async fn create_market(
         &self,
-        title: String,
-        description: String,
-        decision_slots: Vec<String>, // Hex-encoded slot IDs
-        market_type: String, // "independent" or "categorical"
-        has_residual: Option<bool>, // Only for categorical markets
-        b: Option<f64>, // LMSR beta parameter
-        trading_fee: Option<f64>, // Trading fee percentage
-        tags: Option<Vec<String>>, // Categorization tags
-        fee_sats: u64, // Transaction fee
+        request: CreateMarketRequest,
     ) -> RpcResult<String>; // Returns market ID
 
-    /// Create a new multidimensional prediction market with mixed dimension types
-    #[method(name = "create_market_dimensional")]
-    async fn create_market_dimensional(
-        &self,
-        title: String,
-        description: String,
-        dimensions: String, // JSON-like dimension specification: "[slot1,[slot2,slot3],slot4]"
-        b: Option<f64>, // LMSR beta parameter
-        trading_fee: Option<f64>, // Trading fee percentage
-        tags: Option<Vec<String>>, // Categorization tags
-        fee_sats: u64, // Transaction fee
-    ) -> RpcResult<String>; // Returns market ID
-
-    /// List all markets in Trading state
-    #[open_api_method(output_schema(ToSchema = "Vec<MarketInfo>"))]
+    /// List all markets in Trading state with lightweight data
+    #[open_api_method(output_schema(ToSchema = "Vec<MarketSummary>"))]
     #[method(name = "list_markets")]
-    async fn list_markets(&self) -> RpcResult<Vec<MarketInfo>>;
+    async fn list_markets(&self) -> RpcResult<Vec<MarketSummary>>;
 
     /// View detailed information for a specific market
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "view_market")]
-    async fn view_market(&self, market_id: String) -> RpcResult<Option<MarketDetails>>;
+    async fn view_market(&self, market_id: String) -> RpcResult<Option<MarketData>>;
+
+    /// Calculate initial liquidity required for market creation based on beta parameter
+    /// Uses formula: Initial Liquidity = β × ln(Number of States in the Market)
+    /// Helpful for previewing costs and GUI parameter selection
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "calculate_initial_liquidity")]
+    async fn calculate_initial_liquidity(
+        &self,
+        request: CalculateInitialLiquidityRequest
+    ) -> RpcResult<InitialLiquidityCalculation>;
+
+    /// Get share positions for a specific user address
+    /// Returns all positions across all markets according to Hivemind Section 4.3
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "get_user_share_positions")]
+    async fn get_user_share_positions(&self, address: Address) -> RpcResult<UserHoldings>;
+
+    /// Get share positions for a specific market and user
+    #[open_api_method(output_schema(ToSchema = "Vec<SharePosition>"))]
+    #[method(name = "get_market_share_positions")]
+    async fn get_market_share_positions(
+        &self,
+        address: Address,
+        market_id: String,
+    ) -> RpcResult<Vec<SharePosition>>;
+
+    /// Buy shares in a prediction market using LMSR pricing
+    /// Implements optimal pricing according to Hivemind Section 2.3 - LMSR Mechanics
+    #[method(name = "buy_shares")]
+    async fn buy_shares(
+        &self,
+        market_id: String,
+        outcome_index: usize,
+        shares_amount: f64,
+        max_cost: u64, // Maximum cost in sats (slippage protection)
+        fee_sats: u64, // Transaction fee
+    ) -> RpcResult<String>; // Returns transaction ID
+
+    /// Calculate share purchase cost using current market snapshot
+    /// Provides accurate pricing without executing the trade
+    #[method(name = "calculate_share_cost")]
+    async fn calculate_share_cost(
+        &self,
+        market_id: String,
+        outcome_index: usize,
+        shares_amount: f64,
+    ) -> RpcResult<u64>; // Returns cost in sats
+
+    /// Redeem shares in a resolved prediction market
+    #[method(name = "redeem_shares")]
+    async fn redeem_shares(
+        &self,
+        market_id: String,
+        outcome_index: usize,
+        shares_amount: f64,
+        fee_sats: u64, // Transaction fee
+    ) -> RpcResult<String>; // Returns transaction ID
 }

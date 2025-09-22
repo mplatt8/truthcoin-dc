@@ -1,5 +1,4 @@
 use std::{
-    cmp::Ordering,
     collections::{HashMap, HashSet},
 };
 
@@ -110,33 +109,6 @@ pub type TxOutputs = Vec<Output>;
 #[derive(BorshSerialize, Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[schema(as = TxData)]
 pub enum TransactionData {
-    /// Burn an AMM position
-    AmmBurn {
-        /// Amount of the ordered Bitcoin to receive
-        amount0: u64,
-        /// Amount of the ordered Votecoin to receive
-        amount1: u64,
-        /// Amount of the LP token to burn
-        lp_token_burn: u64,
-    },
-    /// Mint an AMM position
-    AmmMint {
-        /// Amount of the ordered Bitcoin to receive
-        amount0: u64,
-        /// Amount of the ordered Votecoin to receive
-        amount1: u64,
-        /// Amount of the LP token to receive
-        lp_token_mint: u64,
-    },
-    /// AMM swap
-    AmmSwap {
-        /// Amount to spend
-        amount_spent: u64,
-        /// Amount to receive
-        amount_receive: u64,
-        /// Pair asset to swap for
-        pair_asset: AssetId,
-    },
     /// Claim a decision slot
     ClaimDecisionSlot {
         /// 3 byte slot ID
@@ -164,8 +136,8 @@ pub enum TransactionData {
         market_type: String,
         /// Has residual outcome (for categorical markets)
         has_residual: Option<bool>,
-        /// LMSR beta parameter
-        b: Option<f64>,
+        /// LMSR beta parameter (required - liquidity calculated as b * ln(num_states))
+        b: f64,
         /// Trading fee percentage
         trading_fee: Option<f64>,
         /// Categorization tags
@@ -179,32 +151,38 @@ pub enum TransactionData {
         description: String,
         /// Dimension specification: "[slot1,[slot2,slot3],slot4]"
         dimensions: String,
-        /// LMSR beta parameter
-        b: Option<f64>,
+        /// LMSR beta parameter (required - liquidity calculated as b * ln(num_states))
+        b: f64,
         /// Trading fee percentage
         trading_fee: Option<f64>,
         /// Categorization tags
         tags: Option<Vec<String>>,
+    },
+    /// Buy shares in a prediction market by spending Bitcoin on L2
+    BuyShares {
+        /// Market ID (6 bytes)
+        market_id: [u8; 6],
+        /// Outcome index to buy shares for
+        outcome_index: u32,
+        /// Number of shares to buy
+        shares_to_buy: f64,
+        /// Maximum cost willing to pay (in satoshis)
+        max_cost: u64,
+    },
+    /// Redeem shares after market resolution for Bitcoin payout
+    RedeemShares {
+        /// Market ID (6 bytes)
+        market_id: [u8; 6],
+        /// Outcome index to redeem shares for
+        outcome_index: u32,
+        /// Number of shares to redeem
+        shares_to_redeem: f64,
     },
 }
 
 pub type TxData = TransactionData;
 
 impl TxData {
-    /// `true` if the tx data corresponds to an AMM burn
-    pub fn is_amm_burn(&self) -> bool {
-        matches!(self, Self::AmmBurn { .. })
-    }
-
-    /// `true` if the tx data corresponds to an AMM mint
-    pub fn is_amm_mint(&self) -> bool {
-        matches!(self, Self::AmmMint { .. })
-    }
-
-    /// `true` if the tx data corresponds to an AMM swap
-    pub fn is_amm_swap(&self) -> bool {
-        matches!(self, Self::AmmSwap { .. })
-    }
 
     /// `true` if the tx data corresponds to a decision slot claim
     pub fn is_claim_decision_slot(&self) -> bool {
@@ -220,44 +198,19 @@ impl TxData {
     pub fn is_create_market_dimensional(&self) -> bool {
         matches!(self, Self::CreateMarketDimensional { .. })
     }
+
+    /// `true` if the tx data corresponds to buying shares
+    pub fn is_buy_shares(&self) -> bool {
+        matches!(self, Self::BuyShares { .. })
+    }
+
+    /// `true` if the tx data corresponds to redeeming shares
+    pub fn is_redeem_shares(&self) -> bool {
+        matches!(self, Self::RedeemShares { .. })
+    }
+
 }
 
-/// Struct describing an AMM burn
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AmmBurn {
-    pub asset0: AssetId,
-    pub asset1: AssetId,
-    /// Amount of asset 0 received
-    pub amount0: u64,
-    /// Amount of asset 1 received
-    pub amount1: u64,
-    /// Amount of LP token burned
-    pub lp_token_burn: u64,
-}
-
-/// Struct describing an AMM mint
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AmmMint {
-    pub asset0: AssetId,
-    pub asset1: AssetId,
-    /// Amount of asset 0 deposited
-    pub amount0: u64,
-    /// Amount of asset 1 deposited
-    pub amount1: u64,
-    /// Amount of LP token received
-    pub lp_token_mint: u64,
-}
-
-/// Struct describing an AMM swap
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AmmSwap {
-    pub asset_spend: AssetId,
-    pub asset_receive: AssetId,
-    /// Amount of spend asset spent
-    pub amount_spend: u64,
-    //// Amount of receive asset received
-    pub amount_receive: u64,
-}
 
 /// Struct describing a decision slot claim
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -289,8 +242,8 @@ pub struct CreateMarket {
     pub market_type: String,
     /// Has residual outcome (for categorical markets)
     pub has_residual: Option<bool>,
-    /// LMSR beta parameter
-    pub b: Option<f64>,
+    /// LMSR beta parameter (required - liquidity calculated as b * ln(num_states))
+    pub b: f64,
     /// Trading fee percentage
     pub trading_fee: Option<f64>,
     /// Categorization tags
@@ -306,13 +259,38 @@ pub struct CreateMarketDimensional {
     pub description: String,
     /// Dimension specification: "[slot1,[slot2,slot3],slot4]"
     pub dimensions: String,
-    /// LMSR beta parameter
-    pub b: Option<f64>,
+    /// LMSR beta parameter (required - liquidity calculated as b * ln(num_states))
+    pub b: f64,
     /// Trading fee percentage
     pub trading_fee: Option<f64>,
     /// Categorization tags
     pub tags: Option<Vec<String>>,
 }
+
+/// Struct describing a share buy operation
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BuyShares {
+    /// Market ID (6 bytes)
+    pub market_id: [u8; 6],
+    /// Outcome index to buy shares for
+    pub outcome_index: u32,
+    /// Number of shares to buy
+    pub shares_to_buy: f64,
+    /// Maximum cost willing to pay (in satoshis)
+    pub max_cost: u64,
+}
+
+/// Struct describing a share redemption operation after market resolution
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RedeemShares {
+    /// Market ID (6 bytes)
+    pub market_id: [u8; 6],
+    /// Outcome index to redeem shares for
+    pub outcome_index: u32,
+    /// Number of shares to redeem
+    pub shares_to_redeem: f64,
+}
+
 
 #[derive(
     BorshSerialize, Clone, Debug, Default, Deserialize, Serialize, ToSchema,
@@ -401,6 +379,7 @@ impl FilledTransaction {
         }
     }
 
+
     /// `true` if the tx data corresponds to market creation
     pub fn is_create_market(&self) -> bool {
         match &self.transaction.data {
@@ -409,74 +388,6 @@ impl FilledTransaction {
         }
     }
 
-    /** If the tx is an AMM burn, returns the LP token's
-     *  corresponding [`AmmBurn`]. */
-    pub fn amm_burn(&self) -> Option<AmmBurn> {
-        match self.transaction.data {
-            Some(TransactionData::AmmBurn {
-                amount0,
-                amount1,
-                lp_token_burn,
-            }) => {
-                let unique_spent_lp_tokens = self.unique_spent_lp_tokens();
-                let (asset0, asset1, _) = unique_spent_lp_tokens.first()?;
-                Some(AmmBurn {
-                    asset0: *asset0,
-                    asset1: *asset1,
-                    amount0,
-                    amount1,
-                    lp_token_burn,
-                })
-            }
-            _ => None,
-        }
-    }
-
-    /// If the tx is an AMM mint, returns the corresponding [`AmmMint`].
-    pub fn amm_mint(&self) -> Option<AmmMint> {
-        match self.transaction.data {
-            Some(TransactionData::AmmMint {
-                amount0,
-                amount1,
-                lp_token_mint,
-            }) => match self.unique_spent_assets().get(0..=1) {
-                Some([(first_asset, _), (second_asset, _)]) => {
-                    let mut assets = [first_asset, second_asset];
-                    assets.sort();
-                    let [asset0, asset1] = assets;
-                    Some(AmmMint {
-                        asset0: *asset0,
-                        asset1: *asset1,
-                        amount0,
-                        amount1,
-                        lp_token_mint,
-                    })
-                }
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// If the tx is an AMM swap, returns the corresponding [`AmmSwap`].
-    pub fn amm_swap(&self) -> Option<AmmSwap> {
-        match self.transaction.data {
-            Some(TransactionData::AmmSwap {
-                amount_spent,
-                amount_receive,
-                pair_asset,
-            }) => {
-                let (spent_asset, _) = *self.unique_spent_assets().first()?;
-                Some(AmmSwap {
-                    asset_spend: spent_asset,
-                    asset_receive: pair_asset,
-                    amount_spend: amount_spent,
-                    amount_receive,
-                })
-            }
-            _ => None,
-        }
-    }
 
     /// If the tx is a decision slot claim, returns the corresponding [`ClaimDecisionSlot`].
     pub fn claim_decision_slot(&self) -> Option<ClaimDecisionSlot> {
@@ -547,6 +458,41 @@ impl FilledTransaction {
             _ => None,
         }
     }
+
+    /// If the tx is a share buy, returns the corresponding [`BuyShares`].
+    pub fn buy_shares(&self) -> Option<BuyShares> {
+        match &self.transaction.data {
+            Some(TransactionData::BuyShares {
+                market_id,
+                outcome_index,
+                shares_to_buy,
+                max_cost,
+            }) => Some(BuyShares {
+                market_id: *market_id,
+                outcome_index: *outcome_index,
+                shares_to_buy: *shares_to_buy,
+                max_cost: *max_cost,
+            }),
+            _ => None,
+        }
+    }
+
+    /// If the tx is a share redemption, returns the corresponding [`RedeemShares`].
+    pub fn redeem_shares(&self) -> Option<RedeemShares> {
+        match &self.transaction.data {
+            Some(TransactionData::RedeemShares {
+                market_id,
+                outcome_index,
+                shares_to_redeem,
+            }) => Some(RedeemShares {
+                market_id: *market_id,
+                outcome_index: *outcome_index,
+                shares_to_redeem: *shares_to_redeem,
+            }),
+            _ => None,
+        }
+    }
+
 
     /// Accessor for txid
     pub fn txid(&self) -> Txid {
@@ -652,36 +598,7 @@ impl FilledTransaction {
             .collect()
     }
 
-    /// Return an iterator over spent AMM LP tokens
-    pub fn spent_lp_tokens(
-        &self,
-    ) -> impl DoubleEndedIterator<Item = (&OutPoint, &FilledOutput)> {
-        self.spent_inputs()
-            .filter(|(_, filled_output)| filled_output.is_lp_token())
-    }
 
-    /** Return a vector of pairs consisting of an LP token's corresponding
-     *  asset pair and the combined input amount for that LP token.
-     *  The vector is ordered such that LP tokens occur in the same order
-     *  as they first occur in the inputs. */
-    pub fn unique_spent_lp_tokens(&self) -> Vec<(AssetId, AssetId, u64)> {
-        // Combined amount for each LP token
-        let mut combined_amounts = HashMap::<(AssetId, AssetId), u64>::new();
-        let spent_lp_token_amounts = || {
-            self.spent_lp_tokens()
-                .filter_map(|(_, output)| output.lp_token_amount())
-        };
-        // Increment combined amount for the LP token
-        spent_lp_token_amounts().for_each(|(asset0, asset1, amount)| {
-            *combined_amounts.entry((asset0, asset1)).or_default() += amount;
-        });
-        spent_lp_token_amounts()
-            .unique_by(|(asset0, asset1, _)| (*asset0, *asset1))
-            .map(|(asset0, asset1, _)| {
-                (asset0, asset1, combined_amounts[&(asset0, asset1)])
-            })
-            .collect()
-    }
 
     /** Returns an iterator over total value for each asset that must
      *  appear in the outputs, in order.
@@ -691,104 +608,10 @@ impl FilledTransaction {
     fn output_asset_total_values(
         &self,
     ) -> impl Iterator<Item = (AssetId, Option<u64>)> + '_ {
-        // Votecoin has a fixed supply and cannot be created or destroyed
-        // No special transaction data handling needed for Votecoin
-        let (mut amm_burn0, mut amm_burn1) = match self.amm_burn() {
-            Some(AmmBurn {
-                asset0,
-                asset1,
-                amount0,
-                amount1,
-                lp_token_burn: _,
-            }) => (Some((asset0, amount0)), Some((asset1, amount1))),
-            None => (None, None),
-        };
-        let (mut amm_mint0, mut amm_mint1) = match self.amm_mint() {
-            Some(AmmMint {
-                asset0,
-                asset1,
-                amount0,
-                amount1,
-                lp_token_mint: _,
-            }) => (Some((asset0, amount0)), Some((asset1, amount1))),
-            None => (None, None),
-        };
-        let (mut amm_swap_spend, mut amm_swap_receive) = match self.amm_swap() {
-            Some(AmmSwap {
-                asset_spend,
-                asset_receive,
-                amount_spend,
-                amount_receive,
-            }) => (
-                Some((asset_spend, amount_spend)),
-                Some((asset_receive, amount_receive)),
-            ),
-            None => (None, None),
-        };
-
         self.unique_spent_assets()
             .into_iter()
-            .map(move |(asset, total_value)| {
-                let total_value = if let Some((burn_asset, burn_amount)) =
-                    amm_burn0
-                    && burn_asset == asset
-                {
-                    amm_burn0 = None;
-                    total_value.checked_add(burn_amount)
-                } else if let Some((burn_asset, burn_amount)) = amm_burn1
-                    && burn_asset == asset
-                {
-                    amm_burn1 = None;
-                    total_value.checked_add(burn_amount)
-                } else if let Some((mint_asset, mint_amount)) = amm_mint0
-                    && mint_asset == asset
-                {
-                    amm_mint0 = None;
-                    total_value.checked_sub(mint_amount)
-                } else if let Some((mint_asset, mint_amount)) = amm_mint1
-                    && mint_asset == asset
-                {
-                    amm_mint1 = None;
-                    total_value.checked_sub(mint_amount)
-                } else if let Some((swap_spend_asset, swap_spend_amount)) =
-                    amm_swap_spend
-                    && swap_spend_asset == asset
-                {
-                    amm_swap_spend = None;
-                    total_value.checked_sub(swap_spend_amount)
-                } else if let Some((swap_receive_asset, swap_receive_amount)) =
-                    amm_swap_receive
-                    && swap_receive_asset == asset
-                {
-                    amm_swap_receive = None;
-                    total_value.checked_add(swap_receive_amount)
-                } else {
-                    Some(total_value)
-                };
-                (asset, total_value)
-            })
+            .map(|(asset, total_value)| (asset, Some(total_value)))
             .filter(|(_, amount)| *amount != Some(0))
-            .chain(amm_burn0.map(|(burn_asset, burn_amount)| {
-                (burn_asset, Some(burn_amount))
-            }))
-            .chain(amm_burn1.map(|(burn_asset, burn_amount)| {
-                (burn_asset, Some(burn_amount))
-            }))
-            .chain(amm_mint0.map(|(mint_asset, _)|
-                    /* If the assets are not already accounted for,
-                    * indicate an underflow */
-                    (mint_asset, None)))
-            .chain(amm_mint1.map(|(mint_asset, _)|
-                    /* If the assets are not already accounted for,
-                    * indicate an underflow */
-                    (mint_asset, None)))
-            .chain(amm_swap_spend.map(|(spend_asset, _)|
-                    /* If the assets are not already accounted for,
-                    * indicate an underflow */
-                    (spend_asset, None)))
-            .chain(amm_swap_receive.map(|(receive_asset, receive_amount)| {
-                (receive_asset, Some(receive_amount))
-            }))
     }
 
     /** Returns the max value of Bitcoin that can occur in the outputs.
@@ -812,95 +635,25 @@ impl FilledTransaction {
     fn output_lp_token_total_amounts(
         &self,
     ) -> impl Iterator<Item = (AssetId, AssetId, Option<u64>)> + '_ {
-        /* If this tx is an AMM burn, this is the corresponding asset IDs
-        and token amount of the output corresponding to the newly created
-        AMM LP position. */
-        let mut amm_burn: Option<AmmBurn> = self.amm_burn();
-        /* If this tx is an AMM mint, this is the corresponding asset IDs
-        and token amount of the output corresponding to the newly created
-        AMM LP position. */
-        let mut amm_mint: Option<AmmMint> = self.amm_mint();
-        self.unique_spent_lp_tokens()
-            .into_iter()
-            .map(move |(asset0, asset1, total_amount)| {
-                let total_value = if let Some(AmmBurn {
-                    asset0: burn_asset0,
-                    asset1: burn_asset1,
-                    amount0: _,
-                    amount1: _,
-                    lp_token_burn,
-                }) = amm_burn
-                    && (burn_asset0, burn_asset1) == (asset0, asset1)
-                {
-                    amm_burn = None;
-                    total_amount.checked_sub(lp_token_burn)
-                } else if let Some(AmmMint {
-                    asset0: mint_asset0,
-                    asset1: mint_asset1,
-                    amount0: _,
-                    amount1: _,
-                    lp_token_mint,
-                }) = amm_mint
-                    && (mint_asset0, mint_asset1) == (asset0, asset1)
-                {
-                    amm_mint = None;
-                    total_amount.checked_add(lp_token_mint)
-                } else {
-                    Some(total_amount)
-                };
-                (asset0, asset1, total_value)
-            })
-            .chain(amm_burn.map(|amm_burn| {
-                /* If the LP tokens are not already accounted for,
-                 * indicate an underflow */
-                (amm_burn.asset0, amm_burn.asset1, None)
-            }))
-            .chain(amm_mint.map(|amm_mint| {
-                (
-                    amm_mint.asset0,
-                    amm_mint.asset1,
-                    Some(amm_mint.lp_token_mint),
-                )
-            }))
+        std::iter::empty()
     }
 
-    /// compute the filled outputs.
-    /// returns None if the outputs cannot be filled because the tx is invalid
-    // FIXME: Invalidate tx if any iterator is incomplete
+    /// Compute the filled outputs.
+    /// Returns None if the outputs cannot be filled because the tx is invalid.
+    /// 
+    /// Transaction validation ensures that all iterators over expected output amounts
+    /// are fully consumed during processing. If any iterator has remaining unconsumed
+    /// elements after processing all outputs, the transaction is considered invalid
+    /// per Bitcoin Hivemind transaction consistency requirements.
     pub fn filled_outputs(&self) -> Option<Vec<FilledOutput>> {
         let mut output_bitcoin_max_value = self.output_bitcoin_max_value()?;
         let mut output_lp_token_total_amounts =
             self.output_lp_token_total_amounts().peekable();
 
-        self.outputs()
+        let outputs = self.outputs()
             .iter()
             .map(|output| {
                 let content = match output.content.clone() {
-                    OutputContent::AmmLpToken(amount) => {
-                        let (asset0, asset1, remaining_amount) =
-                            output_lp_token_total_amounts.peek_mut()?;
-                        let remaining_amount = remaining_amount.as_mut()?;
-                        let filled_content = FilledOutputContent::AmmLpToken {
-                            asset0: *asset0,
-                            asset1: *asset1,
-                            amount,
-                        };
-                        match amount.cmp(remaining_amount) {
-                            Ordering::Greater => {
-                                // Invalid tx, return `None`
-                                return None;
-                            }
-                            Ordering::Equal => {
-                                // Advance the iterator to the next LP token
-                                let _ = output_lp_token_total_amounts.next()?;
-                            }
-                            Ordering::Less => {
-                                // Decrement the remaining value for the current LP token
-                                *remaining_amount -= amount;
-                            }
-                        }
-                        filled_content
-                    }
                     OutputContent::Votecoin(value) => {
                         FilledOutputContent::Votecoin(value)
                     }
@@ -919,7 +672,16 @@ impl FilledTransaction {
                     memo: output.memo.clone(),
                 })
             })
-            .collect()
+            .collect::<Option<Vec<FilledOutput>>>()?;
+
+        // Validate that all LP token iterators are fully consumed.
+        // If there are remaining unconsumed elements, the transaction has
+        // inconsistent LP token allocations and must be marked invalid.
+        if output_lp_token_total_amounts.peek().is_some() {
+            return None;
+        }
+
+        Some(outputs)
     }
 }
 
@@ -951,3 +713,4 @@ impl From<Authorized<FilledTransaction>> for AuthorizedTransaction {
         }
     }
 }
+

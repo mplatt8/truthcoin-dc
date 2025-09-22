@@ -277,7 +277,6 @@ mod content {
                 $(#[$attr])*
             )?
             $vis enum $enum_name {
-                AmmLpToken(u64),
                 // Generate attributes if they were provided
                 $(
                     $(#[$bitcoin_attr])*
@@ -358,7 +357,6 @@ mod content {
                 Self::Withdrawal(withdrawal) => {
                     Some(super::AssetContent::Withdrawal(withdrawal))
                 }
-                Self::AmmLpToken(_) => None,
             }
         }
     }
@@ -384,7 +382,6 @@ mod content {
     impl From<DefaultRepr> for Content {
         fn from(repr: DefaultRepr) -> Self {
             match repr {
-                DefaultRepr::AmmLpToken(value) => Self::AmmLpToken(value),
                 DefaultRepr::Votecoin(value) => Self::Votecoin(value),
                 DefaultRepr::Bitcoin(value) => Self::Bitcoin(value),
                 DefaultRepr::Withdrawal(withdrawal) => {
@@ -397,7 +394,6 @@ mod content {
     impl From<HumanReadableRepr> for Content {
         fn from(repr: HumanReadableRepr) -> Self {
             match repr {
-                HumanReadableRepr::AmmLpToken(value) => Self::AmmLpToken(value),
                 HumanReadableRepr::Votecoin(value) => Self::Votecoin(value),
                 HumanReadableRepr::Bitcoin(value) => Self::Bitcoin(value),
                 HumanReadableRepr::Withdrawal(withdrawal) => {
@@ -410,7 +406,6 @@ mod content {
     impl From<Content> for DefaultRepr {
         fn from(content: Content) -> Self {
             match content {
-                Content::AmmLpToken(value) => Self::AmmLpToken(value),
                 Content::Votecoin(value) => Self::Votecoin(value),
                 Content::Bitcoin(value) => Self::Bitcoin(value),
                 Content::Withdrawal(withdrawal) => Self::Withdrawal(withdrawal),
@@ -421,7 +416,6 @@ mod content {
     impl From<Content> for HumanReadableRepr {
         fn from(content: Content) -> Self {
             match content {
-                Content::AmmLpToken(value) => Self::AmmLpToken(value),
                 Content::Votecoin(value) => Self::Votecoin(value),
                 Content::Bitcoin(value) => Self::Bitcoin(value),
                 Content::Withdrawal(withdrawal) => Self::Withdrawal(withdrawal),
@@ -467,7 +461,7 @@ mod content {
         #[inline(always)]
         fn get_bitcoin_value(&self) -> bitcoin::Amount {
             match self {
-                Self::AmmLpToken(_) | Self::Votecoin(_) => {
+                Self::Votecoin(_) => {
                     bitcoin::Amount::ZERO
                 }
                 Self::Bitcoin(value) => value.0,
@@ -498,11 +492,6 @@ mod filled_content {
                 $(#[$attr])*
             )?
             $vis enum $enum_name {
-                AmmLpToken {
-                    asset0: AssetId,
-                    asset1: AssetId,
-                    amount: u64,
-                },
                 // Generate attributes if they were provided
                 $(
                     $(#[$bitcoin_attr])*
@@ -571,11 +560,6 @@ mod filled_content {
          *  if the filled output content corresponds to an LP token output. */
         pub fn lp_token_amount(&self) -> Option<(AssetId, AssetId, u64)> {
             match self {
-                Self::AmmLpToken {
-                    asset0,
-                    asset1,
-                    amount,
-                } => Some((*asset0, *asset1, *amount)),
                 _ => None,
             }
         }
@@ -592,7 +576,7 @@ mod filled_content {
 
         /// `true` if the output content corresponds to an LP token
         pub fn is_lp_token(&self) -> bool {
-            matches!(self, Self::AmmLpToken { .. })
+false
         }
 
         /// `true` if the output content corresponds to a withdrawal
@@ -604,11 +588,6 @@ mod filled_content {
     impl From<FilledContent> for super::Content {
         fn from(filled: FilledContent) -> Self {
             match filled {
-                FilledContent::AmmLpToken {
-                    asset0: _,
-                    asset1: _,
-                    amount,
-                } => super::Content::AmmLpToken(amount),
                 FilledContent::Bitcoin(value) => super::Content::Bitcoin(value),
                 FilledContent::BitcoinWithdrawal(withdrawal) => {
                     super::Content::Withdrawal(withdrawal)
@@ -623,15 +602,6 @@ mod filled_content {
     impl From<DefaultRepr> for FilledContent {
         fn from(repr: DefaultRepr) -> Self {
             match repr {
-                DefaultRepr::AmmLpToken {
-                    asset0,
-                    asset1,
-                    amount,
-                } => Self::AmmLpToken {
-                    asset0,
-                    asset1,
-                    amount,
-                },
                 DefaultRepr::Votecoin(value) => Self::Votecoin(value),
                 DefaultRepr::Bitcoin(value) => Self::Bitcoin(value),
                 DefaultRepr::BitcoinWithdrawal(withdrawal) => {
@@ -644,15 +614,6 @@ mod filled_content {
     impl From<HumanReadableRepr> for FilledContent {
         fn from(repr: HumanReadableRepr) -> Self {
             match repr {
-                HumanReadableRepr::AmmLpToken {
-                    asset0,
-                    asset1,
-                    amount,
-                } => Self::AmmLpToken {
-                    asset0,
-                    asset1,
-                    amount,
-                },
                 HumanReadableRepr::Votecoin(value) => Self::Votecoin(value),
                 HumanReadableRepr::Bitcoin(value) => Self::Bitcoin(value),
                 HumanReadableRepr::BitcoinWithdrawal(withdrawal) => {
@@ -665,15 +626,6 @@ mod filled_content {
     impl From<FilledContent> for DefaultRepr {
         fn from(content: FilledContent) -> Self {
             match content {
-                FilledContent::AmmLpToken {
-                    asset0,
-                    asset1,
-                    amount,
-                } => Self::AmmLpToken {
-                    asset0,
-                    asset1,
-                    amount,
-                },
                 FilledContent::Votecoin(value) => Self::Votecoin(value),
                 FilledContent::Bitcoin(value) => Self::Bitcoin(value),
                 FilledContent::BitcoinWithdrawal(withdrawal) => {
@@ -686,15 +638,6 @@ mod filled_content {
     impl From<FilledContent> for HumanReadableRepr {
         fn from(content: FilledContent) -> Self {
             match content {
-                FilledContent::AmmLpToken {
-                    asset0,
-                    asset1,
-                    amount,
-                } => Self::AmmLpToken {
-                    asset0,
-                    asset1,
-                    amount,
-                },
                 FilledContent::Votecoin(value) => Self::Votecoin(value),
                 FilledContent::Bitcoin(value) => Self::Bitcoin(value),
                 FilledContent::BitcoinWithdrawal(withdrawal) => {

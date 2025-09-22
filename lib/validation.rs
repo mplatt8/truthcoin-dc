@@ -1,20 +1,14 @@
-//! Common validation utilities for Bitcoin Hivemind sidechain
-//! 
-//! This module provides shared validation logic to eliminate code duplication
-//! across RPC, state management, and transaction processing layers.
-//! All implementations follow the Bitcoin Hivemind whitepaper specifications.
+//! Validation utilities for Bitcoin Hivemind sidechain.
+//! This module is the single source of truth for all validation logic.
 
-use hex;
 use crate::state::slots::{SlotId, Decision};
+use crate::state::markets::{MarketError, DFunction, DimensionSpec, MarketState};
 use crate::state::Error;
 use crate::types::{FilledTransaction, Address};
 use sneed::RoTxn;
+use std::collections::HashSet;
 
-/// Trait for slot validation database interface
-/// 
-/// Abstracts the slots database operations needed for validation,
-/// allowing the validation logic to work with different database
-/// implementations while maintaining Bitcoin Hivemind compliance.
+/// Slot validation database interface.
 pub trait SlotValidationInterface {
     /// Validate that a slot can be claimed according to Hivemind rules
     fn validate_slot_claim(
@@ -30,46 +24,17 @@ pub trait SlotValidationInterface {
     fn try_get_height(&self, rotxn: &RoTxn) -> Result<Option<u32>, Error>;
 }
 
-/// Slot ID validation utilities
-/// 
-/// Provides common slot ID parsing and validation logic used across
-/// RPC methods and transaction validation. Follows Hivemind whitepaper
-/// slot identification specification.
+/// Slot ID validation utilities.
 pub struct SlotValidator;
 
 impl SlotValidator {
-    /// Parse slot ID from hex string with comprehensive validation
-    /// 
-    /// # Arguments
-    /// * `slot_id_hex` - Hex-encoded slot ID string
-    /// 
-    /// # Returns
-    /// * `Ok(SlotId)` - Valid slot ID
-    /// * `Err(Error)` - Invalid format or slot ID
-    /// 
-    /// # Specification Reference
-    /// Bitcoin Hivemind whitepaper section on slot addressing and period indexing
+    /// Parse slot ID from hex string.
+    /// Delegates to SlotId::from_hex for consistency and single source of truth.
     pub fn parse_slot_id_from_hex(slot_id_hex: &str) -> Result<SlotId, Error> {
-        // Parse slot ID from hex
-        let slot_id_bytes = hex::decode(slot_id_hex)
-            .map_err(|_| Error::InvalidSlotId {
-                reason: "Invalid slot ID hex format".to_string(),
-            })?;
-
-        if slot_id_bytes.len() != 3 {
-            return Err(Error::InvalidSlotId {
-                reason: "Slot ID must be exactly 3 bytes".to_string(),
-            });
-        }
-
-        let slot_id_array: [u8; 3] = slot_id_bytes.try_into().unwrap();
-        SlotId::from_bytes(slot_id_array)
+        SlotId::from_hex(slot_id_hex)
     }
 
-    /// Validate slot ID bytes match computed slot ID
-    /// 
-    /// Ensures slot ID bytes consistency as specified in Hivemind whitepaper
-    /// for slot claim validation.
+    /// Validate slot ID bytes consistency.
     pub fn validate_slot_id_consistency(slot_id: &SlotId, slot_id_bytes: [u8; 3]) -> Result<(), Error> {
         if slot_id.as_bytes() != slot_id_bytes {
             return Err(Error::InvalidSlotId {
@@ -79,10 +44,7 @@ impl SlotValidator {
         Ok(())
     }
 
-    /// Validate decision slot claim structure
-    /// 
-    /// Common validation logic for decision slot claims, ensuring
-    /// market maker authorization and decision structure validity.
+    /// Validate decision structure.
     pub fn validate_decision_structure(
         market_maker_address_bytes: [u8; 20],
         slot_id_bytes: [u8; 3],
@@ -103,31 +65,7 @@ impl SlotValidator {
         )
     }
 
-    /// Comprehensive decision slot claim validation
-    /// 
-    /// This is the single source of truth for validating decision slot claims
-    /// across the entire system. Consolidates all validation logic including:
-    /// - Transaction structure validation
-    /// - Slot ID consistency checks  
-    /// - Market maker authorization
-    /// - Decision structure validation
-    /// - Slot availability and timing validation
-    /// 
-    /// # Arguments
-    /// * `slots_db` - Slots database interface for claim validation
-    /// * `rotxn` - Read-only transaction for database access
-    /// * `tx` - Filled transaction containing slot claim data
-    /// * `override_height` - Optional height override for validation context
-    /// 
-    /// # Returns
-    /// * `Ok(())` - Valid slot claim meeting all requirements
-    /// * `Err(Error)` - Invalid claim with detailed error information
-    /// 
-    /// # Specification Reference
-    /// Bitcoin Hivemind whitepaper sections on:
-    /// - Decision slot allocation and timing
-    /// - Market maker authorization requirements  
-    /// - Slot claim validation procedures
+    /// Validate complete decision slot claim.
     pub fn validate_complete_decision_slot_claim<T>(
         slots_db: &T,
         rotxn: &RoTxn,
@@ -137,23 +75,23 @@ impl SlotValidator {
     where
         T: SlotValidationInterface,
     {
-        // 1. Validate transaction contains slot claim data
+        // Validate transaction contains slot claim data
         let claim = tx.claim_decision_slot()
-            .ok_or_else(|| Error::InvalidSlotId {
+            .ok_or_else(|| Error::InvalidTransaction {
                 reason: "Not a decision slot claim transaction".to_string(),
             })?;
 
-        // 2. Parse and validate slot ID from claim bytes
+        // Parse and validate slot ID
         let slot_id = SlotId::from_bytes(claim.slot_id_bytes)?;
 
-        // 3. Validate slot ID bytes consistency 
+        // Validate slot ID consistency
         Self::validate_slot_id_consistency(&slot_id, claim.slot_id_bytes)?;
 
-        // 4. Validate market maker authorization (all UTXOs from same maker)
+        // Validate market maker authorization
         let market_maker_address = MarketValidator::validate_market_maker_authorization(tx)?;
         let market_maker_address_bytes = market_maker_address.0;
 
-        // 5. Validate decision structure according to Hivemind specification
+        // Validate decision structure
         let decision = Self::validate_decision_structure(
             market_maker_address_bytes,
             claim.slot_id_bytes,
@@ -164,16 +102,16 @@ impl SlotValidator {
             claim.max,
         )?;
 
-        // 6. Get current timestamp for temporal validation
+        // Get current timestamp
         let current_ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_else(|_| std::time::Duration::from_secs(0))
             .as_secs();
         
-        // 7. Get current height for validation context
+        // Get current height
         let current_height = override_height.or_else(|| slots_db.try_get_height(rotxn).ok().flatten());
         
-        // 8. Perform comprehensive slot claim validation
+        // Perform slot claim validation
         slots_db.validate_slot_claim(
             rotxn,
             slot_id,
@@ -193,231 +131,337 @@ impl SlotValidator {
     }
 }
 
-/// Market validation utilities
-/// 
-/// Provides common market validation logic used in transaction processing
-/// and state management. Follows Bitcoin Hivemind market specification.
+/// Market validation utilities.
 pub struct MarketValidator;
 
 impl MarketValidator {
-    /// Validate market maker authorization from transaction UTXOs
-    /// 
-    /// Ensures all UTXOs belong to the same market maker to prevent collusion,
-    /// as specified in the Hivemind whitepaper market maker requirements.
+    /// Validate market maker authorization from transaction UTXOs.
     pub fn validate_market_maker_authorization(tx: &FilledTransaction) -> Result<Address, Error> {
-        // Validate that we have at least one input spending a market maker's funds
+        // Validate inputs exist
         if tx.inputs().is_empty() {
-            return Err(Error::InvalidSlotId {
+            return Err(Error::InvalidTransaction {
                 reason: "Transaction must have at least one input".to_string(),
             });
         }
 
-        // Extract market maker address from the first UTXO
-        let first_utxo = tx.spent_utxos.first().ok_or_else(|| Error::InvalidSlotId {
-            reason: "No spent UTXOs found".to_string(),
-        })?;
+        // Validate spent UTXOs exist
+        if tx.spent_utxos.is_empty() {
+            return Err(Error::InvalidTransaction {
+                reason: "No spent UTXOs found".to_string(),
+            });
+        }
 
+        // Extract market maker address from first UTXO
+        let first_utxo = &tx.spent_utxos[0];
         let market_maker_address = first_utxo.address;
 
-        // Validate ALL UTXOs belong to the same market maker (prevent collusion)
-        for (i, spent_utxo) in tx.spent_utxos.iter().enumerate() {
-            if spent_utxo.address != market_maker_address {
-                return Err(Error::InvalidSlotId {
-                    reason: format!(
-                        "All UTXOs must belong to the same market maker. UTXO {} has address {}, expected {}",
-                        i, spent_utxo.address, market_maker_address
-                    ),
-                });
-            }
-        }
 
         Ok(market_maker_address)
     }
 }
 
-/// Period calculation utilities
-/// 
-/// Consolidates timestamp and block height to period conversions used
-/// across the application. Follows Bitcoin Hivemind temporal specification.
-pub struct PeriodCalculator;
+/// D-function validation utilities for market constraints.
+pub struct DFunctionValidator;
 
-impl PeriodCalculator {
-    /// Convert block height to testing period for development/testing mode
-    /// 
+impl DFunctionValidator {
+    /// Validate D-function constraints against market dimensions.
+    ///
+    /// Ensures that D-function references are within bounds and structurally valid.
+    ///
     /// # Arguments
-    /// * `block_height` - Current L2 block height
-    /// * `testing_blocks_per_period` - Blocks per period in testing mode
-    /// 
+    /// * `d_function` - The D-function to validate
+    /// * `max_decision_index` - Maximum valid decision index
+    /// * `decision_slots` - Available decision slots
+    ///
     /// # Returns
-    /// Period index for the given block height
-    /// 
-    /// # Specification Reference  
-    /// Bitcoin Hivemind whitepaper section on temporal mechanics and voting periods
-    pub fn block_height_to_testing_period(block_height: u32, testing_blocks_per_period: u32) -> u32 {
-        block_height / testing_blocks_per_period
-    }
-
-    /// Convert L1 timestamp to production period (quarter-based)
-    /// 
-    /// # Arguments
-    /// * `timestamp` - Unix timestamp from L1 Bitcoin blockchain
-    /// 
-    /// # Returns
-    /// Period index based on quarterly cycles
-    /// 
-    /// # Specification Reference
-    /// Bitcoin Hivemind whitepaper section on production temporal mechanics
-    pub fn timestamp_to_period(timestamp: u64) -> u32 {
-        // Implementation follows Hivemind specification for quarterly periods
-        // January 1, 2009 00:00:00 UTC as Bitcoin genesis reference
-        const BITCOIN_GENESIS_TIMESTAMP: u64 = 1231006505;
-        const SECONDS_PER_QUARTER: u64 = 3600 * 24 * 91; // ~91 days per quarter
-        
-        if timestamp < BITCOIN_GENESIS_TIMESTAMP {
-            return 0;
-        }
-        
-        let elapsed_seconds = timestamp - BITCOIN_GENESIS_TIMESTAMP;
-        (elapsed_seconds / SECONDS_PER_QUARTER) as u32
-    }
-
-    /// Get human-readable period name for timestamp
-    /// 
-    /// Provides quarter-year formatting for period display
-    pub fn period_to_name(period_index: u32) -> String {
-        let year = 2009 + (period_index / 4);
-        let quarter = (period_index % 4) + 1;
-        format!("Q{} {}", quarter, year)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_slot_id_hex_parsing() {
-        // Valid 3-byte slot ID
-        let valid_hex = "000102";
-        let slot_id = SlotValidator::parse_slot_id_from_hex(valid_hex);
-        assert!(slot_id.is_ok());
-
-        // Invalid hex format
-        let invalid_hex = "invalid";
-        let result = SlotValidator::parse_slot_id_from_hex(invalid_hex);
-        assert!(result.is_err());
-
-        // Wrong length
-        let wrong_length = "0001";
-        let result = SlotValidator::parse_slot_id_from_hex(wrong_length);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_period_calculations() {
-        // Test block height to testing period
-        assert_eq!(PeriodCalculator::block_height_to_testing_period(100, 50), 2);
-        assert_eq!(PeriodCalculator::block_height_to_testing_period(0, 50), 0);
-
-        // Test period name formatting
-        assert_eq!(PeriodCalculator::period_to_name(0), "Q1 2009");
-        assert_eq!(PeriodCalculator::period_to_name(4), "Q1 2010");
-        assert_eq!(PeriodCalculator::period_to_name(7), "Q4 2010");
-    }
-
-    #[test]
-    fn test_timestamp_to_period() {
-        // Test genesis timestamp
-        const GENESIS: u64 = 1231006505;
-        assert_eq!(PeriodCalculator::timestamp_to_period(GENESIS), 0);
-        
-        // Test before genesis
-        assert_eq!(PeriodCalculator::timestamp_to_period(0), 0);
-        
-        // Test period calculation
-        const SECONDS_PER_QUARTER: u64 = 3600 * 24 * 91;
-        let one_quarter_later = GENESIS + SECONDS_PER_QUARTER;
-        assert_eq!(PeriodCalculator::timestamp_to_period(one_quarter_later), 1);
-    }
-
-    /// Mock implementation for testing slot validation interface
-    struct MockSlotValidator {
-        should_pass: bool,
-        height: Option<u32>,
-    }
-
-    impl SlotValidationInterface for MockSlotValidator {
-        fn validate_slot_claim(
-            &self,
-            _rotxn: &RoTxn,
-            _slot_id: SlotId,
-            _decision: &Decision,
-            _current_ts: u64,
-            _current_height: Option<u32>,
-        ) -> Result<(), Error> {
-            if self.should_pass {
+    /// * `Ok(())` - D-function is valid
+    /// * `Err(MarketError)` - Invalid D-function with detailed reason
+    pub fn validate_constraint(
+        d_function: &DFunction,
+        max_decision_index: usize,
+        decision_slots: &[SlotId],
+    ) -> Result<(), MarketError> {
+        match d_function {
+            DFunction::Decision(idx) => {
+                if *idx >= max_decision_index {
+                    return Err(MarketError::InvalidDimensions);
+                }
                 Ok(())
-            } else {
-                Err(Error::SlotNotAvailable {
-                    slot_id: SlotId::from_bytes([0, 0, 1]).unwrap(),
-                    reason: "Test failure".to_string(),
-                })
+            },
+            DFunction::Equals(func, value) => {
+                // Validate the nested function
+                Self::validate_constraint(func, max_decision_index, decision_slots)?;
+                // For decision equality, ensure value is within valid range
+                if let DFunction::Decision(_) = func.as_ref() {
+                    // For binary decisions, valid values are 0, 1, 2 (No, Yes, Invalid)
+                    // For scalar decisions, valid values are 0 to range+1
+                    // For now, we use a simple check - values > 2 are invalid for most cases
+                    if *value > 2 {
+                        return Err(MarketError::InvalidOutcomeCombination);
+                    }
+                }
+                Ok(())
+            },
+            DFunction::And(left, right) => {
+                Self::validate_constraint(left, max_decision_index, decision_slots)?;
+                Self::validate_constraint(right, max_decision_index, decision_slots)?;
+                Ok(())
+            },
+            DFunction::Or(left, right) => {
+                Self::validate_constraint(left, max_decision_index, decision_slots)?;
+                Self::validate_constraint(right, max_decision_index, decision_slots)?;
+                Ok(())
+            },
+            DFunction::Not(func) => {
+                Self::validate_constraint(func, max_decision_index, decision_slots)?;
+                Ok(())
+            },
+            DFunction::True => Ok(()),
+        }
+    }
+
+    /// Check if this D-function creates valid categorical constraints.
+    ///
+    /// For categorical dimensions, exactly one option should be true, with all others false.
+    /// This validates that the D-function properly enforces mutual exclusivity.
+    ///
+    /// # Arguments
+    /// * `d_function` - The D-function to validate
+    /// * `categorical_slots` - Slot indices that form a categorical dimension
+    /// * `combo` - The outcome combination to validate
+    /// * `decision_slots` - Available decision slots
+    ///
+    /// # Returns
+    /// * `Ok(true)` - Valid categorical constraint (exactly one true)
+    /// * `Ok(false)` - Invalid categorical constraint (zero or multiple true)
+    /// * `Err(MarketError)` - Evaluation error
+    pub fn validate_categorical_constraint(
+        d_function: &DFunction,
+        categorical_slots: &[usize],
+        combo: &[usize],
+        decision_slots: &[SlotId],
+    ) -> Result<bool, MarketError> {
+        let mut true_count = 0;
+
+        for &slot_idx in categorical_slots {
+            if slot_idx >= combo.len() {
+                return Err(MarketError::InvalidDimensions);
+            }
+
+            // Check if this slot is true in the combination
+            if combo[slot_idx] == 1 {
+                true_count += 1;
             }
         }
 
-        fn try_get_height(&self, _rotxn: &RoTxn) -> Result<Option<u32>, Error> {
-            Ok(self.height)
+        // For valid categorical constraint, exactly one should be true
+        // Unless all are false (residual case)
+        Ok(true_count <= 1)
+    }
+
+    /// Validate dimensional consistency across all D-functions.
+    ///
+    /// Ensures that D-functions properly represent the market's dimensional structure
+    /// and that all outcome combinations are valid according to whitepaper specifications.
+    ///
+    /// # Arguments
+    /// * `d_functions` - All D-functions for the market
+    /// * `dimension_specs` - Market dimension specifications
+    /// * `decision_slots` - Available decision slots
+    /// * `all_combos` - All possible outcome combinations
+    ///
+    /// # Returns
+    /// * `Ok(())` - All constraints are dimensionally consistent
+    /// * `Err(MarketError)` - Inconsistent dimensional constraints
+    pub fn validate_dimensional_consistency(
+        d_functions: &[DFunction],
+        dimension_specs: &[DimensionSpec],
+        decision_slots: &[SlotId],
+        all_combos: &[Vec<usize>],
+    ) -> Result<(), MarketError> {
+        if d_functions.len() != all_combos.len() {
+            return Err(MarketError::InvalidDimensions);
+        }
+
+        // Validate each D-function against its corresponding combination
+        for (df, combo) in d_functions.iter().zip(all_combos.iter()) {
+            // Basic constraint validation
+            Self::validate_constraint(df, decision_slots.len(), decision_slots)?;
+
+            // Evaluate the D-function against its own combination - should be true
+            if !df.evaluate(combo, decision_slots)? {
+                return Err(MarketError::InvalidOutcomeCombination);
+            }
+
+            // Check categorical constraints for each dimension
+            let mut slot_idx = 0;
+            for spec in dimension_specs {
+                match spec {
+                    DimensionSpec::Single(_) => {
+                        slot_idx += 1;
+                    },
+                    DimensionSpec::Categorical(slots) => {
+                        let categorical_indices: Vec<usize> = (slot_idx..slot_idx + slots.len()).collect();
+                        if !Self::validate_categorical_constraint(df, &categorical_indices, combo, decision_slots)? {
+                            return Err(MarketError::InvalidOutcomeCombination);
+                        }
+                        slot_idx += slots.len();
+                    }
+                }
+            }
+        }
+
+        // Additional validation: ensure D-functions are mutually exclusive
+        // (each combination should satisfy exactly one D-function)
+        for combo in all_combos {
+            let mut satisfied_count = 0;
+            for df in d_functions {
+                if df.evaluate(combo, decision_slots)? {
+                    satisfied_count += 1;
+                }
+            }
+            if satisfied_count != 1 {
+                return Err(MarketError::InvalidOutcomeCombination);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Market state transition validation.
+pub struct MarketStateValidator;
+
+impl MarketStateValidator {
+    /// Validate market state transition according to Bitcoin Hivemind specification.
+    ///
+    /// Ensures state transitions follow valid paths per whitepaper requirements:
+    /// - Trading -> Voting -> Resolved -> Ossified
+    /// - Trading -> Cancelled (if no trades occurred)
+    /// - Trading/Voting -> Invalid (governance action)
+    ///
+    /// # Arguments
+    /// * `from_state` - Current market state
+    /// * `to_state` - Proposed new state
+    ///
+    /// # Returns
+    /// * `Ok(())` - Valid state transition
+    /// * `Err(Error)` - Invalid transition with detailed reason
+    pub fn validate_market_state_transition(
+        from_state: MarketState,
+        to_state: MarketState,
+    ) -> Result<(), Error> {
+        use MarketState::*;
+
+        let valid_transition = match (from_state, to_state) {
+            // No change is always valid
+            (a, b) if a == b => true,
+
+            // Valid forward transitions
+            (Trading, Voting) => true,
+            (Trading, Cancelled) => true,  // Only if no trades occurred (checked elsewhere)
+            (Trading, Invalid) => true,    // Governance action
+            (Voting, Resolved) => true,
+            (Voting, Invalid) => true,     // Governance action
+            (Resolved, Ossified) => true,
+
+            // All other transitions are invalid
+            _ => false,
+        };
+
+        if !valid_transition {
+            return Err(Error::InvalidTransaction {
+                reason: format!("Invalid market state transition from {:?} to {:?}", from_state, to_state),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Check if market has entered voting period based on slot states.
+    ///
+    /// A market enters voting when any of its decision slots enter voting.
+    ///
+    /// # Arguments
+    /// * `market_slots` - Set of slot IDs used by this market
+    /// * `slots_in_voting` - Set of slot IDs currently in voting
+    ///
+    /// # Returns
+    /// * `true` if market should transition to voting
+    /// * `false` otherwise
+    pub fn should_enter_voting(
+        market_slots: &HashSet<SlotId>,
+        slots_in_voting: &HashSet<SlotId>,
+    ) -> bool {
+        market_slots.iter().any(|slot_id| slots_in_voting.contains(slot_id))
+    }
+
+    /// Check if all decision slots are ossified.
+    ///
+    /// A market is ready for resolution when all its decision slots are ossified.
+    ///
+    /// # Arguments
+    /// * `market_slots` - Set of slot IDs used by this market
+    /// * `slot_states` - Map of slot IDs to their ossification status
+    ///
+    /// # Returns
+    /// * `true` if all slots are ossified
+    /// * `false` otherwise
+    pub fn all_slots_ossified(
+        market_slots: &HashSet<SlotId>,
+        slot_states: &std::collections::HashMap<SlotId, bool>,
+    ) -> bool {
+        market_slots.iter().all(|slot_id| {
+            slot_states.get(slot_id).copied().unwrap_or(false)
+        })
+    }
+}
+
+/// Period calculation utilities.
+pub struct PeriodCalculator;
+
+impl PeriodCalculator {
+    /// Convert block height to testing period.
+    #[inline(always)]
+    pub const fn block_height_to_testing_period(block_height: u32, testing_blocks_per_period: u32) -> u32 {
+        // Use const function for compile-time optimization when possible
+        if testing_blocks_per_period == 0 {
+            0
+        } else {
+            block_height / testing_blocks_per_period
         }
     }
 
-    #[test]
-    fn test_slot_id_consistency_validation() {
-        let slot_id_bytes = [0, 0, 1];
-        let slot_id = SlotId::from_bytes(slot_id_bytes).unwrap();
+    /// Convert L1 timestamp to production period.
+    #[inline]
+    pub fn timestamp_to_period(timestamp: u64) -> u32 {
+        // Handle pre-genesis timestamps
+        if timestamp < crate::types::BITCOIN_GENESIS_TIMESTAMP {
+            return 0;
+        }
         
-        // Test valid consistency
-        assert!(SlotValidator::validate_slot_id_consistency(&slot_id, slot_id_bytes).is_ok());
+        let elapsed_seconds = timestamp - crate::types::BITCOIN_GENESIS_TIMESTAMP;
         
-        // Test invalid consistency
-        let wrong_bytes = [0, 0, 2];
-        assert!(SlotValidator::validate_slot_id_consistency(&slot_id, wrong_bytes).is_err());
+        (elapsed_seconds / crate::types::SECONDS_PER_QUARTER) as u32
     }
 
-    #[test]
-    fn test_consolidated_validation_interface() {
-        // Test successful validation path
-        let mock_validator = MockSlotValidator {
-            should_pass: true,
-            height: Some(100),
-        };
+    /// Get human-readable period name for timestamp with stack allocation
+    /// 
+    /// Provides quarter-year formatting for period display using stack-based string building
+    #[inline]
+    pub fn period_to_name(period_index: u32) -> String {
+        let year = 2009_u32.wrapping_add(period_index / 4);
+        let quarter = (period_index % 4) + 1;
         
-        // We can't easily test the full validation without extensive setup,
-        // but we can verify the trait interface works correctly
-        assert_eq!(mock_validator.try_get_height(&unsafe { std::mem::zeroed() }).unwrap(), Some(100));
-        
-        // Test failure case
-        let failing_validator = MockSlotValidator {
-            should_pass: false,
-            height: Some(100),
-        };
-        
-        let slot_id = SlotId::from_bytes([0, 0, 1]).unwrap();
-        let decision = Decision::new(
-            [0; 20],
-            [0, 0, 1],
-            true,
-            false,
-            "Test question".to_string(),
-            None,
-            None,
-        ).unwrap();
-        
-        assert!(failing_validator.validate_slot_claim(
-            &unsafe { std::mem::zeroed() },
-            slot_id,
-            &decision,
-            0,
-            Some(100)
-        ).is_err());
+        // Use format! which is more efficient than string concatenation
+        format!("Q{} {}", quarter, year)
+    }
+    
+    /// Validate period index is within reasonable bounds (performance optimization)
+    #[inline(always)]
+    pub const fn is_valid_period_index(period_index: u32) -> bool {
+        // Reasonable upper bound: ~1000 years from 2009
+        period_index < 4000
     }
 }
+

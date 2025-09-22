@@ -5,46 +5,10 @@ use thiserror::Error;
 use transitive::Transitive;
 
 use crate::types::{
-    AmountOverflowError, AmountUnderflowError, AssetId, BlockHash, M6id,
+    AmountOverflowError, AmountUnderflowError, BlockHash, M6id,
     MerkleRoot, OutPoint, WithdrawalBundleError,
 };
 
-/// Errors related to an AMM pool
-#[derive(Debug, Error, Transitive)]
-#[transitive(from(db::Delete, db::Error))]
-#[transitive(from(db::Error, sneed::Error))]
-#[transitive(from(db::Put, db::Error))]
-#[transitive(from(db::TryGet, db::Error))]
-pub enum Amm {
-    #[error("AMM burn overflow")]
-    BurnOverflow,
-    #[error("AMM burn underflow")]
-    BurnUnderflow,
-    #[error(transparent)]
-    Db(#[from] sneed::Error),
-    #[error("Insufficient liquidity")]
-    InsufficientLiquidity,
-    #[error("Invalid AMM burn")]
-    InvalidBurn,
-    #[error("Invalid AMM mint")]
-    InvalidMint,
-    #[error("Invalid AMM swap")]
-    InvalidSwap,
-    #[error("AMM LP token overflow")]
-    LpTokenOverflow,
-    #[error("AMM LP token underflow")]
-    LpTokenUnderflow,
-    #[error("missing AMM pool state for {asset0}-{asset1}")]
-    MissingPoolState { asset0: AssetId, asset1: AssetId },
-    #[error("AMM pool invariant")]
-    PoolInvariant,
-    #[error("Failed to revert AMM mint")]
-    RevertMint,
-    #[error("Failed to revert AMM swap")]
-    RevertSwap,
-    #[error("Too few Votecoin to mint an AMM position")]
-    TooFewVotecoinToMint,
-}
 
 #[derive(Debug, Error)]
 pub enum InvalidHeader {
@@ -98,7 +62,7 @@ impl std::error::Error for FillTxOutputContents {}
 #[transitive(from(rwtxn::Error, sneed::Error))]
 pub enum Error {
     #[error(transparent)]
-    Amm(#[from] Amm),
+    Market(#[from] crate::state::markets::MarketError),
     #[error(transparent)]
     AmountOverflow(#[from] AmountOverflowError),
     #[error(transparent)]
@@ -117,6 +81,8 @@ pub enum Error {
     InvalidSlotId { reason: String },
     #[error("invalid timestamp")]
     InvalidTimestamp,
+    #[error("invalid transaction: {reason}")]
+    InvalidTransaction { reason: String },
     #[error("slot {slot_id:?} is already claimed")]
     SlotAlreadyClaimed {
         slot_id: crate::state::slots::SlotId,
@@ -133,6 +99,8 @@ pub enum Error {
     BundleTooHeavy { weight: u64, max_weight: u64 },
     #[error(transparent)]
     BorshSerialize(borsh::io::Error),
+    #[error("Database consistency error: {0}")]
+    DatabaseError(String),
     #[error(transparent)]
     Db(#[from] sneed::Error),
     #[error(transparent)]

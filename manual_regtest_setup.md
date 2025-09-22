@@ -117,12 +117,6 @@ mkdir -p /tmp/regtest-data/{bitcoin,electrs,enforcer,truthcoin}
   --zmq-addr=127.0.0.1:28333
   ```
 ### headless needs a l2 wallet created
-```bash
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 generate-mnemonic
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 set-seed-from-mnemonic "round faculty dirt amateur polar weapon shield wet junk gallery curious unveil"
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-new-address
-
-```
 
 ## Activation and Funding
 
@@ -166,6 +160,12 @@ grpcurl -plaintext -d '{"blocks": 6, "ack_all_proposals": true}' 127.0.0.1:50051
 grpcurl -plaintext -d '{}' 127.0.0.1:50051 cusf.mainchain.v1.ValidatorService.GetSidechains
 ```
 
+```bash
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 generate-mnemonic
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 set-seed-from-mnemonic "leaf ready burden satisfy fire setup crack tide sound crucial appear cup"
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-new-address
+```
+
 ### 3. Create Deposit to Sidechain
 
 Get a Truthcoin address from your GUI or RPC, then:
@@ -174,7 +174,7 @@ Get a Truthcoin address from your GUI or RPC, then:
 # Create deposit (replace ADDRESS with your Truthcoin address)
 grpcurl -plaintext -d '{
   "sidechain_id": 13,
-  "address": "3fjgYQhshQASekcNTbJ1kaH5qrpa",
+  "address": "4Mu1f9Tw95SfoBdffagH7a3JrWBf",
   "value_sats": 100000000,
   "fee_sats": 10000
 }' 127.0.0.1:50051 cusf.mainchain.v1.WalletService.CreateDepositTransaction
@@ -236,7 +236,7 @@ All commands use the format: `./target/debug/truthcoin_dc_app_cli --rpc-port 183
 # Set wallet seed from mnemonic
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 set-seed-from-mnemonic "your twelve word mnemonic phrase here"
 
-# Get a new address
+# Get a new address (aliases: addr, address, new-addr)
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-new-address
 
 # Get all wallet addresses
@@ -260,8 +260,8 @@ All commands use the format: `./target/debug/truthcoin_dc_app_cli --rpc-port 183
 
 ### Balance and Wealth
 ```bash
-# Get Bitcoin balance in sats
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 bitcoin-balance
+# Get Bitcoin balance in sats (aliases: bal, b)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 balance
 
 # Get total sidechain wealth
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 sidechain-wealth
@@ -269,10 +269,10 @@ All commands use the format: `./target/debug/truthcoin_dc_app_cli --rpc-port 183
 
 ### Transfers and Deposits
 ```bash
-# Transfer Bitcoin to address
+# Transfer Bitcoin to address (aliases: send, tx)
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 transfer DEST_ADDRESS --value-sats 1000000 --fee-sats 1000
 
-# Transfer Votecoin to address
+# Transfer Votecoin to address (aliases: send-votecoin, send-vc, transfer-vc)
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 transfer-votecoin DEST_ADDRESS --amount 100 --fee-sats 1000
 
 # Create deposit to address
@@ -287,11 +287,11 @@ All commands use the format: `./target/debug/truthcoin_dc_app_cli --rpc-port 183
 
 ### Mining and Blocks
 ```bash
-# Mine a sidechain block
+# Mine a sidechain block (alias: m)
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 mine [--fee-sats 1000]
 
-# Get current block count
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-blockcount
+# Get current block count (aliases: blockcount, height)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-block-count
 
 # Get block data by hash
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-block BLOCK_HASH
@@ -321,31 +321,14 @@ All commands use the format: `./target/debug/truthcoin_dc_app_cli --rpc-port 183
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 list-utxos
 ```
 
-### AMM (Automated Market Maker)
-```bash
-# Get AMM pool state
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-amm-pool-state --asset0 bitcoin --asset1 votecoin
-
-# Get AMM price
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-amm-price --base bitcoin --quote votecoin
-
-# AMM swap
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 amm-swap --asset-spend bitcoin --asset-receive votecoin --amount-spend 1000000
-
-# Mint AMM position
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 amm-mint --asset0 bitcoin --asset1 votecoin --amount0 1000000 --amount1 100
-
-# Burn AMM position
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 amm-burn --asset0 bitcoin --asset1 votecoin --lp-token-amount 1000
-```
 
 ### Slots and Decisions
 ```bash
-# List all slots by period
+# List all slots by period (aliases: slots, list-slots)
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 slots-list-all
 
 # Get slots for specific period  
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 slots-get-quarter 42
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 slots-get-quarter 30
 
 # Show slot system status
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 slots-status
@@ -353,25 +336,47 @@ All commands use the format: `./target/debug/truthcoin_dc_app_cli --rpc-port 183
 # Convert timestamp to period
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 slots-convert-timestamp 1640995200
 
-# Claim a decision slot
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 claim-decision-slot --period-index 42 --slot-index 100 --is-standard true --is-scaled false --question "Will Bitcoin reach $100k?" --fee-sats 1000
+# Claim a decision slot (aliases: claim-slot, claim)
 
 # Get available slots in period
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-available-slots --period-index 42
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-available-slots --period-index 30
 
-# Get slot by ID
+# Get slot by ID (aliases: slot, get-slot)
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-slot-by-id --slot-id-hex "2a0064"
 
 # Get claimed slots in period
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-claimed-slots --period-index 42
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-claimed-slots --period-index 20
 
 # Check if slot is in voting period
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 is-slot-in-voting --slot-id-hex "2a0064"
 
-# Get periods currently in voting phase
+# Get periods currently in voting phase (aliases: voting-periods, voting)
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-voting-periods
 
-# Get ossified slots (slots whose voting period has ended)
+# Get ossified slots (slots whose voting period has ended) (aliases: ossified-slots, ossified)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-ossified-slots
+
+### Market Creation Examples
+
+# Create a market using initial capital (liquidity) in satoshis
+# The beta parameter will be automatically derived: β = Capital / ln(n)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 create-market \
+  --title "Steelers Super Bowl 60" \
+  --description "Will the Pittsburgh Steelers win Super Bowl 60?" \
+  --decision-slots "050001" \
+  --initial-liquidity 1000000 \
+  --trading-fee 0.005 \
+  --tags "sports,nfl,superbowl,steelers" \
+  --fee-sats 1000
+
+# Alternative: Create a market using the beta parameter directly
+# The required capital will be derived: Capital = β × ln(n)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 create-market \
+  --title "Bitcoin $100k" \
+  --description "Will Bitcoin reach $100,000 by end of 2024?" \
+  --decision-slots "050001" \
+  --beta 7.0 \
+  --fee-sats 1000
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-ossified-slots
 ```
 
@@ -382,16 +387,16 @@ All commands use the format: `./target/debug/truthcoin_dc_app_cli --rpc-port 183
   --title "2024 Election & Economy Multidimensional Market" \
   --description "Complex market with multiple independent and categorical dimensions" \
   --dimensions "[2a0064,[2a0065,2a0066,2a0067],2a0068]" \
-  --b 10.0 \
+  --beta 14400.0 \  # Beta in satoshis (14400 ≈ 10k sats initial capital for binary market)
   --trading-fee 0.005 \
   --tags "politics,economy,multidimensional" \
   --fee-sats 15000
 
-# List all markets currently in Trading state
+# List all markets currently in Trading state (alias: markets, ls-markets)
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 list-markets
 
-# View detailed information for a specific market
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 view-market MARKET_ID_HEX
+# View detailed information for a specific market (aliases: show-market, info)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 view-market 8d2a6b4bb2f6
 ```
 
 ### Multidimensional Market Creation Workflow
@@ -401,7 +406,7 @@ This example creates a complex market with mixed dimension types:
 ```bash
 # 1. First claim decision slots for your market dimensions
 # Dimension 1: Independent binary decision 
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 claim-decision-slot --period-index 42 --slot-index 100 --is-standard true --is-scaled false --question "Will Bitcoin reach $100k by end of 2024?" --fee-sats 1000
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 claim-decision-slot --period-index 25 --slot-index 100 --is-standard true --is-scaled false --question "Will Bitcoin reach $150k by end of 2025?" --fee-sats 1000
 
 # Dimension 2: Categorical dimension (mutually exclusive options)
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 claim-decision-slot --period-index 42 --slot-index 101 --is-standard true --is-scaled false --question "Will Donald Trump win the 2024 election?" --fee-sats 1000
@@ -423,7 +428,7 @@ This example creates a complex market with mixed dimension types:
   --title "2024 Bitcoin, Election & S&P 500 Multidimensional Market" \
   --description "Complex prediction market combining Bitcoin price, election outcome, and stock market performance. Each dimension can be traded independently except the election outcome which is mutually exclusive." \
   --dimensions "[2a0064,[2a0065,2a0066,2a0067],2a0068]" \
-  --b 15.0 \
+  --beta 15.0 \
   --trading-fee 0.008 \
   --tags "bitcoin,politics,election,stocks,multidimensional" \
   --fee-sats 20000
@@ -517,10 +522,11 @@ curl -X POST http://127.0.0.1:18332 \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0", 
-    "method": "create_market_dimensional", 
+    "method": "create_market", 
     "params": {
       "title": "Pittsburgh Sports & Politics 2026 Mega-Market",
-      "description": "Multidimensional predictions on Steelers wins, AFC North winner, mayor race, draft pick, and Bitcoin price",
+      "description": "Multidimensional predictions on Steelers wins, AFC North winner, mayor race,
+      draft pick, Bitcoin price, Corc Brum 18 y/o",
       "dimensions": "[steelers_wins,[steelers_afc,ravens_afc,bengals_afc],mayor_party,draft_pick,bitcoin_200k]",
       "b": 25.0,
       "trading_fee": 0.01,
@@ -535,7 +541,7 @@ curl -X POST http://127.0.0.1:18332 \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0", 
-    "method": "create_market_dimensional", 
+    "method": "create_market", 
     "params": {
       "title": "Independent Multi-Event Market",
       "description": "Three independent binary predictions",
@@ -582,7 +588,7 @@ curl -X POST http://127.0.0.1:18332 \
 # Get current block count
 curl -X POST http://127.0.0.1:18332 \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "method": "get_blockcount", "params": [], "id": 1}'
+  -d '{"jsonrpc": "2.0", "method": "getblockcount", "params": [], "id": 1}'
 
 # Get best sidechain block hash
 curl -X POST http://127.0.0.1:18332 \
@@ -616,7 +622,7 @@ Here's a realistic workflow to create a Pittsburgh sports and politics multidime
 
 ```bash
 # Dimension 1: AFC North winner (categorical - mutually exclusive)
-./target/debug/truthcoin_dc_app_cli --rpc-port 18332 claim-decision-slot --period-index 42 --slot-index 101 --is-standard true --is-scaled false --question "Will the Pittsburgh Steelers win the AFC North in 2026?" --fee-sats 1000
+
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 claim-decision-slot --period-index 11 --slot-index 102 --is-standard true --is-scaled false --question "Will the Baltimore Ravens win the AFC North in 2026?" --fee-sats 1000
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 claim-decision-slot --period-index 11 --slot-index 103 --is-standard true --is-scaled false --question "Will the Cincinnati Bengals win the AFC North in 2026?" --fee-sats 1000
 
@@ -641,7 +647,7 @@ Here's a realistic workflow to create a Pittsburgh sports and politics multidime
   --title "Pittsburgh Sports & Politics 2026 Market" \
   --description "Multidimensional prediction market combining AFC North winner (categorical), Pittsburgh mayor party (binary), Steelers draft pick type (binary), and Bitcoin price prediction (binary)" \
   --dimensions "[[2a0065,2a0066,2a0067],2a0068,2a0069,2a006a]" \
-  --b 15.0 \
+  --beta 15.0 \
   --trading-fee 0.01 \
   --tags "steelers,afc-north,pittsburgh,politics,bitcoin,multidimensional" \
   --fee-sats 15000
@@ -691,6 +697,266 @@ Complex markets require careful dimension design to stay within this constraint 
 
 # List all active markets
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 list-markets
+```
+
+## Share Trading
+
+Once markets are created, you can buy and sell shares on different outcomes:
+
+### Share Trading Quick Reference
+
+```bash
+# View market details and current prices
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 view-market <MARKET_ID>
+
+# Calculate cost before trading
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 calculate-share-cost \
+  --market-id <MARKET_ID> --outcome-index <INDEX> --shares-amount <AMOUNT>
+
+# Buy shares (positive amount)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 buy-shares \
+  --market-id <MARKET_ID> --outcome-index <INDEX> --shares-amount <POSITIVE_AMOUNT> \
+  --max-cost <MAX_SATS> --fee-sats 1000
+
+# Sell shares (negative amount)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 buy-shares \
+  --market-id <MARKET_ID> --outcome-index <INDEX> --shares-amount <NEGATIVE_AMOUNT> \
+  --max-cost 0 --fee-sats 1000
+
+# View all your share positions
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-share-positions
+
+# Redeem winning shares after resolution
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 redeem-shares \
+  --market-id <MARKET_ID> --outcome-index <WINNING_INDEX> \
+  --shares-amount <AMOUNT> --fee-sats 1000
+```
+
+### Understanding Market Output
+
+When you view a market, you'll see:
+- **Beta Parameter**: The liquidity sensitivity (e.g., 910239.23)
+  - Derived from initial liquidity: β = Capital / ln(n)
+  - For binary markets with 1M sats: β = 1,000,000 / ln(2) ≈ 1,442,695
+- **Prices**: Current price per share (0.0 to 1.0)
+- **Probability**: Market's implied probability (price × 100%)
+- **Treasury**: Total capital in the market maker
+- **Volume**: Total sats traded per outcome
+
+### Complete Market Trading Workflow Example
+
+Using a real market (e.g., "Steelers Super Bowl 60" with ID 4634fd2999da):
+
+```bash
+# 1. View current market state and prices
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 view-market 4634fd2999da
+# Shows: Both outcomes at 50% probability, 1,000,000 sats liquidity
+
+# 2. Calculate cost before buying shares (outcome 1 = Yes to Steelers winning)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 calculate-share-cost \
+  --market-id 4634fd2999da \
+  --outcome-index 1 \
+  --shares-amount 100.0
+# Returns estimated cost in sats
+
+# 3. Buy 100 shares of "Yes" (outcome 1)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 buy-shares \
+  --market-id 4634fd2999da \
+  --outcome-index 1 \
+  --shares-amount 100.0 \
+  --max-cost 75000 \
+  --fee-sats 1000
+
+# 4. Mine a block to confirm the trade
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 mine --fee-sats 1000
+
+# 5. View updated market - prices have changed!
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 view-market 4634fd2999da
+# Now shows: Yes probability > 50%, No probability < 50%
+
+# 6. Check your share positions
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-share-positions
+# Shows: 100 shares of outcome 1 in market 4634fd2999da
+
+# 7. Sell shares back to the market (negative amount = sell)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 buy-shares \
+  --market-id 4634fd2999da \
+  --outcome-index 1 \
+  --shares-amount -50.0 \
+  --max-cost 0 \
+  --fee-sats 1000
+
+# 8. Mine and check prices return toward equilibrium
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 mine --fee-sats 1000
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 view-market 4634fd2999da
+```
+
+### Understanding LMSR Price Dynamics
+
+```bash
+# The more shares you buy of an outcome, the higher its price becomes
+# Example: Progressive purchases showing price increase
+
+# Initial state - check base price
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 view-market 4634fd2999da
+
+# Buy 10 shares - small price movement
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 buy-shares \
+  --market-id 4634fd2999da --outcome-index 0 --shares-amount 10.0 \
+  --max-cost 10000 --fee-sats 1000
+
+# Buy 100 shares - larger price movement  
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 buy-shares \
+  --market-id 4634fd2999da --outcome-index 0 --shares-amount 100.0 \
+  --max-cost 100000 --fee-sats 1000
+
+# Buy 1000 shares - significant price movement
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 buy-shares \
+  --market-id 4634fd2999da --outcome-index 0 --shares-amount 1000.0 \
+  --max-cost 1000000 --fee-sats 1000
+
+# Check final prices - outcome 0 is now expensive!
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 view-market 4634fd2999da
+```
+
+### Troubleshooting Common Trading Issues
+
+```bash
+# Issue: "Market not found"
+# Solution: List all markets to get correct ID
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 list-markets
+
+# Issue: "Insufficient funds" when buying shares
+# Solution: Check your balance and mine more blocks
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-balance
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 mine --fee-sats 1000
+
+# Issue: "Max cost exceeded"
+# Solution: Either increase --max-cost or buy fewer shares
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 calculate-share-cost \
+  --market-id 4634fd2999da --outcome-index 1 --shares-amount 50.0
+
+# Issue: Selling shares (how to do it)
+# Solution: Use negative shares-amount to sell
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 buy-shares \
+  --market-id 4634fd2999da --outcome-index 1 --shares-amount -10.0 \
+  --max-cost 0 --fee-sats 1000
+```
+
+### Share Trading JSON-RPC
+
+```bash
+# Buy shares via JSON-RPC
+curl -X POST http://127.0.0.1:18332 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0", 
+    "method": "buy_shares", 
+    "params": {
+      "market_id": "1a2b3c4d",
+      "outcome_index": 0,
+      "shares_amount": 50.0,
+      "max_cost": 30000,
+      "fee_sats": 1000
+    }, 
+    "id": 1
+  }'
+
+# Get share positions
+curl -X POST http://127.0.0.1:18332 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc": "2.0", "method": "get_share_positions", "params": [], "id": 1}'
+
+# Calculate share cost before buying
+curl -X POST http://127.0.0.1:18332 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0", 
+    "method": "calculate_share_cost", 
+    "params": {
+      "market_id": "1a2b3c4d",
+      "outcome_index": 0,
+      "shares_amount": 50.0
+    }, 
+    "id": 1
+  }'
+```
+
+## Real-time Market State Monitoring
+
+You can monitor market state changes in real-time after each transaction:
+
+### System Status and Monitoring
+
+```bash
+# Check overall node status (aliases: stat, s)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 status
+
+# Monitor mempool for pending transactions
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 my-unconfirmed-utxos
+
+# Check current block count and sync status
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-block-count
+
+# View all transactions in mempool
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 list-utxos
+```
+
+### Market State After Transactions
+
+After each share trade or market transaction:
+
+```bash
+# 1. Submit a share purchase transaction
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 buy-shares \
+  --market-id MARKET_ID_HEX \
+  --outcome-index 0 \
+  --shares-amount 50.0 \
+  --max-cost 25000 \
+  --fee-sats 1000
+
+# 2. Immediately check updated market state (prices reflect the new trade)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 view-market MARKET_ID_HEX
+
+# 3. View your updated share positions
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 get-share-positions
+
+# 4. Check if transaction is still in mempool
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 my-unconfirmed-utxos
+
+# 5. Mine a block to confirm the transaction
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 mine --fee-sats 1000
+```
+
+### Transaction Validation and State Updates
+
+Every transaction in the mempool:
+- **Pays a fee** (specified with `--fee-sats`) 
+- **Gets logged for monitoring** when added to mempool (full state updates occur during block processing)
+- **Gets validated** against current UTXO state
+- **Forms chains** with previous transactions via UTXO references (OutPoint structure)
+
+Currently uses **first-come-first-served** selection from mempool for block inclusion:
+
+```bash
+# Example: Multiple competing transactions
+# Transaction A: buy 100 shares, fee = 2000 sats
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 buy-shares \
+  --market-id MARKET_ID_HEX --outcome-index 0 --shares-amount 100.0 \
+  --max-cost 50000 --fee-sats 2000
+
+# Transaction B: buy 75 shares, fee = 1500 sats  
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 buy-shares \
+  --market-id MARKET_ID_HEX --outcome-index 1 --shares-amount 75.0 \
+  --max-cost 40000 --fee-sats 1500
+
+# Check which transactions are in mempool
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 my-unconfirmed-utxos
+
+# Mine block - includes transactions in mempool order (first-come-first-served)
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 mine --fee-sats 1000
+
+# Market state changes are applied during block processing, not at mempool addition
 ```
 
 This market demonstrates the full power of Bitcoin Hivemind's multidimensional prediction market capabilities with proper logical constraints and efficient LMSR pricing.

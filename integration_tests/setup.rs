@@ -219,8 +219,7 @@ impl Sidechain for PostSetup {
                     FilledOutputContent::Bitcoin(utxo_value) => {
                         utxo_value.0 == value
                     }
-                    FilledOutputContent::AmmLpToken { .. }
-                    | FilledOutputContent::BitcoinWithdrawal { .. }
+                    FilledOutputContent::BitcoinWithdrawal { .. }
                     | FilledOutputContent::Votecoin(_) => false,
                 }
                 && match utxo.outpoint {

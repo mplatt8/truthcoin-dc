@@ -1227,6 +1227,14 @@ impl NetTaskHandle {
     ) -> Result<bool, Error> {
         tracing::debug!(?new_tip, "sending new tip ready confirm");
         let (oneshot_tx, oneshot_rx) = oneshot::channel();
+
+        // Check if the receiver is still alive before sending
+        if self.new_tip_ready_tx.is_closed() {
+            tracing::error!("Network task receiver is closed, cannot send new tip ready");
+            // Return a suitable error when receiver is closed
+            return Ok(false); // Indicate tip was not applied due to closed receiver
+        }
+
         let () = self
             .new_tip_ready_tx
             .unbounded_send((new_tip, None, Some(oneshot_tx)))

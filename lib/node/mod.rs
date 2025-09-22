@@ -8,7 +8,6 @@ use std::{
 
 use bitcoin::amount::CheckedSum as _;
 use fallible_iterator::FallibleIterator;
-use fraction::Fraction;
 use futures::{Stream, future::BoxFuture};
 use sneed::{DbError, Env, EnvError, RwTxnError, env};
 use tokio::sync::Mutex;
@@ -18,9 +17,9 @@ use crate::{
     archive::{self, Archive},
     mempool::{self, MemPool},
     net::{self, Net, Peer},
-    state::{self, AmmPair, AmmPoolState, State},
+    state::{self, State},
     types::{
-        Address, AmountOverflowError, AmountUnderflowError, AssetId,
+        Address, AmountOverflowError, AmountUnderflowError,
         Authorized, AuthorizedTransaction, Block, BlockHash, BmmResult, Body,
         FilledOutput, FilledTransaction, GetBitcoinValue, Header, InPoint,
         Network, OutPoint, Output, SpentOutput, Tip, Transaction, TxIn, Txid,
@@ -29,6 +28,7 @@ use crate::{
     },
     util::Watchable,
 };
+use sneed::RwTxn;
 
 mod mainchain_task;
 mod net_task;
@@ -232,62 +232,6 @@ where
         Ok(self.state.try_get_tip(&rotxn)?)
     }
 
-    pub fn try_get_amm_price(
-        &self,
-        base: AssetId,
-        quote: AssetId,
-    ) -> Result<Option<Fraction>, Error> {
-        let rotxn = self.env.read_txn()?;
-        let amm_pair = AmmPair::new(base, quote);
-        let Some(AmmPoolState {
-            reserve0,
-            reserve1,
-            outstanding_lp_tokens: _,
-            ..
-        }) = self
-            .state
-            .amm_pools()
-            .try_get(&rotxn, &amm_pair)
-            .map_err(state::Error::from)?
-        else {
-            return Ok(None);
-        };
-        if reserve0 == 0 || reserve1 == 0 {
-            return Ok(None);
-        }
-        if base < quote {
-            Ok(Some(Fraction::new(reserve1, reserve0)))
-        } else {
-            Ok(Some(Fraction::new(reserve0, reserve1)))
-        }
-    }
-
-    pub fn try_get_amm_pool_state(
-        &self,
-        pair: AmmPair,
-    ) -> Result<Option<AmmPoolState>, Error> {
-        let rotxn = self.env.read_txn()?;
-        let res = self
-            .state
-            .amm_pools()
-            .try_get(&rotxn, &pair)
-            .map_err(state::Error::from)?;
-        Ok(res)
-    }
-
-    pub fn get_amm_pool_state(
-        &self,
-        pair: AmmPair,
-    ) -> Result<AmmPoolState, Error> {
-        let res = self.try_get_amm_pool_state(pair)?.ok_or_else(|| {
-            let err = state::error::Amm::MissingPoolState {
-                asset0: pair.asset0(),
-                asset1: pair.asset1(),
-            };
-            state::Error::from(err)
-        })?;
-        Ok(res)
-    }
 
     /// List all Votecoin network data
     pub fn votecoin_network_data(
@@ -408,12 +352,147 @@ where
         transaction: AuthorizedTransaction,
     ) -> Result<(), Error> {
         {
-            let mut rotxn = self.env.write_txn()?;
-            self.state.validate_transaction(&rotxn, &transaction)?;
-            self.mempool.put(&mut rotxn, &transaction)?;
-            rotxn.commit().map_err(RwTxnError::from)?;
+            let mut rwtxn = self.env.write_txn()?;
+            self.state.validate_transaction(&rwtxn, &transaction)?;
+            self.mempool.put(&mut rwtxn, &transaction)?;
+
+            // Update mempool shares for BuyShares transactions to ensure immediate LMSR price updates
+            // as required by Bitcoin Hivemind whitepaper section 4.2 on market mechanism
+            if let Some(data) = transaction.transaction.data.as_ref() {
+                if let crate::types::TxData::BuyShares { market_id, outcome_index, shares_to_buy, .. } = data {
+                    self.update_mempool_buy(
+                        &mut rwtxn,
+                        *market_id,
+                        *outcome_index,
+                        *shares_to_buy,
+                    )?;
+                }
+            }
+
+            rwtxn.commit().map_err(RwTxnError::from)?;
         }
         self.net.push_tx(Default::default(), transaction);
+        Ok(())
+    }
+    
+    /// Market transactions are processed only during block construction/connection.
+    /// This method is kept for potential future use but currently does nothing.
+    /// 
+    /// The correct flow is:
+    /// 1. Transactions enter mempool (no state changes)
+    /// 2. Block construction processes market transactions and updates state
+    /// 3. Block connection finalizes the state changes
+    #[allow(dead_code)]
+    fn process_mempool_market_transaction(
+        &self,
+        _rwtxn: &mut RwTxn,
+        transaction: &AuthorizedTransaction,
+    ) -> Result<(), Error> {
+        // Just log market transactions entering mempool for monitoring
+        if let Some(data) = transaction.transaction.data.as_ref() {
+            match data {
+                crate::types::TxData::BuyShares { market_id, outcome_index, shares_to_buy, .. } => {
+                    tracing::info!(
+                        "BuyShares transaction added to mempool: market={}, outcome={}, shares={}",
+                        hex::encode(market_id),
+                        outcome_index,
+                        shares_to_buy
+                    );
+                },
+                crate::types::TxData::CreateMarket { title, .. } => {
+                    tracing::info!("CreateMarket transaction added to mempool: title={}", title);
+                },
+                crate::types::TxData::CreateMarketDimensional { title, .. } => {
+                    tracing::info!("CreateMarketDimensional transaction added to mempool: title={}", title);
+                },
+                _ => {
+                    // Non-market transactions
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Get mempool-adjusted shares for a market (for real-time price updates)
+    pub fn get_mempool_shares(
+        &self,
+        market_id: &crate::state::markets::MarketId,
+    ) -> Result<Option<ndarray::Array1<f64>>, Error> {
+        let rotxn = self.env.read_txn()?;
+        self.state.get_mempool_shares(&rotxn, market_id)
+            .map_err(|e| Error::State(Box::new(e)))
+    }
+
+    /// Update mempool shares for a BuyShares transaction to ensure immediate LMSR price updates
+    /// Following Bitcoin Hivemind whitepaper section 4.2 on logarithmic market scoring rule
+    fn update_mempool_buy(
+        &self,
+        rwtxn: &mut RwTxn,
+        market_id_bytes: [u8; 6],
+        outcome_index: u32,
+        shares_to_buy: f64,
+    ) -> Result<(), Error> {
+        use crate::state::markets::MarketId;
+        use crate::math::lmsr::{Lmsr, LmsrState};
+        use crate::state;
+
+        let market_id = MarketId::new(market_id_bytes);
+
+        // Get current market state
+        let market = self.state.markets().get_market(rwtxn, &market_id)?
+            .ok_or_else(|| Error::State(Box::new(state::Error::InvalidSlotId {
+                reason: format!("Market {:?} does not exist", market_id_bytes),
+            })))?;
+
+        // Only update mempool shares for trading markets
+        if market.state() != crate::state::markets::MarketState::Trading {
+            return Ok(()); // Skip mempool updates for non-trading markets
+        }
+
+        // Validate outcome index
+        if outcome_index as usize >= market.shares().len() {
+            return Err(Error::State(Box::new(state::Error::InvalidSlotId {
+                reason: format!("Outcome index {} exceeds market outcomes {}", outcome_index, market.shares().len()),
+            })));
+        }
+
+        // Get existing mempool shares or use current market shares as base
+        let current_shares = if let Some(existing_mempool_shares) = self.state.get_mempool_shares(rwtxn, &market_id)? {
+            existing_mempool_shares
+        } else {
+            market.shares().clone()
+        };
+
+        // Calculate new share quantities after the purchase
+        let mut new_shares = current_shares.clone();
+        new_shares[outcome_index as usize] += shares_to_buy;
+
+        // Validate the new shares using LMSR
+        let lmsr = Lmsr::new(market.shares().len());
+        let lmsr_state = LmsrState {
+            beta: market.b(),
+            shares: new_shares.clone(),
+            treasury_balance: u64::MAX, // We don't enforce treasury limits for mempool calculations
+            trading_fee: market.trading_fee(),
+        };
+
+        // Validate LMSR state consistency
+        lmsr.validate_state(&lmsr_state)
+            .map_err(|e| Error::State(Box::new(state::Error::InvalidSlotId {
+                reason: format!("Invalid LMSR state after mempool update: {:?}", e),
+            })))?;
+
+        // Store updated mempool shares
+        self.state.put_mempool_shares(rwtxn, &market_id, &new_shares)
+            .map_err(|e| Error::State(Box::new(e)))?;
+
+        tracing::debug!(
+            "Updated mempool shares for market {}: outcome {} increased by {} shares",
+            hex::encode(market_id_bytes),
+            outcome_index,
+            shares_to_buy
+        );
+
         Ok(())
     }
 
@@ -424,7 +503,7 @@ where
         self.state.get_utxos(&rotxn).map_err(Error::from)
     }
 
-    pub fn get_latest_failed_withdrawal_bundle_height(
+    pub fn get_latest_failed_bundle_height(
         &self,
     ) -> Result<Option<u32>, Error> {
         let rotxn = self.env.read_txn()?;
@@ -617,13 +696,33 @@ where
                 .validate_transaction(&rwtxn, &transaction)
                 .is_err()
             {
+                tracing::debug!(
+                    "Removing invalid transaction {} from mempool during block construction",
+                    transaction.transaction.txid()
+                );
                 self.mempool
                     .delete(&mut rwtxn, transaction.transaction.txid())?;
                 continue;
             }
-            let filled_transaction = self
+
+            // Attempt to fill the transaction - if UTXOs are missing, remove from mempool
+            let txid = transaction.transaction.txid(); // Get txid before moving transaction
+            let filled_transaction = match self
                 .state
-                .fill_authorized_transaction(&rwtxn, transaction)?;
+                .fill_authorized_transaction(&rwtxn, transaction)
+            {
+                Ok(filled_tx) => filled_tx,
+                Err(err) => {
+                    tracing::warn!(
+                        "Cannot fill transaction {} during block construction (missing UTXOs?): {:?}. Removing from mempool.",
+                        txid,
+                        err
+                    );
+                    self.mempool
+                        .delete(&mut rwtxn, txid)?;
+                    continue;
+                }
+            };
             let value_in: bitcoin::Amount = filled_transaction
                 .transaction
                 .spent_utxos
@@ -1023,6 +1122,13 @@ where
         Ok(self.state.markets().get_market(&rotxn, market_id)?)
     }
 
+    /// Get multiple markets by their IDs in batch operation
+    /// Optimizes database access for share position calculations
+    pub fn get_markets_batch(&self, market_ids: &[crate::state::MarketId]) -> Result<std::collections::HashMap<crate::state::MarketId, crate::state::Market>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.markets().get_markets_batch(&rotxn, market_ids)?)
+    }
+
     /// Get market decisions for a specific market (for detailed outcome descriptions)
     pub fn get_market_decisions(&self, market: &crate::state::Market) -> Result<std::collections::HashMap<crate::state::slots::SlotId, crate::state::slots::Decision>, Error> {
         let rotxn = self.env.read_txn()?;
@@ -1037,6 +1143,20 @@ where
         }
         
         Ok(decisions)
+    }
+
+    /// Get all share positions for a user address
+    /// Returns tuples of (MarketId, outcome_index, shares_held)
+    pub fn get_user_share_positions(&self, address: &crate::types::Address) -> Result<Vec<(crate::state::MarketId, u32, f64)>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.markets().get_user_share_positions(&rotxn, address)?)
+    }
+
+    /// Get share positions for a specific market and user
+    /// Returns tuples of (outcome_index, shares_held)
+    pub fn get_market_user_positions(&self, address: &crate::types::Address, market_id: &crate::state::MarketId) -> Result<Vec<(u32, f64)>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.markets().get_market_user_positions(&rotxn, address, market_id)?)
     }
 }
 

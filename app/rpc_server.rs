@@ -25,7 +25,11 @@ use truthcoin_dc::{
     validation::{SlotValidator, PeriodCalculator},
     wallet::Balance,
 };
-use truthcoin_dc_app_rpc_api::{AvailableSlotId, RpcServer, TxInfo};
+use truthcoin_dc_app_rpc_api::{
+    AvailableSlotId, RegisterVoterRequest, RpcServer, SubmitVoteRequest,
+    SubmitVoteBatchRequest, TxInfo, VoteInfo, VoterInfo, VoterParticipation,
+    VotingPeriodDetails
+};
 
 use crate::app::App;
 
@@ -41,8 +45,6 @@ where
     custom_err_msg(format!("{error:#}"))
 }
 
-/// Standardized market ID parsing and validation
-/// Ensures consistent error handling across all market endpoints
 fn parse_market_id(market_id: &str) -> RpcResult<truthcoin_dc::state::MarketId> {
     let market_id_bytes = hex::decode(market_id)
         .map_err(|_| custom_err_msg("Invalid market ID hex format"))?;
@@ -84,7 +86,6 @@ impl RpcServer for RpcServerImpl {
         let Some(sidechain_hash) =
             self.app.node.try_get_tip().map_err(custom_err)?
         else {
-            // No sidechain tip, so no best mainchain block hash.
             return Ok(None);
         };
         let block_hash = self
@@ -443,13 +444,11 @@ impl RpcServer for RpcServerImpl {
             0
         };
 
-        // Get current period based on current time or tip height
         let current_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
         let current_period = if is_testing_mode {
-            // Get current block height from node tip
             let tip_height = self
                 .app
                 .node
@@ -504,23 +503,16 @@ impl RpcServer for RpcServerImpl {
     ) -> RpcResult<Txid> {
         use truthcoin_dc::state::slots::SlotId;
 
-        // Validate question length
         if question.as_bytes().len() >= 1000 {
             return Err(custom_err_msg(
                 "Question must be less than 1000 bytes",
             ));
         }
 
-        // Create SlotId and get bytes
-        let slot_id =
-            SlotId::new(period_index, slot_index).map_err(custom_err)?;
+        let slot_id = SlotId::new(period_index, slot_index).map_err(custom_err)?;
         let slot_id_bytes = slot_id.as_bytes();
-
-        // Create transaction
         let mut tx = Transaction::default();
         let fee = Amount::from_sat(fee_sats);
-
-        // Use wallet to add decision slot claim to transaction
         self.app
             .wallet
             .claim_decision_slot(
@@ -569,11 +561,8 @@ impl RpcServer for RpcServerImpl {
         &self,
         slot_id_hex: String,
     ) -> RpcResult<Option<truthcoin_dc_app_rpc_api::SlotDetails>> {
-        // Use common validation utility
         let slot_id = SlotValidator::parse_slot_id_from_hex(&slot_id_hex)
             .map_err(custom_err)?;
-
-        // Get the slot from the node
         let slot_opt = self.app.node.get_slot(slot_id).map_err(custom_err)?;
 
         let result = slot_opt.map(|slot| {
@@ -611,7 +600,6 @@ impl RpcServer for RpcServerImpl {
         &self,
         period_index: u32,
     ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::ClaimedSlotSummary>> {
-        // Use the efficient database scan method
         let claimed_slots_data = self
             .app
             .node
@@ -621,7 +609,6 @@ impl RpcServer for RpcServerImpl {
         let claimed_slots = claimed_slots_data
             .into_iter()
             .filter_map(|slot| {
-                // This should always be a Decision since we filtered in get_claimed_slots_in_period
                 if let Some(decision) = slot.decision {
                     let question_preview = if decision.question.len() > 100 {
                         format!("{}...", &decision.question[..100])
@@ -641,7 +628,7 @@ impl RpcServer for RpcServerImpl {
                         question_preview,
                     })
                 } else {
-                    None // Should never happen
+                    None
                 }
             })
             .collect();
@@ -672,10 +659,7 @@ impl RpcServer for RpcServerImpl {
     async fn is_slot_in_voting(&self, slot_id_hex: String) -> RpcResult<bool> {
         use truthcoin_dc::validation::SlotValidator;
 
-        // Parse slot ID using centralized validation
         let slot_id = SlotValidator::parse_slot_id_from_hex(&slot_id_hex).map_err(custom_err)?;
-
-        // Check if the slot is in voting period
         let is_voting = self
             .app
             .node
@@ -719,45 +703,38 @@ impl RpcServer for RpcServerImpl {
 
 
     async fn list_markets(&self) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::MarketSummary>> {
-        // Get markets in Trading state only
         let markets = self
             .app
             .node
             .get_markets_by_state(truthcoin_dc::state::MarketState::Trading)
             .map_err(custom_err)?;
 
-        let mut market_summaries = Vec::new();
-
-        for market in markets {
-            // Convert market ID to hex string
-            let market_id_hex = hex::encode(market.id.as_bytes());
-
-            // Create lightweight summary
-            let market_summary = truthcoin_dc_app_rpc_api::MarketSummary {
-                market_id: market_id_hex,
-                title: market.title.clone(),
-                description: if market.description.len() > 100 {
-                    format!("{}...", &market.description[..97])
-                } else {
-                    market.description.clone()
-                },
-                outcome_count: market.get_outcome_count(),
-                state: format!("{:?}", market.state()),
-                volume: market.treasury(), // Using treasury as volume proxy
-                created_at_height: market.created_at_height,
-            };
-
-            market_summaries.push(market_summary);
-        }
+        let market_summaries = markets
+            .into_iter()
+            .map(|market| {
+                let market_id_hex = hex::encode(market.id.as_bytes());
+                truthcoin_dc_app_rpc_api::MarketSummary {
+                    market_id: market_id_hex,
+                    title: market.title.clone(),
+                    description: if market.description.len() > 100 {
+                        format!("{}...", &market.description[..97])
+                    } else {
+                        market.description.clone()
+                    },
+                    outcome_count: market.get_outcome_count(),
+                    state: format!("{:?}", market.state()),
+                    volume: market.treasury(),
+                    created_at_height: market.created_at_height,
+                }
+            })
+            .collect();
 
         Ok(market_summaries)
     }
 
     async fn view_market(&self, market_id: String) -> RpcResult<Option<truthcoin_dc_app_rpc_api::MarketData>> {
-        // Parse and validate market ID using standardized function
         let market_id_struct = parse_market_id(&market_id)?;
 
-        // Get the market
         let market = match self
             .app
             .node
@@ -768,28 +745,22 @@ impl RpcServer for RpcServerImpl {
             None => return Ok(None),
         };
 
-        // Get decisions for detailed outcome descriptions
         let decisions = self
             .app
             .node
             .get_market_decisions(&market)
             .map_err(custom_err)?;
 
-        // Generate detailed outcome information (filter out invalid states for user display)
         let mut outcomes = Vec::new();
         let valid_state_combos = market.get_valid_state_combos();
-        
-        // Get mempool-adjusted shares if they exist (for real-time price updates)
+
         let prices = if let Some(mempool_shares) = self.app.node.get_mempool_shares(&market_id_struct).map_err(custom_err)? {
-            // Calculate prices with mempool-adjusted shares
             let all_prices = market.calculate_prices(&mempool_shares);
-            
-            // Extract prices for valid states only and renormalize
             let valid_prices: Vec<f64> = valid_state_combos
                 .iter()
                 .map(|(state_idx, _)| all_prices[*state_idx])
                 .collect();
-            
+
             let valid_sum: f64 = valid_prices.iter().sum();
             if valid_sum > 0.0 {
                 valid_prices.iter().map(|p| p / valid_sum).collect()
@@ -797,11 +768,9 @@ impl RpcServer for RpcServerImpl {
                 vec![1.0 / valid_prices.len() as f64; valid_prices.len()]
             }
         } else {
-            // No mempool adjustments, use confirmed state
             market.calculate_prices_for_display()
         };
-        
-        // Get actual volume data from the market
+
         let total_volume = market.total_volume_sats as f64;
 
         for (i, (state_idx, _combo)) in valid_state_combos.iter().enumerate() {
@@ -811,8 +780,7 @@ impl RpcServer for RpcServerImpl {
             };
 
             let current_price = prices[i];
-            let probability = current_price; // Price equals probability in LMSR
-            // Get per-outcome volume
+            let probability = current_price;
             let volume = if i < market.outcome_volumes_sats.len() {
                 market.outcome_volumes_sats[i] as f64
             } else {
@@ -828,7 +796,6 @@ impl RpcServer for RpcServerImpl {
             });
         }
 
-        // Convert decision slots to hex strings
         let decision_slots: Vec<String> = market
             .decision_slots
             .iter()
@@ -849,7 +816,7 @@ impl RpcServer for RpcServerImpl {
             created_at_height: market.created_at_height,
             treasury: market.treasury(),
             total_volume,
-            liquidity: market.treasury(), // Treasury represents available liquidity
+            liquidity: market.treasury(),
             decision_slots,
         };
 
@@ -864,10 +831,8 @@ impl RpcServer for RpcServerImpl {
         shares_amount: f64,
         fee_sats: u64,
     ) -> RpcResult<String> {
-        // Parse and validate market ID using standardized function
         let market_id_struct = parse_market_id(&market_id)?;
 
-        // Create the transaction
         let tx = self
             .app
             .wallet
@@ -880,19 +845,15 @@ impl RpcServer for RpcServerImpl {
             .map_err(custom_err)?;
 
         let txid = tx.txid();
-
-        // Sign and send the transaction
         self.app.sign_and_send(tx).map_err(custom_err)?;
 
         Ok(format!("{}", txid))
     }
 
-    /// Create a new prediction market with optional liquidity
     async fn create_market(
         &self,
         request: truthcoin_dc_app_rpc_api::CreateMarketRequest,
     ) -> RpcResult<String> {
-        // Use consolidated market creation method
         let tx = self.app.wallet.create_market(
             request.title,
             request.description,
@@ -908,10 +869,9 @@ impl RpcServer for RpcServerImpl {
         ).map_err(custom_err)?;
 
         let txid = tx.txid();
-        
+
         self.app.sign_and_send(tx).map_err(custom_err)?;
 
-        // Market ID is derived from the first 6 bytes of the transaction hash
         let market_id_bytes = &txid.as_slice()[..6];
         let market_id_hex = hex::encode(market_id_bytes);
 
@@ -924,16 +884,12 @@ impl RpcServer for RpcServerImpl {
     ) -> RpcResult<truthcoin_dc_app_rpc_api::InitialLiquidityCalculation> {
         let beta = request.beta;
 
-        // Validate beta parameter
         if beta <= 0.0 {
             return Err(custom_err_msg(format!(
                 "Beta parameter must be positive, got: {}", beta
             )));
         }
-
-        // Calculate number of outcomes based on market configuration
         let (num_outcomes, market_config, outcome_breakdown) = if let Some(num) = request.num_outcomes {
-            // Simple preview mode with explicit number of outcomes
             if num < 2 {
                 return Err(custom_err_msg(
                     "Number of outcomes must be at least 2".to_string()
@@ -941,17 +897,14 @@ impl RpcServer for RpcServerImpl {
             }
             (num, format!("Preview: {} outcomes", num), format!("{} outcomes specified", num))
         } else if let Some(ref decision_slots) = request.decision_slots {
-            // Calculate based on actual decision slots
             match request.market_type.as_str() {
                 "independent" => {
-                    // Each binary decision contributes 2^1 = 2 outcomes, combined = 2^n total outcomes
                     let num = 2_usize.pow(decision_slots.len() as u32);
                     (num, format!("Independent: {} binary decisions", decision_slots.len()),
                      format!("{} binary decisions = 2^{} = {} total outcome combinations",
                              decision_slots.len(), decision_slots.len(), num))
                 },
                 "categorical" => {
-                    // Categorical market: each slot represents one outcome, plus optional residual
                     let base_outcomes = decision_slots.len();
                     let has_residual = request.has_residual.unwrap_or(false);
                     let total = if has_residual { base_outcomes + 1 } else { base_outcomes };
@@ -961,11 +914,8 @@ impl RpcServer for RpcServerImpl {
                             if has_residual { " + 1 residual" } else { "" }, total))
                 },
                 "dimensional" => {
-                    // Dimensional markets require dimension specification
                     if let Some(ref dims) = request.dimensions {
-                        // For now, return a reasonable estimate
-                        // In practice, this would parse the dimension specification
-                        let estimated_outcomes = decision_slots.len() * 2; // Conservative estimate
+                        let estimated_outcomes = decision_slots.len() * 2;
                         (estimated_outcomes, format!("Dimensional: {} dimensions", decision_slots.len()),
                          format!("Estimated {} outcomes from {} dimensions (actual calculation requires dimension parsing)",
                                 estimated_outcomes, decision_slots.len()))
@@ -985,28 +935,25 @@ impl RpcServer for RpcServerImpl {
             ));
         };
 
-        // Apply the formula: Initial Liquidity = β × ln(Number of States in the Market)
         let initial_liquidity_f64 = beta * (num_outcomes as f64).ln();
-        let initial_liquidity_sats = initial_liquidity_f64.ceil() as u64; // Round up to ensure sufficient liquidity
+        let initial_liquidity_sats = initial_liquidity_f64.ceil() as u64;
 
         Ok(truthcoin_dc_app_rpc_api::InitialLiquidityCalculation {
             beta,
             num_outcomes,
             initial_liquidity_sats,
-            min_treasury_sats: initial_liquidity_sats, // Same value
+            min_treasury_sats: initial_liquidity_sats,
             market_config,
             outcome_breakdown,
         })
     }
 
-    /// Get comprehensive share positions for a user
     async fn get_user_share_positions(
         &self,
         address: Address,
     ) -> RpcResult<truthcoin_dc_app_rpc_api::UserHoldings> {
         let node = &self.app.node;
-        
-        // Get user positions from database
+
         let positions_data = node
             .get_user_share_positions(&address)
             .map_err(custom_err)?;
@@ -1017,7 +964,6 @@ impl RpcServer for RpcServerImpl {
         let mut active_markets = std::collections::HashSet::new();
         let mut last_updated_height = 0u64;
 
-        // Extract unique market IDs for batch retrieval (eliminates N+1 queries)
         let unique_market_ids: Vec<truthcoin_dc::state::MarketId> = positions_data
             .iter()
             .map(|(market_id, _, _)| market_id.clone())
@@ -1025,26 +971,21 @@ impl RpcServer for RpcServerImpl {
             .into_iter()
             .collect();
 
-        // Batch retrieve all required markets in single database transaction
         let markets_map = node
             .get_markets_batch(&unique_market_ids)
             .map_err(custom_err)?;
 
-        // Pre-calculate prices for all markets to avoid repeated LMSR computations
         let mut prices_cache = std::collections::HashMap::new();
         for (market_id, market) in &markets_map {
             prices_cache.insert(market_id.clone(), market.get_current_prices());
         }
 
         for (market_id, outcome_index, position_data) in positions_data {
-            // Use pre-fetched market and cached prices
             if let (Some(market), Some(current_prices)) = (markets_map.get(&market_id), prices_cache.get(&market_id)) {
                 let outcome_price = current_prices.get(outcome_index as usize).copied().unwrap_or(0.0);
-                
                 let shares_held = position_data;
                 let current_value = shares_held * outcome_price;
-                
-                // Get outcome name from market state combinations
+
                 let outcome_name = if let Some(combo) = market.state_combos.get(outcome_index as usize) {
                     format!("Outcome {}: {:?}", outcome_index, combo)
                 } else {
@@ -1083,25 +1024,20 @@ impl RpcServer for RpcServerImpl {
         })
     }
 
-    /// Get share positions for a specific market and user
     async fn get_market_share_positions(
         &self,
         address: Address,
         market_id: String,
     ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::SharePosition>> {
-        // Parse and validate market ID using standardized function
         let market_id_struct = parse_market_id(&market_id)?;
-
         let node = &self.app.node;
-        
-        // Get positions for this specific market
+
         let positions_data = node
             .get_market_user_positions(&address, &market_id_struct)
             .map_err(custom_err)?;
 
         let mut positions = Vec::new();
 
-        // Get market to calculate current prices
         if let Ok(Some(market)) = node.get_market_by_id(&market_id_struct) {
             let current_prices = market.get_current_prices();
             
@@ -1133,31 +1069,24 @@ impl RpcServer for RpcServerImpl {
         Ok(positions)
     }
 
-    /// Calculate share purchase cost using current market snapshot
     async fn calculate_share_cost(
         &self,
         market_id: String,
         outcome_index: usize,
         shares_amount: f64,
     ) -> RpcResult<u64> {
-        // Parse and validate market ID using standardized function
         let market_id_struct = parse_market_id(&market_id)?;
-
         let node = &self.app.node;
-        
-        // Get market and calculate cost using snapshot LMSR
+
         if let Ok(Some(market)) = node.get_market_by_id(&market_id_struct) {
-            // Calculate cost using snapshot LMSR without mutating market state
             let cost_sats = market.calculate_buy_cost(outcome_index as u32, shares_amount)
                 .map_err(custom_err)?;
-            
             Ok(cost_sats)
         } else {
             Err(custom_err_msg("Market not found"))
         }
     }
 
-    /// Buy shares using LMSR calculations for optimal pricing
     async fn buy_shares(
         &self,
         market_id: String,
@@ -1166,14 +1095,12 @@ impl RpcServer for RpcServerImpl {
         max_cost: u64,
         fee_sats: u64,
     ) -> RpcResult<String> {
-        // First calculate the exact cost using snapshot
         let calculated_cost = self.calculate_share_cost(
             market_id.clone(),
             outcome_index,
             shares_amount,
         ).await?;
 
-        // Check slippage protection
         if calculated_cost > max_cost {
             return Err(custom_err_msg(format!(
                 "Share cost {} exceeds maximum cost {} (slippage protection)",
@@ -1181,10 +1108,8 @@ impl RpcServer for RpcServerImpl {
             )));
         }
 
-        // Parse and validate market ID using standardized function
         let market_id_struct = parse_market_id(&market_id)?;
 
-        // Create the transaction using snapshot pricing
         let tx = self
             .app
             .wallet
@@ -1192,7 +1117,7 @@ impl RpcServer for RpcServerImpl {
                 market_id_struct,
                 outcome_index,
                 shares_amount,
-                max_cost, // Use user's max_cost for slippage protection
+                max_cost,
                 bitcoin::Amount::from_sat(fee_sats),
             )
             .map_err(custom_err)?;
@@ -1213,18 +1138,16 @@ impl RpcServer for RpcServerImpl {
         value_sats: u64,
         fee_sats: u64,
     ) -> RpcResult<bitcoin::Txid> {
-        // Create a transfer transaction (deposit is essentially a transfer to an address)
         let tx = self.app.wallet.create_transfer(
             address,
             bitcoin::Amount::from_sat(value_sats),
             bitcoin::Amount::from_sat(fee_sats),
-            None, // no memo
+            None,
         ).map_err(custom_err)?;
-        
+
         let txid = tx.txid();
         self.app.sign_and_send(tx).map_err(custom_err)?;
-        
-        // Convert truthcoin_dc::types::Txid to bitcoin::Txid
+
         let bitcoin_txid = bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(txid.0));
         Ok(bitcoin_txid)
     }
@@ -1264,7 +1187,6 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn format_deposit_address(&self, address: Address) -> RpcResult<String> {
-        // Format the address as string
         Ok(format!("{}", address))
     }
 
@@ -1274,6 +1196,86 @@ impl RpcServer for RpcServerImpl {
             bip39::Language::English,
         );
         Ok(mnemonic.to_string())
+    }
+
+    async fn register_voter(
+        &self,
+        _request: RegisterVoterRequest,
+    ) -> RpcResult<String> {
+        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+    }
+
+    async fn submit_vote(
+        &self,
+        _request: SubmitVoteRequest,
+    ) -> RpcResult<String> {
+        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+    }
+
+    async fn submit_vote_batch(
+        &self,
+        _request: SubmitVoteBatchRequest,
+    ) -> RpcResult<String> {
+        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+    }
+
+    async fn get_voter_info(
+        &self,
+        _address: Address,
+    ) -> RpcResult<Option<VoterInfo>> {
+        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+    }
+
+    async fn get_voting_period_details(
+        &self,
+        _period_id: u32,
+    ) -> RpcResult<Option<VotingPeriodDetails>> {
+        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+    }
+
+    async fn get_voter_votes(
+        &self,
+        _address: Address,
+        _period_id: Option<u32>,
+    ) -> RpcResult<Vec<VoteInfo>> {
+        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+    }
+
+    async fn get_decision_votes(
+        &self,
+        _decision_id: String,
+    ) -> RpcResult<Vec<VoteInfo>> {
+        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+    }
+
+    async fn get_voter_participation(
+        &self,
+        _address: Address,
+        _period_id: u32,
+    ) -> RpcResult<Option<VoterParticipation>> {
+        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+    }
+
+    async fn list_voters(&self) -> RpcResult<Vec<VoterInfo>> {
+        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+    }
+
+    async fn is_registered_voter(
+        &self,
+        _address: Address,
+    ) -> RpcResult<bool> {
+        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+    }
+
+    async fn get_voting_power(
+        &self,
+        _address: Address,
+    ) -> RpcResult<u32> {
+        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+    }
+
+    async fn get_current_voting_stats(&self) -> RpcResult<Option<VotingPeriodDetails>> {
+        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
     }
 }
 

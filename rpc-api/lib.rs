@@ -101,304 +101,174 @@ pub struct OssifiedSlotInfo {
     pub decision: Option<DecisionInfo>,
 }
 
-/// Unified market outcome representation according to Bitcoin Hivemind specification
-/// Contains price, probability, and trading volume data for a specific market outcome
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct MarketOutcome {
-    /// Outcome name/description  
     pub name: String,
-    /// Current LMSR-derived price (0.0 to 1.0)
     pub current_price: f64,
-    /// Market-implied probability (normalized price)
     pub probability: f64,
-    /// Total trading volume for this outcome in sats
     pub volume: f64,
-    /// Index position in the market's outcome vector
     pub index: usize,
 }
 
-/// Unified market information structure consolidating MarketInfo and MarketDetails
-/// This structure provides comprehensive market data for all use cases according to
-/// Bitcoin Hivemind whitepaper Section 3.2 - Market Mechanics
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]  
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct MarketData {
-    /// Unique 6-byte market identifier (hex-encoded)
     pub market_id: String,
-    /// Human-readable market title
     pub title: String,
-    /// Detailed market description
     pub description: String,
-    /// All possible outcomes with current pricing
     pub outcomes: Vec<MarketOutcome>,
-    /// Current market state (Trading, Voting, Resolved, etc.)
     pub state: String,
-    /// Market creator address
     pub market_maker: String,
-    /// Optional market expiration height
     pub expires_at: Option<u64>,
-    /// LMSR beta parameter controlling liquidity
     pub beta: f64,
-    /// Trading fee percentage (e.g., 0.005 = 0.5%)
     pub trading_fee: f64,
-    /// Market categorization tags
     pub tags: Vec<String>,
-    /// Block height when market was created  
     pub created_at_height: u64,
-    /// Current LMSR cost function value (treasury)
     pub treasury: f64,
-    /// Total trading volume across all outcomes in sats
     pub total_volume: f64,
-    /// Current liquidity depth
     pub liquidity: f64,
-    /// Decision slot IDs that define market dimensions
     pub decision_slots: Vec<String>,
 }
 
-/// Lightweight market summary for list views
-/// Provides essential market data for overview displays
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct MarketSummary {
-    /// Unique 6-byte market identifier (hex-encoded)
     pub market_id: String,
-    /// Human-readable market title  
     pub title: String,
-    /// Brief description (truncated if necessary)
     pub description: String,
-    /// Number of outcomes
     pub outcome_count: usize,
-    /// Current market state
     pub state: String,
-    /// Total trading volume in sats
     pub volume: f64,
-    /// Market creation height
     pub created_at_height: u64,
 }
 
-/// User's share position in a specific market outcome
-/// Tracks individual holdings according to Hivemind Section 4.3 - Share Accounting
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct SharePosition {
-    /// Market identifier
     pub market_id: String,
-    /// Outcome index within the market
     pub outcome_index: usize,
-    /// Outcome name/description
     pub outcome_name: String,
-    /// Number of shares held
     pub shares_held: f64,
-    /// Average purchase price of held shares
     pub avg_purchase_price: f64,
-    /// Current market price of this outcome
     pub current_price: f64,
-    /// Current valuation of position (shares_held * current_price)
     pub current_value: f64,
-    /// Unrealized profit/loss (current_value - cost_basis)
     pub unrealized_pnl: f64,
-    /// Total cost basis of position (shares_held * avg_purchase_price)
     pub cost_basis: f64,
 }
 
-/// Complete user holdings across all markets
-/// Provides comprehensive portfolio view for share position management
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct UserHoldings {
-    /// User's address
     pub address: String,
-    /// Individual share positions across all markets
     pub positions: Vec<SharePosition>,
-    /// Total portfolio value in sats
     pub total_value: f64,
-    /// Total cost basis across all positions  
     pub total_cost_basis: f64,
-    /// Total unrealized profit/loss
     pub total_unrealized_pnl: f64,
-    /// Number of different markets with positions
     pub active_markets: usize,
-    /// Last update block height
     pub last_updated_height: u64,
 }
 
-/// Market creation request with optional initial liquidity provision
-/// Unified structure combining simple and dimensional market creation
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct CreateMarketRequest {
-    /// Market title
     pub title: String,
-    /// Detailed description
     pub description: String,
-    /// Market type: "independent", "categorical", or "dimensional"
     pub market_type: String,
-    /// Decision slot IDs (hex-encoded)
     pub decision_slots: Vec<String>,
-    /// For dimensional markets: JSON dimension specification
     pub dimensions: Option<String>,
-    /// For categorical markets: whether to include residual outcome
     pub has_residual: Option<bool>,
-    /// LMSR beta parameter (optional, defaults to 7.0)
     pub beta: Option<f64>,
-    /// Trading fee percentage (optional, defaults to 0.5%)
     pub trading_fee: Option<f64>,
-    /// Market tags for categorization
     pub tags: Option<Vec<String>>,
-    /// Initial liquidity provision in sats (optional)
     pub initial_liquidity: Option<u64>,
-    /// Transaction fee in sats
     pub fee_sats: u64,
 }
 
-/// Request for calculating initial liquidity based on market parameters
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct CalculateInitialLiquidityRequest {
-    /// LMSR beta parameter
     pub beta: f64,
-    /// Market type: "independent", "categorical", or "dimensional"
     pub market_type: String,
-    /// Decision slot IDs or number of outcomes (for preview)
     pub decision_slots: Option<Vec<String>>,
-    /// Number of outcomes (alternative to decision_slots for preview)
     pub num_outcomes: Option<usize>,
-    /// For dimensional markets: JSON dimension specification
     pub dimensions: Option<String>,
-    /// For categorical markets: whether to include residual outcome
     pub has_residual: Option<bool>,
 }
 
-/// Response containing calculated initial liquidity information
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct InitialLiquidityCalculation {
-    /// LMSR beta parameter used
     pub beta: f64,
-    /// Number of market outcomes/states
     pub num_outcomes: usize,
-    /// Calculated initial liquidity using formula: b * ln(num_outcomes)
     pub initial_liquidity_sats: u64,
-    /// Minimum treasury value (same as initial_liquidity_sats)
     pub min_treasury_sats: u64,
-    /// Market configuration used for calculation
     pub market_config: String,
-    /// Breakdown of how outcomes were calculated
     pub outcome_breakdown: String,
 }
 
-/// Request to register as a voter in the Bitcoin Hivemind voting system
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct RegisterVoterRequest {
-    /// Initial reputation bond in sats (optional, defaults to minimum required)
     pub reputation_bond_sats: Option<u64>,
-    /// Transaction fee in sats
     pub fee_sats: u64,
 }
 
-/// Request to submit a single vote for a decision
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct SubmitVoteRequest {
-    /// Decision slot ID (hex-encoded)
-    pub slot_id: String,
-    /// Vote value (0.0-1.0 for binary, scaled range for scaled decisions)
+    pub decision_id: String,
     pub vote_value: f64,
-    /// Voting period this vote belongs to
-    pub voting_period: u32,
-    /// Transaction fee in sats
+    pub period_id: u32,
     pub fee_sats: u64,
 }
 
-/// Individual vote item for batch submission
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct VoteBatchItem {
-    /// Decision slot ID (hex-encoded)
-    pub slot_id: String,
-    /// Vote value (0.0-1.0 for binary, scaled range for scaled decisions)
+    pub decision_id: String,
     pub vote_value: f64,
 }
 
-/// Request to submit multiple votes efficiently in a single transaction
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct SubmitVoteBatchRequest {
-    /// List of votes to submit
     pub votes: Vec<VoteBatchItem>,
-    /// Voting period these votes belong to
-    pub voting_period: u32,
-    /// Transaction fee in sats
+    pub period_id: u32,
     pub fee_sats: u64,
 }
 
-/// Information about a voter's registration and reputation
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct VoterInfo {
-    /// Voter address
     pub address: String,
-    /// Current reputation score (0.0-1.0)
     pub reputation: f64,
-    /// Total number of votes cast
     pub total_votes: u64,
-    /// Number of voting periods participated in
     pub periods_active: u32,
-    /// Average accuracy score
     pub accuracy_score: f64,
-    /// Block height when voter was registered
     pub registered_at_height: u64,
-    /// Whether voter is currently active
     pub is_active: bool,
 }
 
-/// Information about a specific vote
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct VoteInfo {
-    /// Voter address
     pub voter_address: String,
-    /// Decision slot ID (hex-encoded)
-    pub slot_id: String,
-    /// Vote value submitted
+    pub decision_id: String,
     pub vote_value: f64,
-    /// Voting period when vote was cast
-    pub voting_period: u32,
-    /// Block height when vote was included
+    pub period_id: u32,
     pub block_height: u64,
-    /// Transaction ID containing this vote
     pub txid: String,
-    /// Whether this vote was part of a batch submission
     pub is_batch_vote: bool,
 }
 
-/// Comprehensive voting period information
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct VotingPeriodDetails {
-    /// Period index
     pub period_id: u32,
-    /// L1 timestamp when period started
     pub start_time: u64,
-    /// L1 timestamp when period ends
     pub end_time: u64,
-    /// Current period status
     pub status: String,
-    /// Decision slots available for voting
     pub decision_slots: Vec<String>,
-    /// Block height when period was created
     pub created_at_height: u64,
-    /// Total number of registered voters
     pub total_voters: u64,
-    /// Number of active voters in this period
     pub active_voters: u64,
-    /// Total votes cast in this period
     pub total_votes: u64,
-    /// Whether consensus has been calculated for this period
     pub consensus_reached: bool,
 }
 
-/// Summary of voter participation in a voting period
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct VoterParticipation {
-    /// Voter address
     pub address: String,
-    /// Voting period
     pub period_id: u32,
-    /// Number of votes cast in this period
     pub votes_cast: u32,
-    /// Number of decisions available in this period
     pub decisions_available: u32,
-    /// Participation rate (votes_cast / decisions_available)
     pub participation_rate: f64,
-    /// Whether voter participated in consensus calculation
     pub participated_in_consensus: bool,
 }
 
@@ -418,12 +288,10 @@ pub struct VoterParticipation {
 #[rpc(client, server)]
 pub trait Rpc {
 
-    /// Balance in sats
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "bitcoin_balance")]
     async fn bitcoin_balance(&self) -> RpcResult<Balance>;
 
-    /// Deposit to address
     #[open_api_method(output_schema(PartialSchema = "schema::BitcoinTxid"))]
     #[method(name = "create_deposit")]
     async fn create_deposit(
@@ -433,7 +301,6 @@ pub trait Rpc {
         fee_sats: u64,
     ) -> RpcResult<bitcoin::Txid>;
 
-    /// Connect to a peer
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "connect_peer")]
     async fn connect_peer(
@@ -444,9 +311,6 @@ pub trait Rpc {
         addr: SocketAddr,
     ) -> RpcResult<()>;
 
-    /// Decrypt a message with the specified encryption key corresponding to
-    /// the specified encryption pubkey.
-    /// Returns a decrypted hex string.
     #[method(name = "decrypt_msg")]
     async fn decrypt_msg(
         &self,
@@ -454,8 +318,6 @@ pub trait Rpc {
         ciphertext: String,
     ) -> RpcResult<String>;
 
-    /// Encrypt a message to the specified encryption pubkey
-    /// Returns the ciphertext as a hex string.
     #[method(name = "encrypt_msg")]
     async fn encrypt_msg(
         &self,
@@ -463,14 +325,12 @@ pub trait Rpc {
         msg: String,
     ) -> RpcResult<String>;
 
-    /// Format a deposit address
     #[method(name = "format_deposit_address")]
     async fn format_deposit_address(
         &self,
         address: Address,
     ) -> RpcResult<String>;
 
-    /// Generate a mnemonic seed phrase
     #[method(name = "generate_mnemonic")]
     async fn generate_mnemonic(&self) -> RpcResult<String>;
 

@@ -49,8 +49,8 @@ pub mod database;
 pub mod types;
 
 // Tests temporarily disabled - can be re-enabled after Phase 2
-// #[cfg(test)]
-// mod basic_tests;
+#[cfg(test)]
+mod basic_tests;
 
 use crate::state::{Error, slots::SlotId};
 use database::VotingDatabases;
@@ -887,5 +887,6 @@ impl VotingSystem {
 
 // Re-export public types for convenience through the already-imported names
 
-#[cfg(test)]
-mod tests;
+// NOTE: Tests are available in tests.rs.disabled - rename to enable
+// #[cfg(test)]
+// mod tests;

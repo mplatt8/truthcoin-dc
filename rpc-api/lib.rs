@@ -287,7 +287,6 @@ pub struct VoterParticipation {
 ])]
 #[rpc(client, server)]
 pub trait Rpc {
-
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "bitcoin_balance")]
     async fn bitcoin_balance(&self) -> RpcResult<Balance>;
@@ -333,7 +332,6 @@ pub trait Rpc {
 
     #[method(name = "generate_mnemonic")]
     async fn generate_mnemonic(&self) -> RpcResult<String>;
-
 
     /// Get block data
     #[open_api_method(output_schema(ToSchema))]
@@ -629,7 +627,10 @@ pub trait Rpc {
     /// View detailed information for a specific market
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "view_market")]
-    async fn view_market(&self, market_id: String) -> RpcResult<Option<MarketData>>;
+    async fn view_market(
+        &self,
+        market_id: String,
+    ) -> RpcResult<Option<MarketData>>;
 
     /// Calculate initial liquidity required for market creation based on beta parameter
     /// Uses formula: Initial Liquidity = β × ln(Number of States in the Market)
@@ -638,14 +639,17 @@ pub trait Rpc {
     #[method(name = "calculate_initial_liquidity")]
     async fn calculate_initial_liquidity(
         &self,
-        request: CalculateInitialLiquidityRequest
+        request: CalculateInitialLiquidityRequest,
     ) -> RpcResult<InitialLiquidityCalculation>;
 
     /// Get share positions for a specific user address
     /// Returns all positions across all markets according to Hivemind Section 4.3
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "get_user_share_positions")]
-    async fn get_user_share_positions(&self, address: Address) -> RpcResult<UserHoldings>;
+    async fn get_user_share_positions(
+        &self,
+        address: Address,
+    ) -> RpcResult<UserHoldings>;
 
     /// Get share positions for a specific market and user
     #[open_api_method(output_schema(ToSchema = "Vec<SharePosition>"))]
@@ -765,23 +769,19 @@ pub trait Rpc {
     /// Check if an address is registered as a voter
     #[open_api_method(output_schema(ToSchema = "bool"))]
     #[method(name = "is_registered_voter")]
-    async fn is_registered_voter(
-        &self,
-        address: Address,
-    ) -> RpcResult<bool>;
+    async fn is_registered_voter(&self, address: Address) -> RpcResult<bool>;
 
     /// Get the current voting power (Votecoin balance) for an address
     /// Voting power determines weight in consensus calculations
     #[open_api_method(output_schema(ToSchema = "u32"))]
     #[method(name = "get_voting_power")]
-    async fn get_voting_power(
-        &self,
-        address: Address,
-    ) -> RpcResult<u32>; // Returns Votecoin balance
+    async fn get_voting_power(&self, address: Address) -> RpcResult<u32>; // Returns Votecoin balance
 
     /// Get voting statistics for the current active voting period
     /// Returns aggregated data about participation and vote counts
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "get_current_voting_stats")]
-    async fn get_current_voting_stats(&self) -> RpcResult<Option<VotingPeriodDetails>>;
+    async fn get_current_voting_stats(
+        &self,
+    ) -> RpcResult<Option<VotingPeriodDetails>>;
 }

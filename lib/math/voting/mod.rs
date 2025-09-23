@@ -41,8 +41,8 @@
 
 pub mod matrix;
 
-use crate::state::voting::types::VoterId;
 use crate::state::slots::SlotId;
+use crate::state::voting::types::VoterId;
 use ndarray::{Array1, Array2};
 use std::collections::HashMap;
 
@@ -147,14 +147,21 @@ impl SparseVoteMatrix {
         decision_id: SlotId,
         value: f64,
     ) -> Result<(), VotingMathError> {
-        let voter_idx = *self.voter_indices.get(&voter_id)
-            .ok_or_else(|| VotingMathError::InvalidReputation {
-                reason: format!("Voter {:?} not found in matrix", voter_id),
+        let voter_idx =
+            *self.voter_indices.get(&voter_id).ok_or_else(|| {
+                VotingMathError::InvalidReputation {
+                    reason: format!("Voter {:?} not found in matrix", voter_id),
+                }
             })?;
 
-        let decision_idx = *self.decision_indices.get(&decision_id)
+        let decision_idx = *self
+            .decision_indices
+            .get(&decision_id)
             .ok_or_else(|| VotingMathError::InvalidReputation {
-                reason: format!("Decision {:?} not found in matrix", decision_id),
+                reason: format!(
+                    "Decision {:?} not found in matrix",
+                    decision_id
+                ),
             })?;
 
         self.entries.insert((voter_idx, decision_idx), value);
@@ -169,7 +176,11 @@ impl SparseVoteMatrix {
     ///
     /// # Returns
     /// Some(value) if vote exists, None if abstention or not found
-    pub fn get_vote(&self, voter_id: VoterId, decision_id: SlotId) -> Option<f64> {
+    pub fn get_vote(
+        &self,
+        voter_id: VoterId,
+        decision_id: SlotId,
+    ) -> Option<f64> {
         let voter_idx = *self.voter_indices.get(&voter_id)?;
         let decision_idx = *self.decision_indices.get(&decision_id)?;
         self.entries.get(&(voter_idx, decision_idx)).copied()
@@ -183,7 +194,10 @@ impl SparseVoteMatrix {
     /// # Returns
     /// Dense ndarray matrix suitable for linear algebra operations
     pub fn to_dense(&self, fill_value: f64) -> Array2<f64> {
-        let mut dense = Array2::from_elem((self.num_voters, self.num_decisions), fill_value);
+        let mut dense = Array2::from_elem(
+            (self.num_voters, self.num_decisions),
+            fill_value,
+        );
 
         for (&(i, j), &value) in &self.entries {
             dense[[i, j]] = value;
@@ -210,7 +224,8 @@ impl SparseVoteMatrix {
         if self.num_voters == 0 || self.num_decisions == 0 {
             return 0.0;
         }
-        self.entries.len() as f64 / (self.num_voters * self.num_decisions) as f64
+        self.entries.len() as f64
+            / (self.num_voters * self.num_decisions) as f64
     }
 
     /// Get votes for a specific voter
@@ -243,7 +258,10 @@ impl SparseVoteMatrix {
     ///
     /// # Returns
     /// HashMap mapping VoterId to vote value for this decision
-    pub fn get_decision_votes(&self, decision_id: SlotId) -> HashMap<VoterId, f64> {
+    pub fn get_decision_votes(
+        &self,
+        decision_id: SlotId,
+    ) -> HashMap<VoterId, f64> {
         let mut votes = HashMap::new();
 
         if let Some(&decision_idx) = self.decision_indices.get(&decision_id) {
@@ -309,7 +327,8 @@ impl ReputationVector {
     /// # Bitcoin Hivemind Compliance
     /// This should be the result of: Base Reputation × Votecoin Holdings Proportion
     pub fn set_reputation(&mut self, voter_id: VoterId, voting_weight: f64) {
-        self.reputations.insert(voter_id, voting_weight.clamp(0.0, 1.0));
+        self.reputations
+            .insert(voter_id, voting_weight.clamp(0.0, 1.0));
         self.total_weight = None; // Invalidate cache
     }
 
@@ -358,7 +377,9 @@ impl ReputationVector {
     /// # Returns
     /// Array1 with reputation values in voter order
     pub fn to_array(&self, voters: &[VoterId]) -> Array1<f64> {
-        Array1::from_iter(voters.iter().map(|&voter_id| self.get_reputation(voter_id)))
+        Array1::from_iter(
+            voters.iter().map(|&voter_id| self.get_reputation(voter_id)),
+        )
     }
 
     /// Get number of voters with reputation
@@ -382,11 +403,19 @@ impl ReputationVector {
     /// # Bitcoin Hivemind Compliance
     /// Extracts the complete voting weights that already incorporate both
     /// reputation and Votecoin holdings from the VoterReputation structures.
-    pub fn from_voter_reputations(voter_reputations: &HashMap<VoterId, crate::state::voting::types::VoterReputation>) -> Self {
+    pub fn from_voter_reputations(
+        voter_reputations: &HashMap<
+            VoterId,
+            crate::state::voting::types::VoterReputation,
+        >,
+    ) -> Self {
         let mut reputation_vector = Self::new();
 
         for (voter_id, voter_reputation) in voter_reputations {
-            reputation_vector.set_reputation(*voter_id, voter_reputation.get_voting_weight());
+            reputation_vector.set_reputation(
+                *voter_id,
+                voter_reputation.get_voting_weight(),
+            );
         }
 
         reputation_vector
@@ -488,7 +517,10 @@ impl VoteAggregator {
     ///
     /// # Returns
     /// Confidence score in [0.0, 1.0] based on voter agreement
-    pub fn calculate_confidence(votes: &HashMap<VoterId, f64>, outcome: f64) -> f64 {
+    pub fn calculate_confidence(
+        votes: &HashMap<VoterId, f64>,
+        outcome: f64,
+    ) -> f64 {
         if votes.is_empty() {
             return 0.0;
         }
@@ -524,7 +556,9 @@ impl MatrixUtils {
     ///
     /// # Returns
     /// HashMap mapping SlotId to participation rate [0.0, 1.0]
-    pub fn calculate_participation_rates(matrix: &SparseVoteMatrix) -> HashMap<SlotId, f64> {
+    pub fn calculate_participation_rates(
+        matrix: &SparseVoteMatrix,
+    ) -> HashMap<SlotId, f64> {
         let mut rates = HashMap::new();
         let (num_voters, _) = matrix.dimensions();
 
@@ -548,7 +582,9 @@ impl MatrixUtils {
     ///
     /// # Returns
     /// HashMap mapping VoterId to activity rate [0.0, 1.0]
-    pub fn calculate_voter_activity(matrix: &SparseVoteMatrix) -> HashMap<VoterId, f64> {
+    pub fn calculate_voter_activity(
+        matrix: &SparseVoteMatrix,
+    ) -> HashMap<VoterId, f64> {
         let mut activity = HashMap::new();
         let (_, num_decisions) = matrix.dimensions();
 
@@ -595,7 +631,9 @@ impl MatrixUtils {
                 }
 
                 let majority = VoteAggregator::simple_majority(&decision_votes);
-                if let Some(voter_vote) = matrix.get_vote(voter_id, *decision_id) {
+                if let Some(voter_vote) =
+                    matrix.get_vote(voter_id, *decision_id)
+                {
                     let deviation = (voter_vote - majority).abs();
                     deviations.push(deviation);
                 }
@@ -606,10 +644,11 @@ impl MatrixUtils {
             }
 
             // Calculate mean and std deviation of this voter's deviations
-            let mean: f64 = deviations.iter().sum::<f64>() / deviations.len() as f64;
-            let variance: f64 = deviations.iter()
-                .map(|x| (x - mean).powi(2))
-                .sum::<f64>() / deviations.len() as f64;
+            let mean: f64 =
+                deviations.iter().sum::<f64>() / deviations.len() as f64;
+            let variance: f64 =
+                deviations.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                    / deviations.len() as f64;
             let std_dev = variance.sqrt();
 
             // If voter consistently deviates more than threshold, mark as outlier
@@ -670,7 +709,10 @@ impl ConsensusEngine {
 
         for (j, &decision_id) in decisions.iter().enumerate() {
             let decision_votes = vote_matrix.get_decision_votes(decision_id);
-            outcomes[j] = VoteAggregator::weighted_average(&decision_votes, initial_reputations);
+            outcomes[j] = VoteAggregator::weighted_average(
+                &decision_votes,
+                initial_reputations,
+            );
         }
 
         // Iterative convergence loop
@@ -687,12 +729,15 @@ impl ConsensusEngine {
 
             // Step 2: Update outcomes using updated reputation
             for (j, &decision_id) in decisions.iter().enumerate() {
-                let decision_votes = vote_matrix.get_decision_votes(decision_id);
+                let decision_votes =
+                    vote_matrix.get_decision_votes(decision_id);
                 let mut weighted_sum = 0.0;
                 let mut total_weight = 0.0;
 
                 for (&voter_id, &vote) in &decision_votes {
-                    if let Some(voter_idx) = voters.iter().position(|&v| v == voter_id) {
+                    if let Some(voter_idx) =
+                        voters.iter().position(|&v| v == voter_id)
+                    {
                         let weight = reputation[voter_idx];
                         if !vote.is_nan() && weight > 0.0 {
                             weighted_sum += vote * weight;
@@ -709,8 +754,10 @@ impl ConsensusEngine {
             }
 
             // Check convergence
-            let rep_diff = (&reputation - &old_reputation).mapv(|x| x.abs()).sum();
-            let outcome_diff = (&outcomes - &old_outcomes).mapv(|x| x.abs()).sum();
+            let rep_diff =
+                (&reputation - &old_reputation).mapv(|x| x.abs()).sum();
+            let outcome_diff =
+                (&outcomes - &old_outcomes).mapv(|x| x.abs()).sum();
 
             if rep_diff < tolerance && outcome_diff < tolerance {
                 // Converged - build result
@@ -723,7 +770,9 @@ impl ConsensusEngine {
             }
         }
 
-        Err(VotingMathError::ConvergenceFailure { iterations: max_iterations })
+        Err(VotingMathError::ConvergenceFailure {
+            iterations: max_iterations,
+        })
     }
 
     /// Weighted Principal Component Analysis for reputation calculation
@@ -748,8 +797,15 @@ impl ConsensusEngine {
 
         if outcomes.len() != num_decisions || weights.len() != num_voters {
             return Err(VotingMathError::DimensionMismatch {
-                expected: format!("outcomes: {}, weights: {}", num_decisions, num_voters),
-                actual: format!("outcomes: {}, weights: {}", outcomes.len(), weights.len()),
+                expected: format!(
+                    "outcomes: {}, weights: {}",
+                    num_decisions, num_voters
+                ),
+                actual: format!(
+                    "outcomes: {}, weights: {}",
+                    outcomes.len(),
+                    weights.len()
+                ),
             });
         }
 
@@ -787,7 +843,9 @@ impl ConsensusEngine {
 
                 for i in 0..num_voters {
                     if weights[i] > 0.0 {
-                        weighted_cov += weights[i] * centered_matrix[[i, j1]] * centered_matrix[[i, j2]];
+                        weighted_cov += weights[i]
+                            * centered_matrix[[i, j1]]
+                            * centered_matrix[[i, j2]];
                     }
                 }
 
@@ -796,9 +854,13 @@ impl ConsensusEngine {
         }
 
         // Find first principal component using power iteration
-        let mut eigenvector = Array1::from_elem(num_decisions, 1.0 / (num_decisions as f64).sqrt());
+        let mut eigenvector = Array1::from_elem(
+            num_decisions,
+            1.0 / (num_decisions as f64).sqrt(),
+        );
 
-        for _ in 0..50 {  // Max power iterations
+        for _ in 0..50 {
+            // Max power iterations
             let old_eigenvector = eigenvector.clone();
 
             // Multiply by covariance matrix
@@ -811,7 +873,8 @@ impl ConsensusEngine {
             }
 
             // Check convergence
-            let diff = (&eigenvector - &old_eigenvector).mapv(|x| x.abs()).sum();
+            let diff =
+                (&eigenvector - &old_eigenvector).mapv(|x| x.abs()).sum();
             if diff < 1e-8 {
                 break;
             }
@@ -831,8 +894,11 @@ impl ConsensusEngine {
         }
 
         // Normalize reputation to [0, 1] range
-        let min_rep = new_reputation.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max_rep = new_reputation.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let min_rep =
+            new_reputation.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max_rep = new_reputation
+            .iter()
+            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
         if (max_rep - min_rep).abs() > 1e-10 {
             for rep in new_reputation.iter_mut() {
@@ -866,15 +932,21 @@ impl ConsensusEngine {
         let mut final_outcomes = HashMap::new();
         for (j, &decision_id) in decisions.iter().enumerate() {
             let decision_votes = vote_matrix.get_decision_votes(decision_id);
-            let confidence = VoteAggregator::calculate_confidence(&decision_votes, outcomes[j]);
+            let confidence = VoteAggregator::calculate_confidence(
+                &decision_votes,
+                outcomes[j],
+            );
 
-            final_outcomes.insert(decision_id, DecisionOutcome {
-                outcome_value: outcomes[j],
-                min: 0.0,  // Binary decisions have min 0.0
-                max: 1.0,  // Binary decisions have max 1.0
-                confidence,
-                voter_count: decision_votes.len(),
-            });
+            final_outcomes.insert(
+                decision_id,
+                DecisionOutcome {
+                    outcome_value: outcomes[j],
+                    min: 0.0, // Binary decisions have min 0.0
+                    max: 1.0, // Binary decisions have max 1.0
+                    confidence,
+                    voter_count: decision_votes.len(),
+                },
+            );
         }
 
         ConsensusResult {
@@ -1060,11 +1132,12 @@ impl VotingMath {
                     }
                 }
 
-                let correlation = if count > 1 && sum_sq_1 > 0.0 && sum_sq_2 > 0.0 {
-                    numerator / (sum_sq_1.sqrt() * sum_sq_2.sqrt())
-                } else {
-                    0.0
-                };
+                let correlation =
+                    if count > 1 && sum_sq_1 > 0.0 && sum_sq_2 > 0.0 {
+                        numerator / (sum_sq_1.sqrt() * sum_sq_2.sqrt())
+                    } else {
+                        0.0
+                    };
 
                 correlation_matrix[[j1, j2]] = correlation;
                 correlation_matrix[[j2, j1]] = correlation;
@@ -1095,13 +1168,15 @@ impl VotingMath {
             }
 
             // For binary votes, calculate entropy based on proportions
-            let positive_votes = votes.iter().filter(|&&v| v >= 0.5).count() as f64;
+            let positive_votes =
+                votes.iter().filter(|&&v| v >= 0.5).count() as f64;
             let total_votes = votes.len() as f64;
             let p_positive = positive_votes / total_votes;
             let p_negative = 1.0 - p_positive;
 
             entropy[j] = if p_positive > 0.0 && p_negative > 0.0 {
-                -(p_positive * p_positive.log2() + p_negative * p_negative.log2())
+                -(p_positive * p_positive.log2()
+                    + p_negative * p_negative.log2())
             } else {
                 0.0 // Perfect agreement
             };
@@ -1140,7 +1215,8 @@ impl VotingMath {
                     let vote2 = vote_matrix[[i2, j]];
 
                     if !vote1.is_nan() && !vote2.is_nan() {
-                        if (vote1 - vote2).abs() < 0.01 { // Nearly identical
+                        if (vote1 - vote2).abs() < 0.01 {
+                            // Nearly identical
                             matching_votes += 1;
                         }
                         total_comparisons += 1;
@@ -1148,7 +1224,8 @@ impl VotingMath {
                 }
 
                 if total_comparisons > 0 {
-                    let correlation = matching_votes as f64 / total_comparisons as f64;
+                    let correlation =
+                        matching_votes as f64 / total_comparisons as f64;
                     if correlation > threshold {
                         anomalies.push(VotingAnomaly::SuspiciousCorrelation {
                             voter1_index: i1,
@@ -1169,7 +1246,8 @@ impl VotingMath {
                 let vote_count = (0..num_decisions)
                     .map(|j| if vote_matrix[[i, j]].is_nan() { 0 } else { 1 })
                     .sum::<i32>() as f64;
-                let vote_share = vote_count / (num_voters * num_decisions) as f64;
+                let vote_share =
+                    vote_count / (num_voters * num_decisions) as f64;
 
                 if reputation_share < 0.01 && vote_share > 0.5 {
                     anomalies.push(VotingAnomaly::ExcessiveVoting {

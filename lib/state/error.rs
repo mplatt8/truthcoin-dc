@@ -5,10 +5,9 @@ use thiserror::Error;
 use transitive::Transitive;
 
 use crate::types::{
-    AmountOverflowError, AmountUnderflowError, BlockHash, M6id,
-    MerkleRoot, OutPoint, WithdrawalBundleError,
+    AmountOverflowError, AmountUnderflowError, BlockHash, M6id, MerkleRoot,
+    OutPoint, WithdrawalBundleError,
 };
-
 
 #[derive(Debug, Error)]
 pub enum InvalidHeader {

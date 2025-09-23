@@ -25,7 +25,8 @@ mod tests {
         let period_id = VotingPeriodId::new(1);
         let start_time = 1000u64;
         let end_time = 2000u64;
-        let decision_slots = vec![create_test_decision_id(1), create_test_decision_id(2)];
+        let decision_slots =
+            vec![create_test_decision_id(1), create_test_decision_id(2)];
         let created_height = 100u32;
 
         let period = VotingPeriod::new(
@@ -127,12 +128,11 @@ mod tests {
         let period_id = VotingPeriodId::new(1);
 
         let stats = VotingPeriodStats::new(
-            period_id,
-            100,   // total_voters
-            75,    // active_voters
-            50,    // total_decisions
-            45,    // decisions_with_votes
-            2250,  // total_votes
+            period_id, 100,  // total_voters
+            75,   // active_voters
+            50,   // total_decisions
+            45,   // decisions_with_votes
+            2250, // total_votes
         );
 
         assert_eq!(stats.period_id, period_id);

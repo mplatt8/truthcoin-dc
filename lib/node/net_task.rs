@@ -1230,7 +1230,9 @@ impl NetTaskHandle {
 
         // Check if the receiver is still alive before sending
         if self.new_tip_ready_tx.is_closed() {
-            tracing::error!("Network task receiver is closed, cannot send new tip ready");
+            tracing::error!(
+                "Network task receiver is closed, cannot send new tip ready"
+            );
             // Return a suitable error when receiver is closed
             return Ok(false); // Indicate tip was not applied due to closed receiver
         }

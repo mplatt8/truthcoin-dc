@@ -1,6 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-};
+use std::collections::{HashMap, HashSet};
 
 use bitcoin::amount::CheckedSum as _;
 use borsh::BorshSerialize;
@@ -106,7 +104,16 @@ pub type TxInputs = Vec<OutPoint>;
 pub type TxOutputs = Vec<Output>;
 
 /// Struct representing a single vote in a batch vote transaction
-#[derive(BorshSerialize, Clone, Copy, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
+#[derive(
+    BorshSerialize,
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    PartialEq,
+    Serialize,
+    ToSchema,
+)]
 pub struct VoteBatchItem {
     /// 3 byte slot ID
     pub slot_id_bytes: [u8; 3],
@@ -224,7 +231,6 @@ pub enum TransactionData {
 pub type TxData = TransactionData;
 
 impl TxData {
-
     /// `true` if the tx data corresponds to a decision slot claim
     pub fn is_claim_decision_slot(&self) -> bool {
         matches!(self, Self::ClaimDecisionSlot { .. })
@@ -269,9 +275,7 @@ impl TxData {
     pub fn is_submit_vote_batch(&self) -> bool {
         matches!(self, Self::SubmitVoteBatch { .. })
     }
-
 }
-
 
 /// Struct describing a decision slot claim
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -392,7 +396,6 @@ pub struct SubmitVoteBatch {
     pub voting_period: u32,
 }
 
-
 #[derive(
     BorshSerialize, Clone, Debug, Default, Deserialize, Serialize, ToSchema,
 )]
@@ -433,7 +436,6 @@ impl Transaction {
         self.outputs.iter().filter(|output| output.is_votecoin())
     }
 
-
     /// `true` if the tx data corresponds to a regular tx
     pub fn is_regular(&self) -> bool {
         self.data.is_none()
@@ -466,7 +468,6 @@ impl FilledTransaction {
         &self.transaction.inputs
     }
 
-
     /// Accessor for tx outputs
     pub fn outputs(&self) -> &TxOutputs {
         &self.transaction.outputs
@@ -479,7 +480,6 @@ impl FilledTransaction {
             None => false,
         }
     }
-
 
     /// `true` if the tx data corresponds to market creation
     pub fn is_create_market(&self) -> bool {
@@ -520,7 +520,6 @@ impl FilledTransaction {
             None => false,
         }
     }
-
 
     /// If the tx is a decision slot claim, returns the corresponding [`ClaimDecisionSlot`].
     pub fn claim_decision_slot(&self) -> Option<ClaimDecisionSlot> {
@@ -686,7 +685,6 @@ impl FilledTransaction {
         }
     }
 
-
     /// Accessor for txid
     pub fn txid(&self) -> Txid {
         self.transaction.txid()
@@ -791,8 +789,6 @@ impl FilledTransaction {
             .collect()
     }
 
-
-
     /** Returns an iterator over total value for each asset that must
      *  appear in the outputs, in order.
      *  The total output value can possibly over/underflow in a transaction,
@@ -833,7 +829,7 @@ impl FilledTransaction {
 
     /// Compute the filled outputs.
     /// Returns None if the outputs cannot be filled because the tx is invalid.
-    /// 
+    ///
     /// Transaction validation ensures that all iterators over expected output amounts
     /// are fully consumed during processing. If any iterator has remaining unconsumed
     /// elements after processing all outputs, the transaction is considered invalid
@@ -843,7 +839,8 @@ impl FilledTransaction {
         let mut output_lp_token_total_amounts =
             self.output_lp_token_total_amounts().peekable();
 
-        let outputs = self.outputs()
+        let outputs = self
+            .outputs()
             .iter()
             .map(|output| {
                 let content = match output.content.clone() {
@@ -906,4 +903,3 @@ impl From<Authorized<FilledTransaction>> for AuthorizedTransaction {
         }
     }
 }
-

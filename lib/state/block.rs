@@ -3,19 +3,19 @@
 //! Handles atomic state transitions for all transaction types including
 //! UTXO management, market operations, slot transitions, and LMSR calculations.
 
-use std::collections::{HashMap, HashSet};
 use ndarray::{Array, Ix1};
+use std::collections::{HashMap, HashSet};
 
 use sneed::{RoTxn, RwTxn};
 
 use crate::{
-    math::lmsr::{Lmsr, LmsrState, LmsrError},
-    state::{Error, State, UtxoManager, error, markets::{MarketId}},
+    math::lmsr::{Lmsr, LmsrError, LmsrState},
+    state::{Error, State, UtxoManager, error, markets::MarketId},
     types::{
-        AmountOverflowError, Authorization, Body, FilledOutput,
+        Address, AmountOverflowError, Authorization, Body, FilledOutput,
         FilledOutputContent, FilledTransaction, GetAddress as _,
         GetBitcoinValue as _, Header, InPoint, OutPoint, OutputContent,
-        SpentOutput, TxData, Verify as _, Address,
+        SpentOutput, TxData, Verify as _,
     },
 };
 
@@ -57,7 +57,6 @@ struct MarketCreation {
     height: u32,
 }
 
-
 impl StateUpdate {
     fn new() -> Self {
         Self {
@@ -67,9 +66,9 @@ impl StateUpdate {
             slot_changes: Vec::new(),
         }
     }
-    
+
     /// Verify the internal consistency of all collected changes
-    /// 
+    ///
     /// This validation ensures that all changes are mathematically sound
     /// and consistent with Bitcoin Hivemind specifications before application.
     fn verify_internal_consistency(&self) -> Result<(), Error> {
@@ -78,141 +77,207 @@ impl StateUpdate {
         for creation in &self.market_creations {
             if !created_market_ids.insert(creation.market.id.clone()) {
                 return Err(Error::InvalidSlotId {
-                    reason: format!("Duplicate market creation for ID: {:?}", creation.market.id),
+                    reason: format!(
+                        "Duplicate market creation for ID: {:?}",
+                        creation.market.id
+                    ),
                 });
             }
         }
-        
+
         for update in &self.market_updates {
             if created_market_ids.contains(&update.market_id) {
                 return Err(Error::InvalidSlotId {
-                    reason: format!("Market {:?} cannot be both created and updated in same block", update.market_id),
+                    reason: format!(
+                        "Market {:?} cannot be both created and updated in same block",
+                        update.market_id
+                    ),
                 });
             }
         }
-        
+
         // Verify share account changes are balanced (total shares conserved)
-        for ((address, market_id), outcome_changes) in &self.share_account_changes {
+        for ((address, market_id), outcome_changes) in
+            &self.share_account_changes
+        {
             let _total_delta: f64 = outcome_changes.values().sum();
             // For now, just verify no individual change is infinite or NaN
             for &delta in outcome_changes.values() {
                 if !delta.is_finite() {
                     return Err(Error::InvalidSlotId {
-                        reason: format!("Invalid share delta for address {:?} market {:?}: {}", address, market_id, delta),
+                        reason: format!(
+                            "Invalid share delta for address {:?} market {:?}: {}",
+                            address, market_id, delta
+                        ),
                     });
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Validate all collected state changes before applying
-    fn validate_all_changes(&self, state: &State, rotxn: &RoTxn) -> Result<(), Error> {
+    fn validate_all_changes(
+        &self,
+        state: &State,
+        rotxn: &RoTxn,
+    ) -> Result<(), Error> {
         // First verify internal consistency
         self.verify_internal_consistency()?;
-        
+
         // Validate market updates with comprehensive LMSR constraints
         for update in &self.market_updates {
             if let Some(ref shares) = update.new_shares {
                 if let Some(beta) = update.new_beta {
-                    validate_lmsr_params(beta, shares)
-                        .map_err(|e| Error::InvalidSlotId {
+                    validate_lmsr_params(beta, shares).map_err(|e| {
+                        Error::InvalidSlotId {
                             reason: format!("LMSR validation failed: {:?}", e),
-                        })?;
+                        }
+                    })?;
                 }
             }
-            
+
             // Ensure market exists
-            if state.markets().get_market(rotxn, &update.market_id)?.is_none() {
+            if state
+                .markets()
+                .get_market(rotxn, &update.market_id)?
+                .is_none()
+            {
                 return Err(Error::InvalidSlotId {
-                    reason: format!("Market {:?} does not exist", update.market_id),
+                    reason: format!(
+                        "Market {:?} does not exist",
+                        update.market_id
+                    ),
                 });
             }
         }
-        
+
         // Validate market creations
         for creation in &self.market_creations {
             // Validate market doesn't already exist
-            if state.markets().get_market(rotxn, &creation.market.id)?.is_some() {
+            if state
+                .markets()
+                .get_market(rotxn, &creation.market.id)?
+                .is_some()
+            {
                 return Err(Error::InvalidSlotId {
-                    reason: format!("Market {:?} already exists", creation.market.id),
+                    reason: format!(
+                        "Market {:?} already exists",
+                        creation.market.id
+                    ),
                 });
             }
-            
+
             // Validate LMSR parameters for new market
-            validate_lmsr_params(creation.market.b(), &creation.market.shares())
-                .map_err(|e| Error::InvalidSlotId {
-                    reason: format!("Market creation LMSR validation failed: {:?}", e),
-                })?;
+            validate_lmsr_params(
+                creation.market.b(),
+                &creation.market.shares(),
+            )
+            .map_err(|e| Error::InvalidSlotId {
+                reason: format!(
+                    "Market creation LMSR validation failed: {:?}",
+                    e
+                ),
+            })?;
         }
-        
+
         // Validate slot changes
         for slot_change in &self.slot_changes {
             // Validate slot exists if updating
             if slot_change.new_decision.is_some() {
-                if state.slots().get_slot(rotxn, slot_change.slot_id)?.is_none() {
+                if state
+                    .slots()
+                    .get_slot(rotxn, slot_change.slot_id)?
+                    .is_none()
+                {
                     return Err(Error::InvalidSlotId {
-                        reason: format!("Slot {:?} does not exist", slot_change.slot_id),
+                        reason: format!(
+                            "Slot {:?} does not exist",
+                            slot_change.slot_id
+                        ),
                     });
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Apply all collected changes atomically
-    /// 
+    ///
     /// This method ensures that all state changes are applied in a single atomic transaction.
     /// If any operation fails, the entire transaction is rolled back, maintaining database consistency.
     /// The order of operations is carefully designed to handle dependencies correctly.
-    fn apply_all_changes(&self, state: &State, rwtxn: &mut RwTxn, height: u32) -> Result<(), Error> {
+    fn apply_all_changes(
+        &self,
+        state: &State,
+        rwtxn: &mut RwTxn,
+        height: u32,
+    ) -> Result<(), Error> {
         // Apply market creations first (order matters for dependencies)
         // Markets must exist before shares can be allocated or updated
         for creation in &self.market_creations {
             // Store market in database
-            state.markets().add_market(rwtxn, &creation.market)
+            state
+                .markets()
+                .add_market(rwtxn, &creation.market)
                 .map_err(|_| Error::InvalidSlotId {
                     reason: "Failed to store market in database".to_string(),
                 })?;
-            
+
             // Market shares start at zero according to LMSR specification
             // Initial liquidity is automatically calculated and built into the market treasury
         }
-        
+
         // Apply market updates with integrated LMSR calculations
         for update in &self.market_updates {
             if let Some(ref new_shares) = update.new_shares {
                 // Update market shares and recalculate treasury using integrated LMSR
-                let mut market = state.markets().get_market(rwtxn, &update.market_id)?
+                let mut market = state
+                    .markets()
+                    .get_market(rwtxn, &update.market_id)?
                     .ok_or_else(|| Error::InvalidSlotId {
-                        reason: format!("Market {:?} not found", update.market_id),
+                        reason: format!(
+                            "Market {:?} not found",
+                            update.market_id
+                        ),
                     })?;
-                
+
                 // Recalculate treasury with new shares using comprehensive LMSR
                 let new_treasury = calc_treasury(new_shares, market.b())
                     .map_err(|e| Error::InvalidSlotId {
                         reason: format!("Treasury calculation failed: {:?}", e),
                     })?;
-                
+
                 // Create new market state version instead of direct mutation
-                let _new_state_hash = market.create_new_state_version(
-                    update.transaction_id,
-                    height as u64,
-                    None, // Keep current market state
-                    None, // Keep current b
-                    None, // Keep current trading fee
-                    Some(new_shares.clone()),
-                    None, // Keep current final prices
-                    Some(new_treasury),
-                ).map_err(|e| Error::InvalidSlotId {
-                    reason: format!("Failed to create new market state: {:?}", e),
-                })?;
+                let _new_state_hash = market
+                    .create_new_state_version(
+                        update.transaction_id,
+                        height as u64,
+                        None, // Keep current market state
+                        None, // Keep current b
+                        None, // Keep current trading fee
+                        Some(new_shares.clone()),
+                        None, // Keep current final prices
+                        Some(new_treasury),
+                    )
+                    .map_err(|e| Error::InvalidSlotId {
+                        reason: format!(
+                            "Failed to create new market state: {:?}",
+                            e
+                        ),
+                    })?;
 
                 // Update volume if this is a trade
-                if let (Some(outcome_index), Some(volume_sats)) = (update.outcome_index, update.volume_sats) {
-                    market.update_trading_volume(outcome_index as usize, volume_sats)
+                if let (Some(outcome_index), Some(volume_sats)) =
+                    (update.outcome_index, update.volume_sats)
+                {
+                    market
+                        .update_trading_volume(
+                            outcome_index as usize,
+                            volume_sats,
+                        )
                         .map_err(|e| Error::InvalidSlotId {
                             reason: format!("Failed to update volume: {:?}", e),
                         })?;
@@ -220,36 +285,50 @@ impl StateUpdate {
 
                 // Update market in database
                 state.markets().update_market(rwtxn, &market)?;
-                
+
                 // Clear mempool shares now that they're confirmed in block
                 state.clear_mempool_shares(rwtxn, &update.market_id)?;
-                
+
                 // Update trader's share account if applicable
-                if let (Some(trader), Some(cost)) = (&update.trader_address, update.trade_cost) {
+                if let (Some(trader), Some(cost)) =
+                    (&update.trader_address, update.trade_cost)
+                {
                     // The specific outcome and amount would be determined by the trade logic
                     // This is a simplified version - actual implementation would track specific outcomes
                     let _ = (trader, cost); // Placeholder for actual share account updates
                 }
             }
         }
-        
+
         // Apply share account changes
-        for ((address, market_id), outcome_changes) in &self.share_account_changes {
+        for ((address, market_id), outcome_changes) in
+            &self.share_account_changes
+        {
             for (&outcome_index, &share_delta) in outcome_changes {
                 if share_delta != 0.0 {
                     if share_delta > 0.0 {
                         state.markets().add_shares_to_account(
-                            rwtxn, address, market_id.clone(), outcome_index, share_delta, 0
+                            rwtxn,
+                            address,
+                            market_id.clone(),
+                            outcome_index,
+                            share_delta,
+                            0,
                         )?;
                     } else {
                         state.markets().remove_shares_from_account(
-                            rwtxn, address, market_id, outcome_index, -share_delta, 0
+                            rwtxn,
+                            address,
+                            market_id,
+                            outcome_index,
+                            -share_delta,
+                            0,
                         )?;
                     }
                 }
             }
         }
-        
+
         // Apply slot changes with integrated state management
         for slot_change in &self.slot_changes {
             if let Some(ref _decision) = slot_change.new_decision {
@@ -257,15 +336,20 @@ impl StateUpdate {
                 // If a decision needs to be updated, it means a new claim is being processed
                 // The actual claim processing happens during individual transaction processing
                 // but we can validate the slot exists and is in proper state
-                if let Some(slot) = state.slots().get_slot(rwtxn, slot_change.slot_id)? {
+                if let Some(slot) =
+                    state.slots().get_slot(rwtxn, slot_change.slot_id)?
+                {
                     if slot.decision.is_some() {
                         return Err(Error::InvalidSlotId {
-                            reason: format!("Slot {:?} already has a decision", slot_change.slot_id),
+                            reason: format!(
+                                "Slot {:?} already has a decision",
+                                slot_change.slot_id
+                            ),
                         });
                     }
                 }
             }
-            
+
             // Handle period transitions for slot state management
             if let Some(new_period) = slot_change.period_transition {
                 // Period transitions are handled by the slot minting system
@@ -273,38 +357,44 @@ impl StateUpdate {
                 let current_period = slot_change.slot_id.period_index();
                 if new_period <= current_period {
                     return Err(Error::InvalidSlotId {
-                        reason: format!("Invalid period transition from {} to {}", current_period, new_period),
+                        reason: format!(
+                            "Invalid period transition from {} to {}",
+                            current_period, new_period
+                        ),
                     });
                 }
                 // The actual period transitions are managed by the slot minting system
                 // during block connection, so this is primarily for validation
             }
         }
-        
-        
+
         Ok(())
     }
-    
+
     /// Add a market update to the collected changes
     fn add_market_update(&mut self, update: MarketStateUpdate) {
         self.market_updates.push(update);
     }
-    
+
     /// Add share account changes
-    fn add_share_account_change(&mut self, address: Address, market_id: MarketId, outcome: u32, delta: f64) {
+    fn add_share_account_change(
+        &mut self,
+        address: Address,
+        market_id: MarketId,
+        outcome: u32,
+        delta: f64,
+    ) {
         self.share_account_changes
             .entry((address, market_id))
             .or_insert_with(HashMap::new)
             .insert(outcome, delta);
     }
-    
-    
+
     /// Add market creation to the collected changes
     fn add_market_creation(&mut self, creation: MarketCreation) {
         self.market_creations.push(creation);
     }
 }
-
 
 /// Calculate treasury using LMSR with actual market size.
 ///
@@ -318,7 +408,10 @@ impl StateUpdate {
 /// # Returns
 /// * `Ok(treasury)` - Calculated treasury value
 /// * `Err(LmsrError)` - LMSR calculation error
-fn calc_treasury(shares: &Array<f64, Ix1>, beta: f64) -> Result<f64, LmsrError> {
+fn calc_treasury(
+    shares: &Array<f64, Ix1>,
+    beta: f64,
+) -> Result<f64, LmsrError> {
     // Create LMSR with actual market size instead of hardcoded 256
     // This ensures proper validation and calculation for markets of any size
     let lmsr = Lmsr::new(shares.len());
@@ -329,7 +422,10 @@ fn calc_treasury(shares: &Array<f64, Ix1>, beta: f64) -> Result<f64, LmsrError> 
 ///
 /// Creates an LMSR validator with the correct market size to ensure
 /// proper validation according to Bitcoin Hivemind specifications.
-fn validate_lmsr_params(beta: f64, shares: &Array<f64, Ix1>) -> Result<(), LmsrError> {
+fn validate_lmsr_params(
+    beta: f64,
+    shares: &Array<f64, Ix1>,
+) -> Result<(), LmsrError> {
     let state = LmsrState {
         beta,
         shares: shares.clone(),
@@ -354,10 +450,10 @@ fn query_update_cost(
             max: current_shares.len(),
         });
     }
-    
+
     let current_cost = calc_treasury(current_shares, beta)?;
     let new_cost = calc_treasury(new_shares, beta)?;
-    
+
     Ok(new_cost - current_cost)
 }
 
@@ -436,28 +532,28 @@ pub fn validate(
 }
 
 /// Connect a block as the single source of truth for all state transitions
-/// 
+///
 /// This function serves as the authoritative implementation for all state changes
 /// within a block, processing UTXO updates, market operations with LMSR calculations,
 /// slot transitions, and database persistence atomically.
-/// 
+///
 /// # Block State Management Architecture
 /// - All transaction types processed within block state
 /// - LMSR calculations integrated directly into block processing  
 /// - Database state maintained in perfect sync with blockchain state
 /// - Atomic operations ensure consistency across all state components
-/// 
+///
 /// # Arguments
 /// * `state` - Blockchain state (authoritative source)
 /// * `rwtxn` - Database write transaction for atomic persistence
 /// * `header` - Block header with validation data
 /// * `body` - Block body containing all transactions
 /// * `mainchain_timestamp` - Bitcoin timestamp for period calculations
-/// 
+///
 /// # Returns
 /// * `Ok(())` - Successful atomic block connection
 /// * `Err(Error)` - Connection failure with automatic rollback
-/// 
+///
 /// # Bitcoin Hivemind Compliance
 /// Implements atomic block connection per whitepaper specifications for
 /// concurrent operations and mathematical precision requirements.
@@ -524,35 +620,70 @@ pub fn connect(
             content: filled_content,
             memo: output.memo.clone(),
         };
-        state.insert_utxo_with_address_index(rwtxn, &outpoint, &filled_output)?;
+        state.insert_utxo_with_address_index(
+            rwtxn,
+            &outpoint,
+            &filled_output,
+        )?;
     }
     // Phase 1: Transaction Processing and State Validation
     // All transaction types are processed within the collected block state management
     // ensuring atomic operations and perfect database-to-blockchain alignment
     let mut state_update = StateUpdate::new();
     let mut filled_transactions = Vec::new();
-    
+
     // Process all transactions through state management
     for transaction in &body.transactions {
         let filled_tx = state.fill_transaction(rwtxn, transaction)?;
         filled_transactions.push(filled_tx.clone());
-        
+
         // Process all transaction types within block state
         match &transaction.data {
             Some(TxData::BuyShares { .. }) => {
-                apply_market_trade(state, rwtxn, &filled_tx, &mut state_update, height)?;
+                apply_market_trade(
+                    state,
+                    rwtxn,
+                    &filled_tx,
+                    &mut state_update,
+                    height,
+                )?;
             }
             Some(TxData::CreateMarket { .. }) => {
-                apply_market_creation(state, rwtxn, &filled_tx, &mut state_update, height)?;
+                apply_market_creation(
+                    state,
+                    rwtxn,
+                    &filled_tx,
+                    &mut state_update,
+                    height,
+                )?;
             }
             Some(TxData::CreateMarketDimensional { .. }) => {
-                apply_dimensional_market(state, rwtxn, &filled_tx, &mut state_update, height)?;
+                apply_dimensional_market(
+                    state,
+                    rwtxn,
+                    &filled_tx,
+                    &mut state_update,
+                    height,
+                )?;
             }
             Some(TxData::RedeemShares { .. }) => {
-                apply_share_redemption(state, rwtxn, &filled_tx, &mut state_update, height)?;
+                apply_share_redemption(
+                    state,
+                    rwtxn,
+                    &filled_tx,
+                    &mut state_update,
+                    height,
+                )?;
             }
             Some(TxData::ClaimDecisionSlot { .. }) => {
-                apply_slot_claim(state, rwtxn, &filled_tx, &mut state_update, height, mainchain_timestamp)?;
+                apply_slot_claim(
+                    state,
+                    rwtxn,
+                    &filled_tx,
+                    &mut state_update,
+                    height,
+                    mainchain_timestamp,
+                )?;
             }
             Some(TxData::SubmitVote { .. }) => {
                 // TODO: Implement voting system integration
@@ -575,10 +706,10 @@ pub fn connect(
             }
         }
     }
-    
+
     // Validate all collected state changes
     state_update.validate_all_changes(state, rwtxn)?;
-    
+
     // Apply all validated state changes atomically
 
     // Apply state changes first (these can fail with detailed error handling)
@@ -588,14 +719,13 @@ pub fn connect(
     for filled_tx in &filled_transactions {
         apply_utxo_changes(state, rwtxn, filled_tx)?;
     }
-    
+
     let block_hash = header.hash();
     state.tip.put(rwtxn, &(), &block_hash)?;
     state.height.put(rwtxn, &(), &height)?;
     state
         .mainchain_timestamp
         .put(rwtxn, &(), &mainchain_timestamp)?;
-
 
     Ok(())
 }
@@ -639,7 +769,8 @@ pub fn disconnect_tip(
                 let () = revert_create_market(state, rwtxn, &filled_tx)?;
             }
             Some(TxData::CreateMarketDimensional { .. }) => {
-                let () = revert_create_market_dimensional(state, rwtxn, &filled_tx)?;
+                let () =
+                    revert_create_market_dimensional(state, rwtxn, &filled_tx)?;
             }
             Some(TxData::BuyShares { .. }) => {
                 let () = revert_buy_shares(state, rwtxn, &filled_tx)?;
@@ -682,7 +813,11 @@ pub fn disconnect_tip(
         tx.inputs.iter().rev().try_for_each(|outpoint| {
             if let Some(spent_output) = state.stxos.try_get(rwtxn, outpoint)? {
                 state.stxos.delete(rwtxn, outpoint)?;
-                state.insert_utxo_with_address_index(rwtxn, outpoint, &spent_output.output)?;
+                state.insert_utxo_with_address_index(
+                    rwtxn,
+                    outpoint,
+                    &spent_output.output,
+                )?;
                 Ok(())
             } else {
                 Err(Error::NoStxo {
@@ -787,11 +922,15 @@ fn revert_claim_decision_slot(
 }
 
 /// Extract creator address from transaction's first spent UTXO
-/// 
+///
 /// This is a common validation step for market creation transactions as per
 /// Bitcoin Hivemind whitepaper specifications.
-fn extract_creator_address(filled_tx: &FilledTransaction) -> Result<crate::types::Address, Error> {
-    filled_tx.spent_utxos.first()
+fn extract_creator_address(
+    filled_tx: &FilledTransaction,
+) -> Result<crate::types::Address, Error> {
+    filled_tx
+        .spent_utxos
+        .first()
         .map(|utxo| utxo.address)
         .ok_or_else(|| Error::InvalidSlotId {
             reason: "No spent UTXOs found".to_string(),
@@ -799,7 +938,7 @@ fn extract_creator_address(filled_tx: &FilledTransaction) -> Result<crate::types
 }
 
 /// Configure common market builder fields from market data
-/// 
+///
 /// This consolidates the common pattern of setting optional fields on MarketBuilder
 /// instances, following the DRY principle while maintaining Hivemind specification compliance.
 fn configure_market_builder(
@@ -818,16 +957,16 @@ fn configure_market_builder(
     }
 
     builder = builder.with_beta(b);
-    
+
     if let Some(fee) = trading_fee {
         builder = builder.with_fee(fee);
     }
-    
+
     builder
 }
 
 /// Store market in database with consistent error handling
-/// 
+///
 /// This provides a standardized way to store markets in the database while
 /// maintaining consistent error reporting across all market creation types.
 // Old collect_market_trade function removed - now using apply_market_trade
@@ -851,7 +990,7 @@ fn revert_create_market_dimensional(
 }
 
 /// Apply a share redemption transaction according to Bitcoin Hivemind whitepaper
-/// 
+///
 /// This function validates the redemption transaction and processes it for a resolved market.
 /// Users can redeem their shares for Bitcoin based on the final market resolution.
 /// The transaction data contains the market ID, outcome index, and share amount.
@@ -861,17 +1000,21 @@ fn apply_redeem_shares(
     filled_tx: &FilledTransaction,
     height: u32,
 ) -> Result<(), Error> {
-    let redeem_data = filled_tx.redeem_shares().ok_or_else(|| {
-        Error::InvalidSlotId {
-            reason: "Not a redeem shares transaction".to_string(),
-        }
-    })?;
+    let redeem_data =
+        filled_tx
+            .redeem_shares()
+            .ok_or_else(|| Error::InvalidSlotId {
+                reason: "Not a redeem shares transaction".to_string(),
+            })?;
 
     // Get the address from the transaction authorization
-    let trader_address = filled_tx.spent_utxos.first()
+    let trader_address = filled_tx
+        .spent_utxos
+        .first()
         .ok_or_else(|| Error::InvalidSlotId {
             reason: "Redeem shares transaction must have inputs".to_string(),
-        })?.address;
+        })?
+        .address;
 
     // Apply the redemption to the market
     state.markets().apply_share_redemption(
@@ -887,7 +1030,7 @@ fn apply_redeem_shares(
 }
 
 /// Revert a share buy transaction
-/// 
+///
 /// This function reverts a previously applied buy transaction by applying
 /// the inverse operation (selling the same amount of shares).
 fn revert_buy_shares(
@@ -895,17 +1038,19 @@ fn revert_buy_shares(
     rwtxn: &mut RwTxn,
     filled_tx: &FilledTransaction,
 ) -> Result<(), Error> {
-    let buy_data = filled_tx.buy_shares().ok_or_else(|| {
-        Error::InvalidSlotId {
+    let buy_data =
+        filled_tx.buy_shares().ok_or_else(|| Error::InvalidSlotId {
             reason: "Not a buy shares transaction".to_string(),
-        }
-    })?;
+        })?;
 
     // Get the address from the transaction authorization
-    let trader_address = filled_tx.spent_utxos.first()
+    let trader_address = filled_tx
+        .spent_utxos
+        .first()
         .ok_or_else(|| Error::InvalidSlotId {
             reason: "Buy shares transaction must have inputs".to_string(),
-        })?.address;
+        })?
+        .address;
 
     // Get current height for reversion
     let height = state.try_get_height(rwtxn)?.unwrap_or(0);
@@ -924,7 +1069,7 @@ fn revert_buy_shares(
 }
 
 /// Revert a share redemption transaction
-/// 
+///
 /// This function reverts a previously applied share redemption by restoring
 /// the user's shares and removing the Bitcoin payout.
 fn revert_redeem_shares(
@@ -932,17 +1077,21 @@ fn revert_redeem_shares(
     rwtxn: &mut RwTxn,
     filled_tx: &FilledTransaction,
 ) -> Result<(), Error> {
-    let redeem_data = filled_tx.redeem_shares().ok_or_else(|| {
-        Error::InvalidSlotId {
-            reason: "Not a redeem shares transaction".to_string(),
-        }
-    })?;
+    let redeem_data =
+        filled_tx
+            .redeem_shares()
+            .ok_or_else(|| Error::InvalidSlotId {
+                reason: "Not a redeem shares transaction".to_string(),
+            })?;
 
     // Get the address from the transaction authorization
-    let trader_address = filled_tx.spent_utxos.first()
+    let trader_address = filled_tx
+        .spent_utxos
+        .first()
         .ok_or_else(|| Error::InvalidSlotId {
             reason: "Redeem shares transaction must have inputs".to_string(),
-        })?.address;
+        })?
+        .address;
 
     // Get current height for reversion
     let height = state.try_get_height(rwtxn)?.unwrap_or(0);
@@ -960,10 +1109,8 @@ fn revert_redeem_shares(
     Ok(())
 }
 
-
-
 /// Apply UTXO changes with state management
-/// 
+///
 /// This function consolidates all UTXO operations within the single source of truth
 /// approach, ensuring atomic updates to both primary UTXO database and address index.
 fn apply_utxo_changes(
@@ -972,7 +1119,7 @@ fn apply_utxo_changes(
     filled_tx: &FilledTransaction,
 ) -> Result<(), Error> {
     let txid = filled_tx.txid();
-    
+
     // Process inputs (spending UTXOs)
     for (vin, input) in filled_tx.inputs().iter().enumerate() {
         let spent_output = state
@@ -989,7 +1136,7 @@ fn apply_utxo_changes(
         state.delete_utxo_with_address_index(rwtxn, input)?;
         state.stxos.put(rwtxn, input, &spent_output)?;
     }
-    
+
     // Process outputs (creating new UTXOs)
     let Some(filled_outputs) = filled_tx.filled_outputs() else {
         let err = error::FillTxOutputContents(Box::new(filled_tx.clone()));
@@ -1000,14 +1147,18 @@ fn apply_utxo_changes(
             txid,
             vout: vout as u32,
         };
-        state.insert_utxo_with_address_index(rwtxn, &outpoint, filled_output)?;
+        state.insert_utxo_with_address_index(
+            rwtxn,
+            &outpoint,
+            filled_output,
+        )?;
     }
-    
+
     Ok(())
 }
 
 /// Apply market trade with LMSR calculations
-/// 
+///
 /// This function integrates LMSR mathematical operations directly into block processing,
 /// ensuring atomic market state updates aligned with Bitcoin Hivemind specifications.
 fn apply_market_trade(
@@ -1017,14 +1168,15 @@ fn apply_market_trade(
     state_update: &mut StateUpdate,
     _height: u32,
 ) -> Result<(), Error> {
-    let buy_data = filled_tx.buy_shares().ok_or_else(|| {
-        Error::InvalidSlotId {
+    let buy_data =
+        filled_tx.buy_shares().ok_or_else(|| Error::InvalidSlotId {
             reason: "Not a buy shares transaction".to_string(),
-        }
-    })?;
+        })?;
 
     // Get current market for LMSR calculations
-    let market = state.markets().get_market(rwtxn, &MarketId::new(buy_data.market_id))?
+    let market = state
+        .markets()
+        .get_market(rwtxn, &MarketId::new(buy_data.market_id))?
         .ok_or_else(|| Error::InvalidSlotId {
             reason: format!("Market {:?} does not exist", buy_data.market_id),
         })?;
@@ -1039,27 +1191,34 @@ fn apply_market_trade(
     // Calculate new share quantities using integrated LMSR
     let mut new_shares = market.shares().clone();
     new_shares[buy_data.outcome_index as usize] += buy_data.shares_to_buy;
-    
+
     // Calculate trade cost using comprehensive LMSR calculator
-    let trade_cost = query_update_cost(&market.shares(), &new_shares, market.b())
-        .map_err(|e| Error::InvalidSlotId {
-            reason: format!("Failed to calculate trade cost: {:?}", e),
-        })?;
-    
+    let trade_cost =
+        query_update_cost(&market.shares(), &new_shares, market.b()).map_err(
+            |e| Error::InvalidSlotId {
+                reason: format!("Failed to calculate trade cost: {:?}", e),
+            },
+        )?;
+
     // Validate cost constraints
     if trade_cost > buy_data.max_cost as f64 {
         return Err(Error::InvalidSlotId {
-            reason: format!("Trade cost {} exceeds max cost {}", trade_cost, buy_data.max_cost),
+            reason: format!(
+                "Trade cost {} exceeds max cost {}",
+                trade_cost, buy_data.max_cost
+            ),
         });
     }
-    
+
     // Get trader address
-    let trader_address = filled_tx.spent_utxos.first()
+    let trader_address = filled_tx
+        .spent_utxos
+        .first()
         .map(|utxo| utxo.address)
         .ok_or_else(|| Error::InvalidSlotId {
             reason: "No spent UTXOs found for trade".to_string(),
         })?;
-    
+
     // Calculate volume in sats (including fees)
     let volume_sats = trade_cost.ceil() as u64;
 
@@ -1074,7 +1233,7 @@ fn apply_market_trade(
         outcome_index: Some(buy_data.outcome_index),
         volume_sats: Some(volume_sats),
     });
-    
+
     // Add share account change
     state_update.add_share_account_change(
         trader_address,
@@ -1082,7 +1241,7 @@ fn apply_market_trade(
         buy_data.outcome_index,
         buy_data.shares_to_buy,
     );
-    
+
     Ok(())
 }
 
@@ -1094,14 +1253,15 @@ fn apply_market_creation(
     state_update: &mut StateUpdate,
     height: u32,
 ) -> Result<(), Error> {
-    use std::collections::HashMap;
     use crate::state::{MarketBuilder, slots::SlotId};
+    use std::collections::HashMap;
 
-    let market_data = filled_tx.create_market().ok_or_else(|| {
-        Error::InvalidSlotId {
-            reason: "Not a market creation transaction".to_string(),
-        }
-    })?;
+    let market_data =
+        filled_tx
+            .create_market()
+            .ok_or_else(|| Error::InvalidSlotId {
+                reason: "Not a market creation transaction".to_string(),
+            })?;
 
     // Get creator address using common helper
     let creator_address = extract_creator_address(filled_tx)?;
@@ -1109,32 +1269,33 @@ fn apply_market_creation(
     // Parse and collect decision slot data
     let mut slot_ids = Vec::new();
     let mut decisions = HashMap::new();
-    
+
     for slot_hex in &market_data.decision_slots {
-        let slot_bytes = hex::decode(slot_hex)
-            .map_err(|_| Error::InvalidSlotId {
+        let slot_bytes =
+            hex::decode(slot_hex).map_err(|_| Error::InvalidSlotId {
                 reason: format!("Invalid slot ID hex: {}", slot_hex),
             })?;
-        
+
         let slot_id_array: [u8; 3] = slot_bytes.try_into().unwrap();
         let slot_id = SlotId::from_bytes(slot_id_array)?;
-        
-        let slot = state.slots.get_slot(rwtxn, slot_id)?
-            .ok_or_else(|| Error::InvalidSlotId {
+
+        let slot = state.slots.get_slot(rwtxn, slot_id)?.ok_or_else(|| {
+            Error::InvalidSlotId {
                 reason: format!("Slot {} does not exist", slot_hex),
-            })?;
-        
-        let decision = slot.decision
-            .ok_or_else(|| Error::InvalidSlotId {
-                reason: format!("Slot {} has no decision", slot_hex),
-            })?;
-            
+            }
+        })?;
+
+        let decision = slot.decision.ok_or_else(|| Error::InvalidSlotId {
+            reason: format!("Slot {} has no decision", slot_hex),
+        })?;
+
         slot_ids.push(slot_id);
         decisions.insert(slot_id, decision);
     }
 
     // Build market using common helper
-    let mut builder = MarketBuilder::new(market_data.title.clone(), creator_address);
+    let mut builder =
+        MarketBuilder::new(market_data.title.clone(), creator_address);
     builder = configure_market_builder(
         builder,
         &market_data.description,
@@ -1145,18 +1306,28 @@ fn apply_market_creation(
 
     let mut builder = match market_data.market_type.as_str() {
         "independent" => builder.add_decisions(slot_ids),
-        "categorical" => builder.set_categorical(slot_ids, market_data.has_residual.unwrap_or(false)),
-        _ => return Err(Error::InvalidSlotId {
-            reason: format!("Invalid market type: {}", market_data.market_type),
-        }),
+        "categorical" => builder.set_categorical(
+            slot_ids,
+            market_data.has_residual.unwrap_or(false),
+        ),
+        _ => {
+            return Err(Error::InvalidSlotId {
+                reason: format!(
+                    "Invalid market type: {}",
+                    market_data.market_type
+                ),
+            });
+        }
     };
 
     // Initial liquidity is now calculated automatically based on beta parameter
 
-    let market = builder.build(height as u64, None, &decisions)
-        .map_err(|e| Error::InvalidSlotId {
-            reason: format!("Market creation failed: {}", e),
-        })?;
+    let market =
+        builder
+            .build(height as u64, None, &decisions)
+            .map_err(|e| Error::InvalidSlotId {
+                reason: format!("Market creation failed: {}", e),
+            })?;
 
     // Add to collected changes instead of direct application
     state_update.add_market_creation(MarketCreation {
@@ -1164,7 +1335,7 @@ fn apply_market_creation(
         creator_address,
         height,
     });
-    
+
     Ok(())
 }
 
@@ -1176,22 +1347,29 @@ fn apply_dimensional_market(
     state_update: &mut StateUpdate,
     height: u32,
 ) -> Result<(), Error> {
+    use crate::state::{
+        MarketBuilder,
+        markets::{DimensionSpec, parse_dimensions},
+    };
     use std::collections::HashMap;
-    use crate::state::{MarketBuilder, markets::{parse_dimensions, DimensionSpec}};
 
-    let market_data = filled_tx.create_market_dimensional().ok_or_else(|| {
-        Error::InvalidSlotId {
-            reason: "Not a dimensional market creation transaction".to_string(),
-        }
-    })?;
+    let market_data =
+        filled_tx.create_market_dimensional().ok_or_else(|| {
+            Error::InvalidSlotId {
+                reason: "Not a dimensional market creation transaction"
+                    .to_string(),
+            }
+        })?;
 
     // Get creator address using common helper
     let creator_address = extract_creator_address(filled_tx)?;
 
     // Parse dimension specification
-    let dimension_specs = parse_dimensions(&market_data.dimensions)
-        .map_err(|_| Error::InvalidSlotId {
-            reason: "Failed to parse dimension specification".to_string(),
+    let dimension_specs =
+        parse_dimensions(&market_data.dimensions).map_err(|_| {
+            Error::InvalidSlotId {
+                reason: "Failed to parse dimension specification".to_string(),
+            }
         })?;
 
     // Collect all slot IDs and validate decisions exist
@@ -1201,24 +1379,27 @@ fn apply_dimensional_market(
             DimensionSpec::Single(slot_id) => vec![*slot_id],
             DimensionSpec::Categorical(slot_ids) => slot_ids.clone(),
         };
-        
+
         for slot_id in slot_ids {
-            let slot = state.slots.get_slot(rwtxn, slot_id)?
-                .ok_or_else(|| Error::InvalidSlotId {
-                    reason: format!("Slot {:?} does not exist", slot_id),
+            let slot =
+                state.slots.get_slot(rwtxn, slot_id)?.ok_or_else(|| {
+                    Error::InvalidSlotId {
+                        reason: format!("Slot {:?} does not exist", slot_id),
+                    }
                 })?;
-            
-            let decision = slot.decision
-                .ok_or_else(|| Error::InvalidSlotId {
+
+            let decision =
+                slot.decision.ok_or_else(|| Error::InvalidSlotId {
                     reason: format!("Slot {:?} has no decision", slot_id),
                 })?;
-                
+
             decisions.insert(slot_id, decision);
         }
     }
 
     // Build dimensional market using common helper
-    let mut builder = MarketBuilder::new(market_data.title.clone(), creator_address);
+    let mut builder =
+        MarketBuilder::new(market_data.title.clone(), creator_address);
     builder = configure_market_builder(
         builder,
         &market_data.description,
@@ -1232,10 +1413,12 @@ fn apply_dimensional_market(
 
     // Initial liquidity is now calculated automatically based on beta parameter
 
-    let market = builder.build(height as u64, None, &decisions)
-        .map_err(|e| Error::InvalidSlotId {
-            reason: format!("Dimensional market creation failed: {}", e),
-        })?;
+    let market =
+        builder
+            .build(height as u64, None, &decisions)
+            .map_err(|e| Error::InvalidSlotId {
+                reason: format!("Dimensional market creation failed: {}", e),
+            })?;
 
     // Add to collected changes instead of direct application
     state_update.add_market_creation(MarketCreation {
@@ -1243,7 +1426,7 @@ fn apply_dimensional_market(
         creator_address,
         height,
     });
-    
+
     Ok(())
 }
 
@@ -1259,7 +1442,6 @@ fn apply_share_redemption(
     apply_redeem_shares(state, rwtxn, filled_tx, height)
 }
 
-
 /// Apply slot claim with period transition handling
 fn apply_slot_claim(
     state: &State,
@@ -1270,6 +1452,11 @@ fn apply_slot_claim(
     mainchain_timestamp: u64,
 ) -> Result<(), Error> {
     // Use existing slot claim logic
-    apply_claim_decision_slot(state, rwtxn, filled_tx, mainchain_timestamp, height)
+    apply_claim_decision_slot(
+        state,
+        rwtxn,
+        filled_tx,
+        mainchain_timestamp,
+        height,
+    )
 }
-

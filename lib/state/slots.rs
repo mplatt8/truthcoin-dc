@@ -1,10 +1,10 @@
 use crate::state::Error;
+use crate::validation::{PeriodCalculator, SlotValidationInterface};
 use fallible_iterator::FallibleIterator;
 use heed::types::SerdeBincode;
 use serde::{Deserialize, Serialize};
-use sneed::{DatabaseUnique, Env, RwTxn, RoTxn};
+use sneed::{DatabaseUnique, Env, RoTxn, RwTxn};
 use std::collections::BTreeSet;
-use crate::validation::{PeriodCalculator, SlotValidationInterface};
 
 #[derive(
     Clone,
@@ -22,7 +22,7 @@ pub struct SlotId([u8; 3]);
 
 // Compile-time constants for efficient bit operations and bounds checking
 const MAX_PERIOD_INDEX: u32 = (1 << 10) - 1; // 1023
-const MAX_SLOT_INDEX: u32 = (1 << 14) - 1;   // 16383
+const MAX_SLOT_INDEX: u32 = (1 << 14) - 1; // 16383
 const STANDARD_SLOT_MAX: u32 = 499;
 const NONSTANDARD_SLOT_MIN: u32 = 500;
 
@@ -63,14 +63,18 @@ impl SlotId {
     #[inline(always)]
     pub const fn period_index(self) -> u32 {
         // Fast bit manipulation using const operations
-        let combined = ((self.0[0] as u32) << 16) | ((self.0[1] as u32) << 8) | (self.0[2] as u32);
+        let combined = ((self.0[0] as u32) << 16)
+            | ((self.0[1] as u32) << 8)
+            | (self.0[2] as u32);
         combined >> PERIOD_SHIFT
     }
 
     #[inline(always)]
     pub const fn slot_index(self) -> u32 {
         // Fast bit manipulation using const operations
-        let combined = ((self.0[0] as u32) << 16) | ((self.0[1] as u32) << 8) | (self.0[2] as u32);
+        let combined = ((self.0[0] as u32) << 16)
+            | ((self.0[1] as u32) << 8)
+            | (self.0[2] as u32);
         combined & SLOT_MASK
     }
 
@@ -80,7 +84,9 @@ impl SlotId {
 
     pub fn from_bytes(bytes: [u8; 3]) -> Result<Self, Error> {
         // Optimized bit manipulation without intermediate big-endian conversion
-        let combined = ((bytes[0] as u32) << 16) | ((bytes[1] as u32) << 8) | (bytes[2] as u32);
+        let combined = ((bytes[0] as u32) << 16)
+            | ((bytes[1] as u32) << 8)
+            | (bytes[2] as u32);
         let period = combined >> PERIOD_SHIFT;
         let index = combined & SLOT_MASK;
 
@@ -110,21 +116,25 @@ impl SlotId {
         // Fast path validation for common case (6 hex chars = 3 bytes)
         if slot_id_hex.len() != 6 {
             return Err(Error::InvalidSlotId {
-                reason: "Slot ID hex must be exactly 6 characters (3 bytes)".to_string(),
+                reason: "Slot ID hex must be exactly 6 characters (3 bytes)"
+                    .to_string(),
             });
         }
-        
+
         // Manual hex parsing can be faster than hex::decode for small fixed sizes
         let mut slot_id_bytes = [0u8; 3];
         for (i, chunk) in slot_id_hex.as_bytes().chunks_exact(2).enumerate() {
-            let hex_str = std::str::from_utf8(chunk)
-                .map_err(|_| Error::InvalidSlotId {
+            let hex_str = std::str::from_utf8(chunk).map_err(|_| {
+                Error::InvalidSlotId {
                     reason: "Invalid slot ID hex format".to_string(),
-                })?;
-            
-            slot_id_bytes[i] = u8::from_str_radix(hex_str, 16)
-                .map_err(|_| Error::InvalidSlotId {
-                    reason: "Invalid slot ID hex format".to_string(),
+                }
+            })?;
+
+            slot_id_bytes[i] =
+                u8::from_str_radix(hex_str, 16).map_err(|_| {
+                    Error::InvalidSlotId {
+                        reason: "Invalid slot ID hex format".to_string(),
+                    }
                 })?;
         }
 
@@ -136,7 +146,9 @@ impl SlotId {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Clone, Debug, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd,
+)]
 pub struct Decision {
     pub id: [u8; 32],
     pub market_maker_pubkey_hash: [u8; 20],
@@ -207,7 +219,9 @@ impl Decision {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Clone, Debug, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd,
+)]
 pub struct Slot {
     pub slot_id: SlotId,
     pub decision: Option<Decision>,
@@ -282,7 +296,10 @@ fn get_current_period(
 ) -> Result<u32, Error> {
     if config.testing_mode {
         let height = block_height.unwrap_or(0);
-        Ok(PeriodCalculator::block_height_to_testing_period(height, config.testing_blocks_per_period))
+        Ok(PeriodCalculator::block_height_to_testing_period(
+            height,
+            config.testing_blocks_per_period,
+        ))
     } else {
         Ok(PeriodCalculator::timestamp_to_period(timestamp))
     }
@@ -290,8 +307,10 @@ fn get_current_period(
 
 #[derive(Clone)]
 pub struct Dbs {
-    period_slots: DatabaseUnique<SerdeBincode<u32>, SerdeBincode<BTreeSet<Slot>>>,
-    claimed_slot_ids: DatabaseUnique<SerdeBincode<u32>, SerdeBincode<BTreeSet<SlotId>>>,
+    period_slots:
+        DatabaseUnique<SerdeBincode<u32>, SerdeBincode<BTreeSet<Slot>>>,
+    claimed_slot_ids:
+        DatabaseUnique<SerdeBincode<u32>, SerdeBincode<BTreeSet<SlotId>>>,
     config: SlotConfig,
 }
 
@@ -309,7 +328,11 @@ impl Dbs {
     ) -> Result<Self, Error> {
         Ok(Self {
             period_slots: DatabaseUnique::create(env, rwtxn, "period_slots")?,
-            claimed_slot_ids: DatabaseUnique::create(env, rwtxn, "claimed_slot_ids")?,
+            claimed_slot_ids: DatabaseUnique::create(
+                env,
+                rwtxn,
+                "claimed_slot_ids",
+            )?,
             config,
         })
     }
@@ -349,7 +372,8 @@ impl Dbs {
         }
 
         // Optimized calculation using const arithmetic
-        INITIAL_SLOTS_PER_PERIOD.saturating_sub((offset as u64) * SLOTS_DECLINING_RATE)
+        INITIAL_SLOTS_PER_PERIOD
+            .saturating_sub((offset as u64) * SLOTS_DECLINING_RATE)
     }
 
     pub fn mint_genesis(
@@ -396,7 +420,7 @@ impl Dbs {
             if self.period_slots.try_get(rwtxn, &period)?.is_none() {
                 let empty_period: BTreeSet<Slot> = BTreeSet::new();
                 self.period_slots.put(rwtxn, &period, &empty_period)?;
-                
+
                 // Initialize claimed_slot_ids for this period as well
                 let empty_claimed: BTreeSet<SlotId> = BTreeSet::new();
                 self.claimed_slot_ids.put(rwtxn, &period, &empty_claimed)?;
@@ -451,7 +475,10 @@ impl Dbs {
     }
 
     pub fn block_height_to_testing_period(&self, block_height: u32) -> u32 {
-        PeriodCalculator::block_height_to_testing_period(block_height, self.config.testing_blocks_per_period)
+        PeriodCalculator::block_height_to_testing_period(
+            block_height,
+            self.config.testing_blocks_per_period,
+        )
     }
 
     pub fn get_config(&self) -> &SlotConfig {
@@ -524,9 +551,9 @@ impl Dbs {
         let current_period =
             self.get_current_period(current_ts, current_height)?;
         let ossified_cutoff = current_period.saturating_sub(4);
-        
+
         let mut ossified_slots = Vec::new();
-        
+
         let mut iter = self.period_slots.iter(rotxn)?;
         while let Some((period, slots)) = iter.next()? {
             if period < ossified_cutoff {
@@ -534,7 +561,7 @@ impl Dbs {
                 ossified_slots.extend(slots.iter().cloned());
             }
         }
-        
+
         Ok(ossified_slots)
     }
 
@@ -657,11 +684,17 @@ impl Dbs {
         current_height: Option<u32>,
     ) -> Result<(), Error> {
         // Use the single source of truth for validation
-        self.validate_slot_claim(rwtxn, slot_id, &decision, current_ts, current_height)?;
+        self.validate_slot_claim(
+            rwtxn,
+            slot_id,
+            &decision,
+            current_ts,
+            current_height,
+        )?;
 
         // Now perform the actual claim using optimized BTreeSet operations
         let period_index = slot_id.period_index();
-        
+
         // Update period_slots with BTreeSet::insert (O(log n))
         let mut period_slots = self
             .period_slots
@@ -681,7 +714,8 @@ impl Dbs {
             .try_get(rwtxn, &period_index)?
             .unwrap_or_default();
         claimed_slots.insert(slot_id);
-        self.claimed_slot_ids.put(rwtxn, &period_index, &claimed_slots)?;
+        self.claimed_slot_ids
+            .put(rwtxn, &period_index, &claimed_slots)?;
 
         Ok(())
     }
@@ -699,12 +733,12 @@ impl Dbs {
                 slot_id,
                 decision: None,
             };
-            
+
             // BTreeSet search is O(log n) vs O(n) linear search
             if let Some(found_slot) = period_slots.get(&search_slot) {
                 return Ok(Some(found_slot.clone()));
             }
-            
+
             // If exact match not found, try to find slot with matching ID but different decision
             // This handles the case where the slot exists but has a decision
             for slot in period_slots.range(search_slot..) {
@@ -729,23 +763,23 @@ impl Dbs {
     ) -> Result<Vec<SlotId>, Error> {
         let total_slots =
             self.total_for(rotxn, period_index, current_ts, current_height)?;
-        
+
         let max_slot_index =
             std::cmp::min(total_slots, (STANDARD_SLOT_MAX + 1) as u64);
-        
+
         // Pre-allocate with known capacity to avoid reallocations
         let mut available_slots = Vec::with_capacity(max_slot_index as usize);
-        
+
         // Get claimed slots for this period once (O(log n) database lookup)
         let claimed_slots = self
             .claimed_slot_ids
             .try_get(rotxn, &period_index)?
             .unwrap_or_default();
-        
+
         // Efficient availability check using the claimed_slots index
         for slot_index in 0..max_slot_index {
             let slot_id = SlotId::new(period_index, slot_index as u32)?;
-            
+
             // O(log k) lookup where k = claimed slots in period, much faster than O(n) get_slot call
             if !claimed_slots.contains(&slot_id) {
                 available_slots.push(slot_id);
@@ -785,7 +819,7 @@ impl Dbs {
             .claimed_slot_ids
             .try_get(rotxn, &period_index)?
             .unwrap_or_default();
-        
+
         Ok(claimed_slots.len() as u64)
     }
 
@@ -852,25 +886,29 @@ impl Dbs {
 
         if let Some(slot_to_remove) = target_slot {
             period_slots.remove(&slot_to_remove);
-            
+
             // Also remove from claimed_slot_ids
             let mut claimed_slots = self
                 .claimed_slot_ids
                 .try_get(rwtxn, &period_index)?
                 .unwrap_or_default();
             claimed_slots.remove(&slot_id);
-            
+
             // Update both databases
             if period_slots.is_empty() {
                 self.period_slots.delete(rwtxn, &period_index)?;
             } else {
                 self.period_slots.put(rwtxn, &period_index, &period_slots)?;
             }
-            
+
             if claimed_slots.is_empty() {
                 self.claimed_slot_ids.delete(rwtxn, &period_index)?;
             } else {
-                self.claimed_slot_ids.put(rwtxn, &period_index, &claimed_slots)?;
+                self.claimed_slot_ids.put(
+                    rwtxn,
+                    &period_index,
+                    &claimed_slots,
+                )?;
             }
         } else {
             tracing::debug!(
@@ -893,7 +931,13 @@ impl SlotValidationInterface for Dbs {
         current_height: Option<u32>,
     ) -> Result<(), Error> {
         // Delegate to the optimized validation method
-        self.validate_slot_claim(rotxn, slot_id, decision, current_ts, current_height)
+        self.validate_slot_claim(
+            rotxn,
+            slot_id,
+            decision,
+            current_ts,
+            current_height,
+        )
     }
 
     fn try_get_height(&self, _rotxn: &RoTxn) -> Result<Option<u32>, Error> {

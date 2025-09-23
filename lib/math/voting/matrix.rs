@@ -53,20 +53,18 @@ impl MatrixPreprocessor {
                 // Fill with 0.5 (neutral value)
                 Ok(matrix.to_dense(0.5))
             }
-            ImputationMethod::VoterMean => {
-                Self::fill_with_voter_means(matrix)
-            }
+            ImputationMethod::VoterMean => Self::fill_with_voter_means(matrix),
             ImputationMethod::DecisionMean => {
                 Self::fill_with_decision_means(matrix)
             }
-            ImputationMethod::GlobalMean => {
-                Self::fill_with_global_mean(matrix)
-            }
+            ImputationMethod::GlobalMean => Self::fill_with_global_mean(matrix),
         }
     }
 
     /// Fill missing values with per-voter means
-    fn fill_with_voter_means(matrix: &SparseVoteMatrix) -> Result<Array2<f64>, VotingMathError> {
+    fn fill_with_voter_means(
+        matrix: &SparseVoteMatrix,
+    ) -> Result<Array2<f64>, VotingMathError> {
         let (num_voters, num_decisions) = matrix.dimensions();
         let mut dense = Array2::from_elem((num_voters, num_decisions), 0.5);
 
@@ -77,7 +75,8 @@ impl MatrixPreprocessor {
         for voter_id in &voters {
             let votes = matrix.get_voter_votes(*voter_id);
             if !votes.is_empty() {
-                let mean: f64 = votes.values().sum::<f64>() / votes.len() as f64;
+                let mean: f64 =
+                    votes.values().sum::<f64>() / votes.len() as f64;
                 voter_means.insert(*voter_id, mean);
             } else {
                 voter_means.insert(*voter_id, 0.5);
@@ -89,7 +88,8 @@ impl MatrixPreprocessor {
             let voter_mean = voter_means[voter_id];
             for j in 0..num_decisions {
                 if let Some(decision_id) = matrix.get_decisions().get(j) {
-                    if let Some(vote) = matrix.get_vote(*voter_id, *decision_id) {
+                    if let Some(vote) = matrix.get_vote(*voter_id, *decision_id)
+                    {
                         dense[[i, j]] = vote;
                     } else {
                         dense[[i, j]] = voter_mean;
@@ -102,7 +102,9 @@ impl MatrixPreprocessor {
     }
 
     /// Fill missing values with per-decision means
-    fn fill_with_decision_means(matrix: &SparseVoteMatrix) -> Result<Array2<f64>, VotingMathError> {
+    fn fill_with_decision_means(
+        matrix: &SparseVoteMatrix,
+    ) -> Result<Array2<f64>, VotingMathError> {
         let (num_voters, num_decisions) = matrix.dimensions();
         let mut dense = Array2::from_elem((num_voters, num_decisions), 0.5);
 
@@ -113,7 +115,8 @@ impl MatrixPreprocessor {
         for decision_id in &decisions {
             let votes = matrix.get_decision_votes(*decision_id);
             if !votes.is_empty() {
-                let mean: f64 = votes.values().sum::<f64>() / votes.len() as f64;
+                let mean: f64 =
+                    votes.values().sum::<f64>() / votes.len() as f64;
                 decision_means.insert(*decision_id, mean);
             } else {
                 decision_means.insert(*decision_id, 0.5);
@@ -136,9 +139,12 @@ impl MatrixPreprocessor {
     }
 
     /// Fill missing values with global mean
-    fn fill_with_global_mean(matrix: &SparseVoteMatrix) -> Result<Array2<f64>, VotingMathError> {
+    fn fill_with_global_mean(
+        matrix: &SparseVoteMatrix,
+    ) -> Result<Array2<f64>, VotingMathError> {
         // Calculate global mean of all votes
-        let all_votes: Vec<f64> = matrix.get_voters()
+        let all_votes: Vec<f64> = matrix
+            .get_voters()
             .iter()
             .flat_map(|voter_id| {
                 let votes = matrix.get_voter_votes(*voter_id);
@@ -169,23 +175,29 @@ impl MatrixPreprocessor {
     ) -> Result<Array2<f64>, VotingMathError> {
         match method {
             NormalizationMethod::None => Ok(matrix.clone()),
-            NormalizationMethod::StandardScore => Self::standardize_matrix(matrix),
+            NormalizationMethod::StandardScore => {
+                Self::standardize_matrix(matrix)
+            }
             NormalizationMethod::MinMax => Self::min_max_normalize(matrix),
-            NormalizationMethod::UnitVector => Self::unit_vector_normalize(matrix),
+            NormalizationMethod::UnitVector => {
+                Self::unit_vector_normalize(matrix)
+            }
         }
     }
 
     /// Standardize matrix to zero mean and unit variance
-    fn standardize_matrix(matrix: &Array2<f64>) -> Result<Array2<f64>, VotingMathError> {
+    fn standardize_matrix(
+        matrix: &Array2<f64>,
+    ) -> Result<Array2<f64>, VotingMathError> {
         let mut normalized = matrix.clone();
 
         // Standardize each column (decision) independently
         for mut column in normalized.columns_mut() {
             let mean = column.mean().unwrap_or(0.0);
             let std_dev = {
-                let variance = column.iter()
-                    .map(|x| (x - mean).powi(2))
-                    .sum::<f64>() / column.len() as f64;
+                let variance =
+                    column.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                        / column.len() as f64;
                 variance.sqrt()
             };
 
@@ -198,13 +210,16 @@ impl MatrixPreprocessor {
     }
 
     /// Normalize matrix to [0, 1] range
-    fn min_max_normalize(matrix: &Array2<f64>) -> Result<Array2<f64>, VotingMathError> {
+    fn min_max_normalize(
+        matrix: &Array2<f64>,
+    ) -> Result<Array2<f64>, VotingMathError> {
         let mut normalized = matrix.clone();
 
         // Normalize each column independently
         for mut column in normalized.columns_mut() {
             let min_val = column.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-            let max_val = column.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            let max_val =
+                column.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
             let range = max_val - min_val;
             if range > 1e-10 {
@@ -216,7 +231,9 @@ impl MatrixPreprocessor {
     }
 
     /// Normalize rows to unit vectors
-    fn unit_vector_normalize(matrix: &Array2<f64>) -> Result<Array2<f64>, VotingMathError> {
+    fn unit_vector_normalize(
+        matrix: &Array2<f64>,
+    ) -> Result<Array2<f64>, VotingMathError> {
         let mut normalized = matrix.clone();
 
         // Normalize each row (voter) independently
@@ -293,7 +310,8 @@ impl MatrixAnalyzer {
                 } else {
                     let col_i = matrix.column(i);
                     let col_j = matrix.column(j);
-                    correlation[[i, j]] = Self::pearson_correlation(&col_i, &col_j)?;
+                    correlation[[i, j]] =
+                        Self::pearson_correlation(&col_i, &col_j)?;
                 }
             }
         }
@@ -330,7 +348,8 @@ impl MatrixAnalyzer {
                 } else {
                     let row_i = matrix.row(i);
                     let row_j = matrix.row(j);
-                    correlation[[i, j]] = Self::pearson_correlation(&row_i, &row_j)?;
+                    correlation[[i, j]] =
+                        Self::pearson_correlation(&row_i, &row_j)?;
                 }
             }
         }
@@ -339,7 +358,16 @@ impl MatrixAnalyzer {
     }
 
     /// Calculate Pearson correlation coefficient between two vectors
-    fn pearson_correlation(x: &ndarray::ArrayBase<ndarray::ViewRepr<&f64>, ndarray::Dim<[usize; 1]>>, y: &ndarray::ArrayBase<ndarray::ViewRepr<&f64>, ndarray::Dim<[usize; 1]>>) -> Result<f64, VotingMathError> {
+    fn pearson_correlation(
+        x: &ndarray::ArrayBase<
+            ndarray::ViewRepr<&f64>,
+            ndarray::Dim<[usize; 1]>,
+        >,
+        y: &ndarray::ArrayBase<
+            ndarray::ViewRepr<&f64>,
+            ndarray::Dim<[usize; 1]>,
+        >,
+    ) -> Result<f64, VotingMathError> {
         if x.len() != y.len() || x.is_empty() {
             return Err(VotingMathError::DimensionMismatch {
                 expected: format!("{}", x.len()),
@@ -411,7 +439,10 @@ impl MatrixAnalyzer {
     /// # Bitcoin Hivemind Application
     /// Matrix rank indicates the dimensionality of the truth space and
     /// helps determine how many principal components are meaningful.
-    pub fn estimate_rank(matrix: &Array2<f64>, tolerance: f64) -> Result<usize, VotingMathError> {
+    pub fn estimate_rank(
+        matrix: &Array2<f64>,
+        tolerance: f64,
+    ) -> Result<usize, VotingMathError> {
         // This is a simplified rank estimation
         // In practice, we would use SVD for accurate rank calculation
         let (rows, cols) = matrix.dim();
@@ -600,7 +631,8 @@ impl ConsensusOps {
 
                 // Update reputation with learning rate
                 let current_rep = current_reputations[i];
-                new_reputations[i] = current_rep + learning_rate * (accuracy - current_rep);
+                new_reputations[i] =
+                    current_rep + learning_rate * (accuracy - current_rep);
 
                 // Clamp to [0, 1] range
                 new_reputations[i] = new_reputations[i].clamp(0.0, 1.0);
@@ -614,8 +646,8 @@ impl ConsensusOps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::voting::types::VoterId;
     use crate::state::slots::SlotId;
+    use crate::state::voting::types::VoterId;
     use crate::types::Address;
 
     fn create_test_sparse_matrix() -> SparseVoteMatrix {
@@ -625,10 +657,8 @@ mod tests {
             VoterId::from_address(&Address([3u8; 20])),
         ];
 
-        let decisions = vec![
-            SlotId::new(1, 0).unwrap(),
-            SlotId::new(1, 1).unwrap(),
-        ];
+        let decisions =
+            vec![SlotId::new(1, 0).unwrap(), SlotId::new(1, 1).unwrap()];
 
         let mut matrix = SparseVoteMatrix::new(voters, decisions);
 
@@ -654,7 +684,8 @@ mod tests {
         let dense = MatrixPreprocessor::fill_missing_values(
             &sparse_matrix,
             ImputationMethod::Neutral,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(dense[[0, 0]], 1.0); // voter1, decision1
         assert_eq!(dense[[0, 1]], 0.0); // voter1, decision2
@@ -667,7 +698,8 @@ mod tests {
         let dense_voter_mean = MatrixPreprocessor::fill_missing_values(
             &sparse_matrix,
             ImputationMethod::VoterMean,
-        ).unwrap();
+        )
+        .unwrap();
 
         // voter1's mean is (1.0 + 0.0) / 2 = 0.5
         // voter2 has only one vote (1.0), but missing values filled with 0.5 default
@@ -677,13 +709,15 @@ mod tests {
 
     #[test]
     fn test_normalization() {
-        let matrix = Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let matrix =
+            Array2::from_shape_vec((2, 2), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
 
         // Test min-max normalization
         let normalized = MatrixPreprocessor::normalize_matrix(
             &matrix,
             NormalizationMethod::MinMax,
-        ).unwrap();
+        )
+        .unwrap();
 
         // First column: [1, 3] -> [0, 1]
         // Second column: [2, 4] -> [0, 1]
@@ -695,12 +729,12 @@ mod tests {
 
     #[test]
     fn test_correlation_analysis() {
-        let matrix = Array2::from_shape_vec(
-            (3, 2),
-            vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0],
-        ).unwrap();
+        let matrix =
+            Array2::from_shape_vec((3, 2), vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0])
+                .unwrap();
 
-        let correlation = MatrixAnalyzer::decision_correlation_matrix(&matrix).unwrap();
+        let correlation =
+            MatrixAnalyzer::decision_correlation_matrix(&matrix).unwrap();
 
         // Perfect positive correlation between identical columns
         assert!((correlation[[0, 1]] - 1.0).abs() < 1e-10);
@@ -709,10 +743,13 @@ mod tests {
 
     #[test]
     fn test_reputation_weighting() {
-        let matrix = Array2::from_shape_vec((2, 2), vec![1.0, 0.0, 0.0, 1.0]).unwrap();
+        let matrix =
+            Array2::from_shape_vec((2, 2), vec![1.0, 0.0, 0.0, 1.0]).unwrap();
         let reputations = Array1::from_vec(vec![0.8, 0.2]);
 
-        let weighted = ConsensusOps::apply_reputation_weighting(&matrix, &reputations).unwrap();
+        let weighted =
+            ConsensusOps::apply_reputation_weighting(&matrix, &reputations)
+                .unwrap();
 
         // First voter's votes scaled by 0.8
         assert_eq!(weighted[[0, 0]], 0.8);
@@ -725,12 +762,12 @@ mod tests {
 
     #[test]
     fn test_consensus_calculation() {
-        let weighted_matrix = Array2::from_shape_vec(
-            (2, 2),
-            vec![0.8, 0.0, 0.0, 0.2],
-        ).unwrap();
+        let weighted_matrix =
+            Array2::from_shape_vec((2, 2), vec![0.8, 0.0, 0.0, 0.2]).unwrap();
 
-        let outcomes = ConsensusOps::calculate_weighted_consensus(&weighted_matrix).unwrap();
+        let outcomes =
+            ConsensusOps::calculate_weighted_consensus(&weighted_matrix)
+                .unwrap();
 
         // First decision: (0.8 + 0.0) / 2 = 0.4
         // Second decision: (0.0 + 0.2) / 2 = 0.1
@@ -740,7 +777,8 @@ mod tests {
 
     #[test]
     fn test_reputation_updates() {
-        let votes = Array2::from_shape_vec((2, 2), vec![1.0, 0.0, 1.0, 1.0]).unwrap();
+        let votes =
+            Array2::from_shape_vec((2, 2), vec![1.0, 0.0, 1.0, 1.0]).unwrap();
         let outcomes = Array1::from_vec(vec![1.0, 0.5]);
         let current_reputations = Array1::from_vec(vec![0.5, 0.5]);
 
@@ -749,7 +787,8 @@ mod tests {
             &outcomes,
             &current_reputations,
             0.1, // 10% learning rate
-        ).unwrap();
+        )
+        .unwrap();
 
         // First voter: perfect on decision 1, 0.5 error on decision 2
         // Second voter: perfect on decision 1, 0.5 error on decision 2
@@ -764,7 +803,8 @@ mod tests {
         let matrix = Array2::from_shape_vec(
             (3, 3),
             vec![1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 3.0, 6.0, 9.0],
-        ).unwrap();
+        )
+        .unwrap();
 
         let rank = MatrixAnalyzer::estimate_rank(&matrix, 1e-10).unwrap();
 

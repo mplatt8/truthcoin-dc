@@ -5,8 +5,8 @@ use std::{
 };
 
 use bitcoin::amount::CheckedSum as _;
-use bitcoin::merkle_tree;
 use bitcoin::hashes::Hash as _;
+use bitcoin::merkle_tree;
 use borsh::BorshSerialize;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
@@ -26,11 +26,11 @@ pub use address::Address;
 pub use hashes::{AssetId, BlockHash, Hash, M6id, MerkleRoot, Txid};
 pub use keys::{EncryptionPubKey, VerifyingKey};
 pub use transaction::{
-    AssetOutput, AssetOutputContent, Authorized,
-    AuthorizedTransaction, BitcoinOutput, BitcoinOutputContent,
-    ClaimDecisionSlot, CreateMarket, FilledOutput, FilledOutputContent, FilledTransaction,
-    InPoint, OutPoint, Output, OutputContent, PointedOutput, SpentOutput,
-    Transaction, TxData, TxInputs, WithdrawalOutputContent,
+    AssetOutput, AssetOutputContent, Authorized, AuthorizedTransaction,
+    BitcoinOutput, BitcoinOutputContent, ClaimDecisionSlot, CreateMarket,
+    FilledOutput, FilledOutputContent, FilledTransaction, InPoint, OutPoint,
+    Output, OutputContent, PointedOutput, SpentOutput, Transaction, TxData,
+    TxInputs, WithdrawalOutputContent,
 };
 
 pub const THIS_SIDECHAIN: u8 = 13;
@@ -359,27 +359,30 @@ impl Body {
         let tx_hashes: Vec<bitcoin::Txid> = std::iter::once(
             // Convert coinbase hash to Txid
             bitcoin::Txid::from_raw_hash(
-                bitcoin::hashes::Hash::from_byte_array(hashes::hash(&self.coinbase))
-            )
+                bitcoin::hashes::Hash::from_byte_array(hashes::hash(
+                    &self.coinbase,
+                )),
+            ),
         )
         .chain(
             // Convert transaction hashes to Txid
             self.transactions.iter().map(|tx| {
                 bitcoin::Txid::from_raw_hash(
-                    bitcoin::hashes::Hash::from_byte_array(tx.txid().into())
+                    bitcoin::hashes::Hash::from_byte_array(tx.txid().into()),
                 )
-            })
+            }),
         )
         .collect();
 
         // Use bitcoin crate's merkle tree calculation
         let merkle_root = merkle_tree::calculate_root(tx_hashes.into_iter())
-            .expect("calculate_root should not fail with valid transaction hashes");
+            .expect(
+                "calculate_root should not fail with valid transaction hashes",
+            );
 
         // Convert back to our Hash type
         merkle_root.to_byte_array().into()
     }
-
 
     pub fn get_inputs(&self) -> Vec<OutPoint> {
         self.transactions

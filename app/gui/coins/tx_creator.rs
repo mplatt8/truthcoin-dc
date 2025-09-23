@@ -1,14 +1,8 @@
 use eframe::egui::{self, InnerResponse, Response, TextBuffer};
 
-use truthcoin_dc::{
-    types::{Transaction, Txid},
-};
+use truthcoin_dc::types::{Transaction, Txid};
 
-use crate::{
-    app::App,
-    gui::util::InnerResponseExt,
-};
-
+use crate::{app::App, gui::util::InnerResponseExt};
 
 #[derive(
     Clone, Debug, Default, strum::Display, strum::EnumIter, Eq, PartialEq,
@@ -54,7 +48,6 @@ where
 }
 
 impl TxCreator {
-
     // set tx data for the current transaction
     fn set_tx_data(
         &self,
@@ -65,7 +58,6 @@ impl TxCreator {
             TxType::Regular => Ok(tx),
         }
     }
-
 
     pub fn show(
         &mut self,
@@ -96,7 +88,8 @@ impl TxCreator {
         let tx_data_ui = match &mut self.tx_type {
             TxType::Regular => None,
         };
-        let tx_data_changed = tx_data_ui.is_some_and(|resp: Response| resp.changed());
+        let tx_data_changed =
+            tx_data_ui.is_some_and(|resp: Response| resp.changed());
         // if base txid has changed, store the new txid
         let base_txid = base_tx.txid();
         let base_txid_changed = base_txid != self.base_txid;

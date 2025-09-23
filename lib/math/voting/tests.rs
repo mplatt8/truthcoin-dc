@@ -5,11 +5,11 @@
 //! vote aggregation algorithms.
 
 use super::*;
-use crate::state::voting::types::VoterId;
 use crate::state::slots::SlotId;
+use crate::state::voting::types::VoterId;
 use crate::types::Address;
-use std::collections::HashMap;
 use approx::assert_relative_eq;
+use std::collections::HashMap;
 
 // Helper functions for creating test data
 fn create_test_voter_ids(count: usize) -> Vec<VoterId> {
@@ -254,9 +254,21 @@ fn test_reputation_vector_normalization() {
     assert_relative_eq!(reputation.total_weight(), 1.0, epsilon = 1e-10);
 
     // Individual values should be proportionally scaled
-    assert_relative_eq!(reputation.get_reputation(voters[0]), 0.2, epsilon = 1e-10);
-    assert_relative_eq!(reputation.get_reputation(voters[1]), 0.3, epsilon = 1e-10);
-    assert_relative_eq!(reputation.get_reputation(voters[2]), 0.5, epsilon = 1e-10);
+    assert_relative_eq!(
+        reputation.get_reputation(voters[0]),
+        0.2,
+        epsilon = 1e-10
+    );
+    assert_relative_eq!(
+        reputation.get_reputation(voters[1]),
+        0.3,
+        epsilon = 1e-10
+    );
+    assert_relative_eq!(
+        reputation.get_reputation(voters[2]),
+        0.5,
+        epsilon = 1e-10
+    );
 }
 
 /// Test reputation vector to array conversion
@@ -448,11 +460,12 @@ fn test_matrix_utils_participation_rates() {
 
     matrix.set_vote(voters[1], decisions[2], 0.3).unwrap();
 
-    let participation_rates = MatrixUtils::calculate_participation_rates(&matrix);
+    let participation_rates =
+        MatrixUtils::calculate_participation_rates(&matrix);
 
     assert_eq!(participation_rates.len(), 3);
     assert_eq!(participation_rates.get(&decisions[0]), Some(&0.75)); // 3/4
-    assert_eq!(participation_rates.get(&decisions[1]), Some(&0.5));  // 2/4
+    assert_eq!(participation_rates.get(&decisions[1]), Some(&0.5)); // 2/4
     assert_eq!(participation_rates.get(&decisions[2]), Some(&0.25)); // 1/4
 }
 
@@ -480,8 +493,8 @@ fn test_matrix_utils_voter_activity() {
     let activity_rates = MatrixUtils::calculate_voter_activity(&matrix);
 
     assert_eq!(activity_rates.len(), 3);
-    assert_eq!(activity_rates.get(&voters[0]), Some(&1.0));  // 4/4
-    assert_eq!(activity_rates.get(&voters[1]), Some(&0.5));  // 2/4
+    assert_eq!(activity_rates.get(&voters[0]), Some(&1.0)); // 4/4
+    assert_eq!(activity_rates.get(&voters[1]), Some(&0.5)); // 2/4
     assert_eq!(activity_rates.get(&voters[2]), Some(&0.25)); // 1/4
 }
 
@@ -531,7 +544,8 @@ fn test_outlier_detection_edge_cases() {
 
     // Empty matrix
     let empty_matrix = SparseVoteMatrix::new(Vec::new(), Vec::new());
-    let outliers = MatrixUtils::find_outlier_voters(&empty_matrix, 1.0).unwrap();
+    let outliers =
+        MatrixUtils::find_outlier_voters(&empty_matrix, 1.0).unwrap();
     assert!(outliers.is_empty());
 }
 
@@ -549,7 +563,8 @@ fn test_large_sparse_matrix_operations() {
     let mut vote_count = 0;
     for (i, voter) in voters.iter().enumerate() {
         for (j, decision) in decisions.iter().enumerate() {
-            if (i + j) % 5 == 0 { // 20% density
+            if (i + j) % 5 == 0 {
+                // 20% density
                 let vote_value = if (i + j) % 2 == 0 { 1.0 } else { 0.0 };
                 matrix.set_vote(*voter, *decision, vote_value).unwrap();
                 vote_count += 1;
@@ -567,7 +582,8 @@ fn test_large_sparse_matrix_operations() {
     assert_eq!(dense.dim(), (num_voters, num_decisions));
 
     // Test participation rate calculation
-    let participation_rates = MatrixUtils::calculate_participation_rates(&matrix);
+    let participation_rates =
+        MatrixUtils::calculate_participation_rates(&matrix);
     assert_eq!(participation_rates.len(), num_decisions);
 
     // Test activity calculation
@@ -685,7 +701,8 @@ fn test_mathematical_integration() {
 
         // Each voter votes on random subset of decisions
         for (j, decision) in decisions.iter().enumerate() {
-            if (i + j) % 3 != 0 { // ~67% participation
+            if (i + j) % 3 != 0 {
+                // ~67% participation
                 let vote_value = if (i * j) % 2 == 0 { 1.0 } else { 0.0 };
                 matrix.set_vote(*voter, *decision, vote_value).unwrap();
             }
@@ -698,8 +715,10 @@ fn test_mathematical_integration() {
 
         if !decision_votes.is_empty() {
             // Calculate different aggregation methods
-            let simple_majority = VoteAggregator::simple_majority(&decision_votes);
-            let weighted_avg = VoteAggregator::weighted_average(&decision_votes, &reputation);
+            let simple_majority =
+                VoteAggregator::simple_majority(&decision_votes);
+            let weighted_avg =
+                VoteAggregator::weighted_average(&decision_votes, &reputation);
             let median = VoteAggregator::median_vote(&decision_votes);
 
             // All should be valid values
@@ -708,9 +727,16 @@ fn test_mathematical_integration() {
             assert!(median >= 0.0 && median <= 1.0);
 
             // Calculate confidence for each method
-            let confidence_simple = VoteAggregator::calculate_confidence(&decision_votes, simple_majority);
-            let confidence_weighted = VoteAggregator::calculate_confidence(&decision_votes, weighted_avg);
-            let confidence_median = VoteAggregator::calculate_confidence(&decision_votes, median);
+            let confidence_simple = VoteAggregator::calculate_confidence(
+                &decision_votes,
+                simple_majority,
+            );
+            let confidence_weighted = VoteAggregator::calculate_confidence(
+                &decision_votes,
+                weighted_avg,
+            );
+            let confidence_median =
+                VoteAggregator::calculate_confidence(&decision_votes, median);
 
             assert!(confidence_simple >= 0.0 && confidence_simple <= 1.0);
             assert!(confidence_weighted >= 0.0 && confidence_weighted <= 1.0);
@@ -719,7 +745,8 @@ fn test_mathematical_integration() {
     }
 
     // Test matrix-level analytics
-    let participation_rates = MatrixUtils::calculate_participation_rates(&matrix);
+    let participation_rates =
+        MatrixUtils::calculate_participation_rates(&matrix);
     let activity_rates = MatrixUtils::calculate_voter_activity(&matrix);
 
     // All rates should be in valid range

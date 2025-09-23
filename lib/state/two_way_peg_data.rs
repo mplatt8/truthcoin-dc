@@ -7,7 +7,8 @@ use sneed::{RoTxn, RwTxn};
 
 use crate::{
     state::{
-        Error, State, UtxoManager, WITHDRAWAL_BUNDLE_FAILURE_GAP, WithdrawalBundleInfo,
+        Error, State, UtxoManager, WITHDRAWAL_BUNDLE_FAILURE_GAP,
+        WithdrawalBundleInfo,
         rollback::{HeightStamped, RollBack},
     },
     types::{
@@ -264,7 +265,8 @@ fn connect_withdrawal_bundle_failed(
         WithdrawalBundleInfo::Known(bundle) => {
             for (outpoint, output) in bundle.spend_utxos() {
                 state.stxos.delete(rwtxn, outpoint)?;
-                state.insert_utxo_with_address_index(rwtxn, outpoint, output)?;
+                state
+                    .insert_utxo_with_address_index(rwtxn, outpoint, output)?;
             }
             let latest_failed_m6id = if let Some(mut latest_failed_m6id) =
                 state.latest_failed_withdrawal_bundle.try_get(rwtxn, &())?
@@ -463,7 +465,8 @@ fn disconnect_withdrawal_bundle_submitted(
                         outpoint: *outpoint,
                     });
                 };
-                state.insert_utxo_with_address_index(rwtxn, outpoint, output)?;
+                state
+                    .insert_utxo_with_address_index(rwtxn, outpoint, output)?;
             }
             state.pending_withdrawal_bundle.put(
                 rwtxn,
@@ -506,7 +509,9 @@ fn disconnect_withdrawal_bundle_confirmed(
         WithdrawalBundleInfo::Known(_) | WithdrawalBundleInfo::Unknown => (),
         WithdrawalBundleInfo::UnknownConfirmed { spend_utxos } => {
             for (outpoint, output) in spend_utxos {
-                state.insert_utxo_with_address_index(rwtxn, &outpoint, &output)?;
+                state.insert_utxo_with_address_index(
+                    rwtxn, &outpoint, &output,
+                )?;
                 if !state.stxos.delete(rwtxn, &outpoint)? {
                     return Err(Error::NoStxo { outpoint });
                 };

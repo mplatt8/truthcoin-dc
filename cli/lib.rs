@@ -22,14 +22,18 @@ use url::{Host, Url};
 
 /// Parse comma-separated input into filtered string vector
 pub fn parse_comma_separated(input: &str) -> Vec<String> {
-    input.split(',')
+    input
+        .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
 }
 
 /// Validate that a list contains at least one item
-pub fn validate_non_empty_list(list: &[String], name: &str) -> Result<(), String> {
+pub fn validate_non_empty_list(
+    list: &[String],
+    name: &str,
+) -> Result<(), String> {
     if list.is_empty() {
         Err(format!("Error: At least one {} is required", name))
     } else {
@@ -39,30 +43,45 @@ pub fn validate_non_empty_list(list: &[String], name: &str) -> Result<(), String
 
 /// Extract decision slots from dimensions specification
 /// Dimensions format: "[slot1,[slot2,slot3],slot4]" or "[slot1,slot2]"
-pub fn extract_slots_from_dimensions(dimensions: &str) -> Result<Vec<String>, String> {
+pub fn extract_slots_from_dimensions(
+    dimensions: &str,
+) -> Result<Vec<String>, String> {
     use regex::Regex;
 
     // Remove outer brackets and whitespace
-    let cleaned = dimensions.trim().trim_start_matches('[').trim_end_matches(']');
+    let cleaned = dimensions
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
 
     // Extract all slot IDs using regex pattern
-    let slot_pattern = Regex::new(r"[a-fA-F0-9]{6}").map_err(|e| format!("Regex error: {}", e))?;
+    let slot_pattern = Regex::new(r"[a-fA-F0-9]{6}")
+        .map_err(|e| format!("Regex error: {}", e))?;
     let slots: Vec<String> = slot_pattern
         .find_iter(cleaned)
         .map(|m| m.as_str().to_string())
         .collect();
 
     if slots.is_empty() {
-        return Err("Error: No valid decision slots found in dimensions specification".to_string());
+        return Err(
+            "Error: No valid decision slots found in dimensions specification"
+                .to_string(),
+        );
     }
 
     Ok(slots)
 }
 
 /// Format transaction success messages consistently
-pub fn format_tx_success(operation: &str, details: Option<&str>, txid: &str) -> String {
+pub fn format_tx_success(
+    operation: &str,
+    details: Option<&str>,
+    txid: &str,
+) -> String {
     match details {
-        Some(details) => format!("{} successful ({}): {}", operation, details, txid),
+        Some(details) => {
+            format!("{} successful ({}): {}", operation, details, txid)
+        }
         None => format!("{} successful: {}", operation, txid),
     }
 }
@@ -82,7 +101,7 @@ pub fn format_slot_info(slot_id: &str, period: u32, index: u32) -> String {
 }
 
 /// Handle JSON pretty printing consistently  
-pub fn json_response<T>(data: &T) -> anyhow::Result<String> 
+pub fn json_response<T>(data: &T) -> anyhow::Result<String>
 where
     T: Serialize,
 {
@@ -93,7 +112,6 @@ where
 #[command(arg_required_else_help(true))]
 pub enum Command {
     // === SYSTEM COMMANDS ===
-    
     /// Check node status and connection
     #[command(name = "status", alias = "stat", alias = "s")]
     Status,
@@ -114,17 +132,25 @@ pub enum Command {
     OpenApiSchema,
 
     // === WALLET COMMANDS ===
-    
     /// Get wallet balance in sats
     #[command(name = "balance", alias = "bal", alias = "b")]
     Balance,
 
     /// Get a new address
-    #[command(name = "get-new-address", alias = "address", alias = "addr", alias = "new-addr")]
+    #[command(
+        name = "get-new-address",
+        alias = "address",
+        alias = "addr",
+        alias = "new-addr"
+    )]
     GetNewAddress,
 
     /// Get wallet addresses  
-    #[command(name = "get-wallet-addresses", alias = "addresses", alias = "addrs")]
+    #[command(
+        name = "get-wallet-addresses",
+        alias = "addresses",
+        alias = "addrs"
+    )]
     GetWalletAddresses,
 
     /// List owned UTXOs
@@ -154,7 +180,12 @@ pub enum Command {
     },
 
     /// Transfer votecoin to address  
-    #[command(name = "transfer-votecoin", alias = "send-votecoin", alias = "send-vc", alias = "transfer-vc")]
+    #[command(
+        name = "transfer-votecoin",
+        alias = "send-votecoin",
+        alias = "send-vc",
+        alias = "transfer-vc"
+    )]
     TransferVotecoin {
         dest: Address,
         #[arg(long)]
@@ -187,35 +218,40 @@ pub enum Command {
 
     /// Format a deposit address
     #[command(name = "format-deposit-address")]
-    FormatDepositAddress {
-        address: Address,
-    },
+    FormatDepositAddress { address: Address },
 
     /// Generate mnemonic seed phrase
-    #[command(name = "generate-mnemonic", alias = "gen-mnemonic", alias = "mnemonic")]
+    #[command(
+        name = "generate-mnemonic",
+        alias = "gen-mnemonic",
+        alias = "mnemonic"
+    )]
     GenerateMnemonic,
 
     /// Set wallet seed from mnemonic
-    #[command(name = "set-seed-from-mnemonic", alias = "import-seed", alias = "restore-seed")]
-    SetSeedFromMnemonic {
-        mnemonic: String,
-    },
+    #[command(
+        name = "set-seed-from-mnemonic",
+        alias = "import-seed",
+        alias = "restore-seed"
+    )]
+    SetSeedFromMnemonic { mnemonic: String },
 
     /// Get total sidechain wealth
-    #[command(name = "sidechain-wealth", alias = "wealth", alias = "total-wealth")]
+    #[command(
+        name = "sidechain-wealth",
+        alias = "wealth",
+        alias = "total-wealth"
+    )]
     SidechainWealth,
 
     // === BLOCKCHAIN COMMANDS ===
-    
     /// Get current block count
     #[command(name = "get-block-count", alias = "blockcount", alias = "height")]
     GetBlockCount,
 
     /// Get block data
     #[command(name = "get-block", alias = "block")]
-    GetBlock {
-        block_hash: BlockHash,
-    },
+    GetBlock { block_hash: BlockHash },
 
     /// Get best mainchain block hash
     #[command(name = "get-best-mainchain-block-hash")]
@@ -232,16 +268,20 @@ pub enum Command {
     },
 
     /// Get transaction by txid
-    #[command(name = "get-transaction", alias = "get-tx", alias = "transaction")]
-    GetTransaction {
-        txid: Txid,
-    },
+    #[command(
+        name = "get-transaction",
+        alias = "get-tx",
+        alias = "transaction"
+    )]
+    GetTransaction { txid: Txid },
 
     /// Get transaction info
-    #[command(name = "get-transaction-info", alias = "txinfo", alias = "tx-info")]
-    GetTransactionInfo {
-        txid: Txid,
-    },
+    #[command(
+        name = "get-transaction-info",
+        alias = "txinfo",
+        alias = "tx-info"
+    )]
+    GetTransactionInfo { txid: Txid },
 
     /// Get pending withdrawal bundle
     #[command(name = "pending-withdrawal-bundle")]
@@ -253,30 +293,42 @@ pub enum Command {
 
     /// Remove transaction from mempool
     #[command(name = "remove-from-mempool")]
-    RemoveFromMempool {
-        txid: Txid,
-    },
+    RemoveFromMempool { txid: Txid },
 
     // === NETWORK COMMANDS ===
-    
     /// Connect to a peer
-    #[command(name = "connect-peer", alias = "connect", alias = "peer", alias = "add-peer")]
-    ConnectPeer {
-        addr: SocketAddr,
-    },
+    #[command(
+        name = "connect-peer",
+        alias = "connect",
+        alias = "peer",
+        alias = "add-peer"
+    )]
+    ConnectPeer { addr: SocketAddr },
 
     /// List connected peers
-    #[command(name = "list-peers", alias = "peers", alias = "connections", alias = "network")]
+    #[command(
+        name = "list-peers",
+        alias = "peers",
+        alias = "connections",
+        alias = "network"
+    )]
     ListPeers,
 
     // === CRYPTOGRAPHY COMMANDS ===
-    
     /// Get new encryption key
-    #[command(name = "get-new-encryption-key", alias = "new-encryption-key", alias = "new-enc-key")]
+    #[command(
+        name = "get-new-encryption-key",
+        alias = "new-encryption-key",
+        alias = "new-enc-key"
+    )]
     GetNewEncryptionKey,
 
     /// Get new verifying key
-    #[command(name = "get-new-verifying-key", alias = "new-verifying-key", alias = "new-verify-key")]  
+    #[command(
+        name = "get-new-verifying-key",
+        alias = "new-verifying-key",
+        alias = "new-verify-key"
+    )]
     GetNewVerifyingKey,
 
     /// Encrypt message
@@ -310,7 +362,11 @@ pub enum Command {
     },
 
     /// Sign arbitrary message as address
-    #[command(name = "sign-arbitrary-msg-as-addr", alias = "sign-as-addr", alias = "sign-addr")]
+    #[command(
+        name = "sign-arbitrary-msg-as-addr",
+        alias = "sign-as-addr",
+        alias = "sign-addr"
+    )]
     SignArbitraryMsgAsAddr {
         #[arg(long)]
         address: Address,
@@ -319,7 +375,11 @@ pub enum Command {
     },
 
     /// Verify signature
-    #[command(name = "verify-signature", alias = "verify", alias = "verify-sig")]
+    #[command(
+        name = "verify-signature",
+        alias = "verify",
+        alias = "verify-sig"
+    )]
     VerifySignature {
         #[arg(long)]
         signature: Signature,
@@ -331,11 +391,9 @@ pub enum Command {
         msg: String,
     },
 
-
     // === SLOT COMMANDS ===
-    
     /// Show slot system status
-    #[command(name = "slots-status")]  
+    #[command(name = "slots-status")]
     SlotsStatus,
 
     /// List all available slots
@@ -344,15 +402,11 @@ pub enum Command {
 
     /// Get slots for specific period
     #[command(name = "slots-get-quarter")]
-    SlotsGetQuarter {
-        quarter: u32,
-    },
+    SlotsGetQuarter { quarter: u32 },
 
     /// Convert timestamp to period
     #[command(name = "slots-convert-timestamp")]
-    SlotsConvertTimestamp {
-        timestamp: u64,
-    },
+    SlotsConvertTimestamp { timestamp: u64 },
 
     /// Get available slots in period
     #[command(name = "get-available-slots")]
@@ -383,15 +437,27 @@ pub enum Command {
     },
 
     /// Get voting periods
-    #[command(name = "get-voting-periods", alias = "voting-periods", alias = "voting")]
+    #[command(
+        name = "get-voting-periods",
+        alias = "voting-periods",
+        alias = "voting"
+    )]
     GetVotingPeriods,
 
     /// Get ossified slots
-    #[command(name = "get-ossified-slots", alias = "ossified-slots", alias = "ossified")]
+    #[command(
+        name = "get-ossified-slots",
+        alias = "ossified-slots",
+        alias = "ossified"
+    )]
     GetOssifiedSlots,
 
     /// Claim decision slot
-    #[command(name = "claim-decision-slot", alias = "claim-slot", alias = "claim")]
+    #[command(
+        name = "claim-decision-slot",
+        alias = "claim-slot",
+        alias = "claim"
+    )]
     ClaimDecisionSlot {
         #[arg(long)]
         period_index: u32,
@@ -412,7 +478,6 @@ pub enum Command {
     },
 
     // === MARKET COMMANDS ===
-    
     /// Create prediction market using dimensions specification
     #[command(name = "create-market", alias = "cm", alias = "market")]
     CreateMarket {
@@ -469,9 +534,7 @@ pub enum Command {
 
     /// View market details
     #[command(name = "view-market", alias = "show-market", alias = "info")]
-    ViewMarket {
-        market_id: String,
-    },
+    ViewMarket { market_id: String },
 
     /// Buy shares
     #[command(name = "buy-shares", alias = "buy")]
@@ -489,7 +552,11 @@ pub enum Command {
     },
 
     /// Calculate share cost
-    #[command(name = "calculate-share-cost", alias = "cost", alias = "calc-cost")]
+    #[command(
+        name = "calculate-share-cost",
+        alias = "cost",
+        alias = "calc-cost"
+    )]
     CalculateShareCost {
         #[arg(long)]
         market_id: String,
@@ -500,7 +567,11 @@ pub enum Command {
     },
 
     /// Calculate initial liquidity required for market creation
-    #[command(name = "calculate-initial-liquidity", alias = "calc-liquidity", alias = "liquidity")]
+    #[command(
+        name = "calculate-initial-liquidity",
+        alias = "calc-liquidity",
+        alias = "liquidity"
+    )]
     CalculateInitialLiquidity {
         /// LMSR beta parameter
         #[arg(long)]
@@ -536,7 +607,11 @@ pub enum Command {
     },
 
     /// Get user share positions
-    #[command(name = "get-user-share-positions", alias = "positions", alias = "portfolio")]
+    #[command(
+        name = "get-user-share-positions",
+        alias = "positions",
+        alias = "portfolio"
+    )]
     GetUserSharePositions {
         #[arg(long)]
         address: Option<Address>,
@@ -560,8 +635,8 @@ const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
 #[derive(Clone, Debug, Parser)]
 #[command(
-    author, 
-    version, 
+    author,
+    version,
     about = "Truthcoin Drivechain CLI - Bitcoin Hivemind prediction market client",
     long_about = "
 Truthcoin DC CLI - Command-line interface for Bitcoin Hivemind prediction markets
@@ -699,7 +774,8 @@ where
         }
         Command::OpenApiSchema => {
             let openapi =
-                <truthcoin_dc_app_rpc_api::RpcDoc as utoipa::OpenApi>::openapi();
+                <truthcoin_dc_app_rpc_api::RpcDoc as utoipa::OpenApi>::openapi(
+                );
             openapi.to_pretty_json()?
         }
 
@@ -809,7 +885,8 @@ where
             json_response(&block_hash)?
         }
         Command::GetBmmInclusions { block_hash } => {
-            let bmm_inclusions = rpc_client.get_bmm_inclusions(block_hash).await?;
+            let bmm_inclusions =
+                rpc_client.get_bmm_inclusions(block_hash).await?;
             json_response(&bmm_inclusions)?
         }
         Command::GetTransaction { txid } => {
@@ -821,11 +898,13 @@ where
             json_response(&tx_info)?
         }
         Command::PendingWithdrawalBundle => {
-            let withdrawal_bundle = rpc_client.pending_withdrawal_bundle().await?;
+            let withdrawal_bundle =
+                rpc_client.pending_withdrawal_bundle().await?;
             json_response(&withdrawal_bundle)?
         }
         Command::LatestFailedWithdrawalBundleHeight => {
-            let height = rpc_client.latest_failed_withdrawal_bundle_height().await?;
+            let height =
+                rpc_client.latest_failed_withdrawal_bundle_height().await?;
             json_response(&height)?
         }
         Command::RemoveFromMempool { txid } => {
@@ -861,7 +940,8 @@ where
             msg,
             utf8,
         } => {
-            let msg_hex = rpc_client.decrypt_msg(encryption_pubkey, msg).await?;
+            let msg_hex =
+                rpc_client.decrypt_msg(encryption_pubkey, msg).await?;
             if utf8 {
                 let msg_bytes: Vec<u8> = hex::decode(msg_hex)?;
                 String::from_utf8(msg_bytes)?
@@ -870,7 +950,8 @@ where
             }
         }
         Command::SignArbitraryMsg { verifying_key, msg } => {
-            let signature = rpc_client.sign_arbitrary_msg(verifying_key, msg).await?;
+            let signature =
+                rpc_client.sign_arbitrary_msg(verifying_key, msg).await?;
             format!("{signature}")
         }
         Command::SignArbitraryMsgAsAddr { address, msg } => {
@@ -889,7 +970,6 @@ where
                 .await?;
             format!("{res}")
         }
-
 
         // === SLOT COMMANDS ===
         Command::SlotsStatus => {
@@ -1114,7 +1194,11 @@ where
                         };
                         result.push_str(&format!(
                             "{} - {}\n",
-                            if decision.is_standard { "Standard" } else { "Non-standard" },
+                            if decision.is_standard {
+                                "Standard"
+                            } else {
+                                "Non-standard"
+                            },
                             question_preview
                         ));
                     } else {
@@ -1189,7 +1273,10 @@ where
             };
 
             let result = rpc_client.create_market(request).await?;
-            format!("Market '{}' created successfully with ID: {}", title, result)
+            format!(
+                "Market '{}' created successfully with ID: {}",
+                title, result
+            )
         }
         Command::CreateYesNoMarket {
             question,
@@ -1199,17 +1286,19 @@ where
             fee_sats,
         } => {
             use truthcoin_dc_app_rpc_api::CreateMarketRequest;
-            
+
             // Parse decision slots from comma-separated string
             let slots = parse_comma_separated(&decision_slots);
-            
-            if let Err(err) = validate_non_empty_list(&slots, "decision slot ID") {
+
+            if let Err(err) =
+                validate_non_empty_list(&slots, "decision slot ID")
+            {
                 return Ok(err);
             }
-            
+
             // Parse tags if provided
             let parsed_tags = tags.map(|t| parse_comma_separated(&t));
-            
+
             let request = CreateMarketRequest {
                 title: question.clone(),
                 description: format!("Yes/No market: {}", question),
@@ -1225,7 +1314,10 @@ where
             };
 
             let result = rpc_client.create_market(request).await?;
-            format!("Yes/No market '{}' created successfully with ID: {}", question, result)
+            format!(
+                "Yes/No market '{}' created successfully with ID: {}",
+                question, result
+            )
         }
         Command::ListMarkets => {
             let markets = rpc_client.list_markets().await?;
@@ -1237,25 +1329,26 @@ where
                 output.push_str("┌──────────────────┬──────────────────────────┬─────────────────────────┬──────────────┬────────────┐\n");
                 output.push_str("│ Market ID        │ Title                    │ Outcomes                │ Volume       │ State      │\n");
                 output.push_str("├──────────────────┼──────────────────────────┼─────────────────────────┼──────────────┼────────────┤\n");
-                
+
                 for market in &markets {
                     let short_id = market.market_id.clone();
-                    
+
                     // Truncate title to fit column
                     let short_title = if market.title.len() > 22 {
                         format!("{}...", &market.title[..19])
                     } else {
                         market.title.clone()
                     };
-                    
+
                     // Format outcome count for display
-                    let outcomes_display = format!("{} outcomes", market.outcome_count);
+                    let outcomes_display =
+                        format!("{} outcomes", market.outcome_count);
                     let short_outcomes = if outcomes_display.len() > 21 {
                         format!("{}...", &outcomes_display[..18])
                     } else {
                         outcomes_display
                     };
-                    
+
                     // Show volume
                     let volume_display = format!("{:.1}", market.volume);
                     let short_volume = if volume_display.len() > 12 {
@@ -1263,44 +1356,71 @@ where
                     } else {
                         volume_display
                     };
-                    
+
                     output.push_str(&format!(
                         "│ {:16} │ {:24} │ {:23} │ {:12} │ {:10} │\n",
-                        short_id, short_title, short_outcomes, short_volume, market.state
+                        short_id,
+                        short_title,
+                        short_outcomes,
+                        short_volume,
+                        market.state
                     ));
                 }
-                
+
                 output.push_str("└──────────────────┴──────────────────────────┴─────────────────────────┴──────────────┴────────────┘\n");
                 output.push_str(&format!("\nTotal markets: {}", markets.len()));
                 output
             }
         }
         Command::ViewMarket { market_id } => {
-            let market_details = rpc_client.view_market(market_id.clone()).await?;
+            let market_details =
+                rpc_client.view_market(market_id.clone()).await?;
             match market_details {
                 Some(details) => {
                     let mut output = String::new();
-                    output.push_str(&format!("Market Details: {}\n\n", details.market_id));
-                    
+                    output.push_str(&format!(
+                        "Market Details: {}\n\n",
+                        details.market_id
+                    ));
+
                     output.push_str(&format!("Title: {}\n", details.title));
-                    output.push_str(&format!("Description: {}\n", details.description));
-                    output.push_str(&format!("Market Maker: {}\n", details.market_maker));
+                    output.push_str(&format!(
+                        "Description: {}\n",
+                        details.description
+                    ));
+                    output.push_str(&format!(
+                        "Market Maker: {}\n",
+                        details.market_maker
+                    ));
                     output.push_str(&format!("State: {}\n", details.state));
-                    
+
                     if let Some(expiry) = details.expires_at {
-                        output.push_str(&format!("Expires: Block {}\n", expiry));
+                        output
+                            .push_str(&format!("Expires: Block {}\n", expiry));
                     } else {
                         output.push_str("Expires: No expiry set\n");
                     }
-                    
-                    output.push_str(&format!("Beta Parameter: {:.2}\n", details.beta));
-                    output.push_str(&format!("Trading Fee: {:.1}%\n", details.trading_fee * 100.0));
-                    output.push_str(&format!("Created at Height: {}\n", details.created_at_height));
-                    
+
+                    output.push_str(&format!(
+                        "Beta Parameter: {:.2}\n",
+                        details.beta
+                    ));
+                    output.push_str(&format!(
+                        "Trading Fee: {:.1}%\n",
+                        details.trading_fee * 100.0
+                    ));
+                    output.push_str(&format!(
+                        "Created at Height: {}\n",
+                        details.created_at_height
+                    ));
+
                     if !details.tags.is_empty() {
-                        output.push_str(&format!("Tags: {}\n", details.tags.join(", ")));
+                        output.push_str(&format!(
+                            "Tags: {}\n",
+                            details.tags.join(", ")
+                        ));
                     }
-                    
+
                     output.push_str("\nOutcomes:\n");
                     let mut total_volume = 0.0;
                     for (i, outcome) in details.outcomes.iter().enumerate() {
@@ -1314,23 +1434,36 @@ where
                         ));
                         total_volume += outcome.volume;
                     }
-                    
-                    output.push_str(&format!("\nTotal Volume: {:.0} sats\n", total_volume));
-                    output.push_str(&format!("Total Liquidity: {:.0} sats\n", details.liquidity));
-                    output.push_str(&format!("Treasury: {:.0} sats\n", details.treasury));
-                    
+
+                    output.push_str(&format!(
+                        "\nTotal Volume: {:.0} sats\n",
+                        total_volume
+                    ));
+                    output.push_str(&format!(
+                        "Total Liquidity: {:.0} sats\n",
+                        details.liquidity
+                    ));
+                    output.push_str(&format!(
+                        "Treasury: {:.0} sats\n",
+                        details.treasury
+                    ));
+
                     if !details.decision_slots.is_empty() {
                         output.push_str("\nDecision Slots:\n");
                         for slot_id in &details.decision_slots {
                             let short_slot = if slot_id.len() > 16 {
-                                format!("{}...{}", &slot_id[..8], &slot_id[slot_id.len()-8..])
+                                format!(
+                                    "{}...{}",
+                                    &slot_id[..8],
+                                    &slot_id[slot_id.len() - 8..]
+                                )
                             } else {
                                 slot_id.clone()
                             };
                             output.push_str(&format!("  - {}\n", short_slot));
                         }
                     }
-                    
+
                     output
                 }
                 None => format!("Market {} not found", market_id),
@@ -1367,12 +1500,14 @@ where
             outcome_index,
             shares_amount,
         } => {
-            let cost_sats = rpc_client.calculate_share_cost(
-                market_id.clone(),
-                outcome_index,
-                shares_amount,
-            ).await?;
-            
+            let cost_sats = rpc_client
+                .calculate_share_cost(
+                    market_id.clone(),
+                    outcome_index,
+                    shares_amount,
+                )
+                .await?;
+
             format!(
                 "Share Purchase Cost Calculation:\n\
                 Market: {}\n\
@@ -1416,25 +1551,40 @@ where
             } else {
                 rpc_client.get_new_address().await?
             };
-            
+
             let holdings = rpc_client.get_user_share_positions(addr).await?;
-            
+
             if holdings.positions.is_empty() {
                 "No share positions found.".to_string()
             } else {
                 let mut output = String::new();
-                output.push_str(&format!("Share Holdings for {}\n\n", holdings.address));
+                output.push_str(&format!(
+                    "Share Holdings for {}\n\n",
+                    holdings.address
+                ));
                 output.push_str(&format!("Portfolio Summary:\n"));
-                output.push_str(&format!("  Total Value: {:.2} sats\n", holdings.total_value));
-                output.push_str(&format!("  Total Cost Basis: {:.2} sats\n", holdings.total_cost_basis));
-                output.push_str(&format!("  Unrealized P&L: {:.2} sats\n", holdings.total_unrealized_pnl));
-                output.push_str(&format!("  Active Markets: {}\n\n", holdings.active_markets));
-                
+                output.push_str(&format!(
+                    "  Total Value: {:.2} sats\n",
+                    holdings.total_value
+                ));
+                output.push_str(&format!(
+                    "  Total Cost Basis: {:.2} sats\n",
+                    holdings.total_cost_basis
+                ));
+                output.push_str(&format!(
+                    "  Unrealized P&L: {:.2} sats\n",
+                    holdings.total_unrealized_pnl
+                ));
+                output.push_str(&format!(
+                    "  Active Markets: {}\n\n",
+                    holdings.active_markets
+                ));
+
                 output.push_str("Individual Positions:\n");
                 output.push_str("┌──────────────────┬────────────┬──────────────┬───────────────┬────────────────┬─────────────────┐\n");
                 output.push_str("│ Market ID        │ Outcome    │ Shares       │ Avg Price     │ Current Value  │ P&L             │\n");
                 output.push_str("├──────────────────┼────────────┼──────────────┼───────────────┼────────────────┼─────────────────┤\n");
-                
+
                 for pos in &holdings.positions {
                     let short_market_id = &pos.market_id[..8]; // Show first 8 chars
                     let short_outcome = if pos.outcome_name.len() > 10 {
@@ -1442,7 +1592,7 @@ where
                     } else {
                         pos.outcome_name.clone()
                     };
-                    
+
                     output.push_str(&format!(
                         "│ {:16} │ {:10} │ {:12.4} │ {:13.6} │ {:14.2} │ {:15.2} │\n",
                         short_market_id,
@@ -1453,7 +1603,7 @@ where
                         pos.unrealized_pnl
                     ));
                 }
-                
+
                 output.push_str("└──────────────────┴────────────┴──────────────┴───────────────┴────────────────┴─────────────────┘\n");
                 output
             }
@@ -1465,27 +1615,35 @@ where
             } else {
                 rpc_client.get_new_address().await?
             };
-            
-            let positions = rpc_client.get_market_share_positions(addr, market_id.clone()).await?;
-            
+
+            let positions = rpc_client
+                .get_market_share_positions(addr, market_id.clone())
+                .await?;
+
             if positions.is_empty() {
-                format!("No positions found for market {} and address {}", market_id, addr)
+                format!(
+                    "No positions found for market {} and address {}",
+                    market_id, addr
+                )
             } else {
                 let mut output = String::new();
-                output.push_str(&format!("Share Positions for Market {}\n", market_id));
+                output.push_str(&format!(
+                    "Share Positions for Market {}\n",
+                    market_id
+                ));
                 output.push_str(&format!("User: {}\n\n", addr));
-                
+
                 output.push_str("┌────────────┬────────────────────┬──────────────┬───────────────┬────────────────┬─────────────────┐\n");
                 output.push_str("│ Outcome #  │ Outcome Name       │ Shares       │ Avg Price     │ Current Value  │ P&L             │\n");
                 output.push_str("├────────────┼────────────────────┼──────────────┼───────────────┼────────────────┼─────────────────┤\n");
-                
+
                 for pos in &positions {
                     let short_outcome = if pos.outcome_name.len() > 18 {
                         format!("{}...", &pos.outcome_name[..15])
                     } else {
                         pos.outcome_name.clone()
                     };
-                    
+
                     output.push_str(&format!(
                         "│ {:10} │ {:18} │ {:12.4} │ {:13.6} │ {:14.2} │ {:15.2} │\n",
                         pos.outcome_index,
@@ -1496,7 +1654,7 @@ where
                         pos.unrealized_pnl
                     ));
                 }
-                
+
                 output.push_str("└────────────┴────────────────────┴──────────────┴───────────────┴────────────────┴─────────────────┘\n");
                 output
             }
@@ -1513,7 +1671,8 @@ where
             use truthcoin_dc_app_rpc_api::CalculateInitialLiquidityRequest;
 
             // Parse decision slots if provided
-            let parsed_slots = decision_slots.map(|s| parse_comma_separated(&s));
+            let parsed_slots =
+                decision_slots.map(|s| parse_comma_separated(&s));
 
             let request = CalculateInitialLiquidityRequest {
                 beta,
@@ -1524,7 +1683,8 @@ where
                 has_residual,
             };
 
-            let result = rpc_client.calculate_initial_liquidity(request).await?;
+            let result =
+                rpc_client.calculate_initial_liquidity(request).await?;
 
             format!(
                 "Initial Liquidity Calculation:\n\
@@ -1586,7 +1746,7 @@ impl Cli {
                 http::header::HeaderValue::from_str(&request_id)?,
             )]));
         let client = builder.build(self.rpc_url())?;
-        
+
         // Direct RPC communication
         let result = handle_command(&client, self.command).await?;
         Ok(result)

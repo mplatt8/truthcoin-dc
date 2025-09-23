@@ -54,10 +54,13 @@ mod basic_tests;
 
 use crate::state::{Error, slots::SlotId};
 use database::VotingDatabases;
-use sneed::{Env, RwTxn, RoTxn};
+use sneed::{Env, RoTxn, RwTxn};
 use std::collections::{HashMap, HashSet};
-use types::{VotingPeriod, VotingPeriodId, VotingPeriodStatus, Vote, VoteValue, VoterId,
-           DecisionOutcome, DecisionResolution, VoterReputation, VotingPeriodStats};
+use types::{
+    DecisionOutcome, DecisionResolution, Vote, VoteValue, VoterId,
+    VoterReputation, VotingPeriod, VotingPeriodId, VotingPeriodStats,
+    VotingPeriodStatus,
+};
 
 /// High-level voting system interface
 ///
@@ -134,7 +137,11 @@ impl VotingSystem {
         }
 
         // Check if period already exists
-        if self.databases.get_voting_period(rwtxn, period_id)?.is_some() {
+        if self
+            .databases
+            .get_voting_period(rwtxn, period_id)?
+            .is_some()
+        {
             return Err(Error::InvalidTransaction {
                 reason: format!("Voting period {:?} already exists", period_id),
             });
@@ -170,7 +177,9 @@ impl VotingSystem {
         period_id: VotingPeriodId,
         current_timestamp: u64,
     ) -> Result<(), Error> {
-        let period = self.databases.get_voting_period(rwtxn, period_id)?
+        let period = self
+            .databases
+            .get_voting_period(rwtxn, period_id)?
             .ok_or_else(|| Error::InvalidTransaction {
                 reason: format!("Voting period {:?} not found", period_id),
             })?;
@@ -188,7 +197,11 @@ impl VotingSystem {
             });
         }
 
-        self.databases.update_period_status(rwtxn, period_id, VotingPeriodStatus::Active)?;
+        self.databases.update_period_status(
+            rwtxn,
+            period_id,
+            VotingPeriodStatus::Active,
+        )?;
         Ok(())
     }
 
@@ -208,7 +221,9 @@ impl VotingSystem {
         period_id: VotingPeriodId,
         current_timestamp: u64,
     ) -> Result<(), Error> {
-        let period = self.databases.get_voting_period(rwtxn, period_id)?
+        let period = self
+            .databases
+            .get_voting_period(rwtxn, period_id)?
             .ok_or_else(|| Error::InvalidTransaction {
                 reason: format!("Voting period {:?} not found", period_id),
             })?;
@@ -226,7 +241,11 @@ impl VotingSystem {
             });
         }
 
-        self.databases.update_period_status(rwtxn, period_id, VotingPeriodStatus::Closed)?;
+        self.databases.update_period_status(
+            rwtxn,
+            period_id,
+            VotingPeriodStatus::Closed,
+        )?;
         Ok(())
     }
 
@@ -243,7 +262,9 @@ impl VotingSystem {
         rotxn: &RoTxn,
         current_timestamp: u64,
     ) -> Result<Option<VotingPeriod>, Error> {
-        let active_periods = self.databases.get_periods_by_status(rotxn, VotingPeriodStatus::Active)?;
+        let active_periods = self
+            .databases
+            .get_periods_by_status(rotxn, VotingPeriodStatus::Active)?;
 
         for period in active_periods {
             if period.is_active(current_timestamp) {
@@ -270,7 +291,9 @@ impl VotingSystem {
         let mut updates = Vec::new();
 
         // Check pending periods that should become active
-        let pending_periods = self.databases.get_periods_by_status(rotxn, VotingPeriodStatus::Pending)?;
+        let pending_periods = self
+            .databases
+            .get_periods_by_status(rotxn, VotingPeriodStatus::Pending)?;
         for period in pending_periods {
             if current_timestamp >= period.start_timestamp {
                 updates.push((period.id, VotingPeriodStatus::Active));
@@ -278,7 +301,9 @@ impl VotingSystem {
         }
 
         // Check active periods that should close
-        let active_periods = self.databases.get_periods_by_status(rotxn, VotingPeriodStatus::Active)?;
+        let active_periods = self
+            .databases
+            .get_periods_by_status(rotxn, VotingPeriodStatus::Active)?;
         for period in active_periods {
             if current_timestamp >= period.end_timestamp {
                 updates.push((period.id, VotingPeriodStatus::Closed));
@@ -328,14 +353,19 @@ impl VotingSystem {
         tx_hash: [u8; 32],
     ) -> Result<(), Error> {
         // Validate voting period is active
-        let period = self.databases.get_voting_period(rwtxn, period_id)?
+        let period = self
+            .databases
+            .get_voting_period(rwtxn, period_id)?
             .ok_or_else(|| Error::InvalidTransaction {
                 reason: format!("Voting period {:?} not found", period_id),
             })?;
 
         if period.status != VotingPeriodStatus::Active {
             return Err(Error::InvalidTransaction {
-                reason: format!("Period {:?} is not active for voting", period_id),
+                reason: format!(
+                    "Period {:?} is not active for voting",
+                    period_id
+                ),
             });
         }
 
@@ -348,15 +378,24 @@ impl VotingSystem {
         // Check if decision is in this period
         if !period.decision_slots.contains(&decision_id) {
             return Err(Error::InvalidTransaction {
-                reason: format!("Decision {:?} not available in period {:?}", decision_id, period_id),
+                reason: format!(
+                    "Decision {:?} not available in period {:?}",
+                    decision_id, period_id
+                ),
             });
         }
 
         // Check for duplicate vote
-        if self.databases.get_vote(rwtxn, period_id, voter_id, decision_id)?.is_some() {
+        if self
+            .databases
+            .get_vote(rwtxn, period_id, voter_id, decision_id)?
+            .is_some()
+        {
             return Err(Error::InvalidTransaction {
-                reason: format!("Voter {:?} already voted on decision {:?} in period {:?}",
-                    voter_id, decision_id, period_id),
+                reason: format!(
+                    "Voter {:?} already voted on decision {:?} in period {:?}",
+                    voter_id, decision_id, period_id
+                ),
             });
         }
 
@@ -389,7 +428,8 @@ impl VotingSystem {
         rotxn: &RoTxn,
         period_id: VotingPeriodId,
     ) -> Result<HashMap<(VoterId, SlotId), VoteValue>, Error> {
-        let vote_entries = self.databases.get_votes_for_period(rotxn, period_id)?;
+        let vote_entries =
+            self.databases.get_votes_for_period(rotxn, period_id)?;
         let mut votes = HashMap::new();
 
         for (key, entry) in vote_entries {
@@ -412,7 +452,8 @@ impl VotingSystem {
         rotxn: &RoTxn,
         period_id: VotingPeriodId,
     ) -> Result<HashMap<(VoterId, SlotId), f64>, Error> {
-        let vote_entries = self.databases.get_votes_for_period(rotxn, period_id)?;
+        let vote_entries =
+            self.databases.get_votes_for_period(rotxn, period_id)?;
         let mut matrix = HashMap::new();
 
         for (key, entry) in vote_entries {
@@ -440,13 +481,16 @@ impl VotingSystem {
         period_id: VotingPeriodId,
     ) -> Result<(u64, u64, f64), Error> {
         let votes = self.databases.get_votes_for_period(rotxn, period_id)?;
-        let period = self.databases.get_voting_period(rotxn, period_id)?
+        let period = self
+            .databases
+            .get_voting_period(rotxn, period_id)?
             .ok_or_else(|| Error::InvalidTransaction {
                 reason: format!("Period {:?} not found", period_id),
             })?;
 
         let total_votes = votes.len() as u64;
-        let unique_voters: HashSet<VoterId> = votes.keys().map(|k| k.voter_id).collect();
+        let unique_voters: HashSet<VoterId> =
+            votes.keys().map(|k| k.voter_id).collect();
         let total_voters = unique_voters.len() as u64;
         let total_decisions = period.decision_slots.len() as u64;
 
@@ -484,13 +528,22 @@ impl VotingSystem {
         period_id: VotingPeriodId,
     ) -> Result<(), Error> {
         // Check if voter already has reputation
-        if self.databases.get_voter_reputation(rwtxn, voter_id)?.is_some() {
+        if self
+            .databases
+            .get_voter_reputation(rwtxn, voter_id)?
+            .is_some()
+        {
             return Err(Error::InvalidTransaction {
                 reason: format!("Voter {:?} already has reputation", voter_id),
             });
         }
 
-        let reputation = VoterReputation::new(voter_id, initial_reputation, timestamp, period_id);
+        let reputation = VoterReputation::new(
+            voter_id,
+            initial_reputation,
+            timestamp,
+            period_id,
+        );
         self.databases.put_voter_reputation(rwtxn, &reputation)?;
 
         Ok(())
@@ -516,8 +569,12 @@ impl VotingSystem {
         timestamp: u64,
         period_id: VotingPeriodId,
     ) -> Result<(), Error> {
-        let mut reputation = self.databases.get_voter_reputation(rwtxn, voter_id)?
-            .unwrap_or_else(|| VoterReputation::new(voter_id, 0.5, timestamp, period_id));
+        let mut reputation = self
+            .databases
+            .get_voter_reputation(rwtxn, voter_id)?
+            .unwrap_or_else(|| {
+                VoterReputation::new(voter_id, 0.5, timestamp, period_id)
+            });
 
         reputation.update(was_correct, timestamp, period_id);
         self.databases.put_voter_reputation(rwtxn, &reputation)?;
@@ -544,12 +601,17 @@ impl VotingSystem {
         period_id: VotingPeriodId,
     ) -> Result<HashMap<VoterId, f64>, Error> {
         let votes = self.databases.get_votes_for_period(rotxn, period_id)?;
-        let voters: HashSet<VoterId> = votes.keys().map(|k| k.voter_id).collect();
+        let voters: HashSet<VoterId> =
+            votes.keys().map(|k| k.voter_id).collect();
         let mut weights = HashMap::new();
 
         for voter_id in voters {
-            let reputation = self.databases.get_voter_reputation(rotxn, voter_id)?
-                .unwrap_or_else(|| VoterReputation::new(voter_id, 0.5, 0, period_id));
+            let reputation = self
+                .databases
+                .get_voter_reputation(rotxn, voter_id)?
+                .unwrap_or_else(|| {
+                    VoterReputation::new(voter_id, 0.5, 0, period_id)
+                });
 
             // Use the final voting weight which incorporates Votecoin holdings
             weights.insert(voter_id, reputation.get_voting_weight());
@@ -583,28 +645,40 @@ impl VotingSystem {
         current_height: u64,
     ) -> Result<HashMap<VoterId, f64>, Error> {
         let votes = self.databases.get_votes_for_period(rwtxn, period_id)?;
-        let voters: HashSet<VoterId> = votes.keys().map(|k| k.voter_id).collect();
+        let voters: HashSet<VoterId> =
+            votes.keys().map(|k| k.voter_id).collect();
 
         // Convert VoterIds to Addresses for UTXO queries
-        let addresses: HashSet<crate::types::Address> = voters.iter()
+        let addresses: HashSet<crate::types::Address> = voters
+            .iter()
             .map(|voter_id| voter_id.to_address())
             .collect();
 
         // Get current Votecoin proportions for all voters
-        let votecoin_proportions = state.get_votecoin_proportions_batch(rwtxn, &addresses)?;
+        let votecoin_proportions =
+            state.get_votecoin_proportions_batch(rwtxn, &addresses)?;
 
         let mut weights = HashMap::new();
         const VOTECOIN_STALENESS_BLOCKS: u64 = 10; // Refresh every 10 blocks
 
         for voter_id in voters {
-            let mut reputation = self.databases.get_voter_reputation(rwtxn, voter_id)?
-                .unwrap_or_else(|| VoterReputation::new(voter_id, 0.5, 0, period_id));
+            let mut reputation = self
+                .databases
+                .get_voter_reputation(rwtxn, voter_id)?
+                .unwrap_or_else(|| {
+                    VoterReputation::new(voter_id, 0.5, 0, period_id)
+                });
 
             // Update Votecoin proportion if stale
-            if reputation.needs_votecoin_refresh(current_height, VOTECOIN_STALENESS_BLOCKS) {
+            if reputation.needs_votecoin_refresh(
+                current_height,
+                VOTECOIN_STALENESS_BLOCKS,
+            ) {
                 let address = voter_id.to_address();
-                let proportion = votecoin_proportions.get(&address).copied().unwrap_or(0.0);
-                reputation.update_votecoin_proportion(proportion, current_height);
+                let proportion =
+                    votecoin_proportions.get(&address).copied().unwrap_or(0.0);
+                reputation
+                    .update_votecoin_proportion(proportion, current_height);
 
                 // Save updated reputation back to database
                 self.databases.put_voter_reputation(rwtxn, &reputation)?;
@@ -635,10 +709,20 @@ impl VotingSystem {
         outcome: DecisionOutcome,
     ) -> Result<(), Error> {
         // Validate outcome doesn't already exist
-        if self.databases.get_decision_outcome(rwtxn, outcome.period_id, outcome.decision_id)?.is_some() {
+        if self
+            .databases
+            .get_decision_outcome(
+                rwtxn,
+                outcome.period_id,
+                outcome.decision_id,
+            )?
+            .is_some()
+        {
             return Err(Error::InvalidTransaction {
-                reason: format!("Outcome already exists for decision {:?} in period {:?}",
-                    outcome.decision_id, outcome.period_id),
+                reason: format!(
+                    "Outcome already exists for decision {:?} in period {:?}",
+                    outcome.decision_id, outcome.period_id
+                ),
             });
         }
 
@@ -671,7 +755,9 @@ impl VotingSystem {
         block_height: u64,
         state: &crate::state::State,
     ) -> Result<Vec<DecisionOutcome>, Error> {
-        let period = self.databases.get_voting_period(rwtxn, period_id)?
+        let period = self
+            .databases
+            .get_voting_period(rwtxn, period_id)?
             .ok_or_else(|| Error::InvalidTransaction {
                 reason: format!("Period {:?} not found", period_id),
             })?;
@@ -684,12 +770,18 @@ impl VotingSystem {
 
         let votes = self.databases.get_votes_for_period(rwtxn, period_id)?;
         // Use fresh reputation weights that include up-to-date Votecoin proportions
-        let reputation_weights = self.get_fresh_reputation_weights(rwtxn, period_id, state, block_height)?;
+        let reputation_weights = self.get_fresh_reputation_weights(
+            rwtxn,
+            period_id,
+            state,
+            block_height,
+        )?;
         let mut outcomes = Vec::new();
 
         // Simple consensus algorithm (placeholder for full PCA implementation)
         for decision_id in &period.decision_slots {
-            let decision_votes: Vec<_> = votes.iter()
+            let decision_votes: Vec<_> = votes
+                .iter()
                 .filter(|(key, _)| key.decision_id == *decision_id)
                 .collect();
 
@@ -699,7 +791,7 @@ impl VotingSystem {
                     *decision_id,
                     period_id,
                     current_timestamp + 3600, // 1 hour voting deadline
-                    1, // min_votes_required
+                    1,                        // min_votes_required
                     current_timestamp,
                     block_height,
                 );
@@ -729,7 +821,8 @@ impl VotingSystem {
             for (key, entry) in decision_votes {
                 let vote_value = entry.to_f64();
                 if !vote_value.is_nan() {
-                    let weight = reputation_weights.get(&key.voter_id).unwrap_or(&0.5);
+                    let weight =
+                        reputation_weights.get(&key.voter_id).unwrap_or(&0.5);
                     weighted_sum += vote_value * weight;
                     total_weight += weight;
                     total_votes += 1;
@@ -743,13 +836,15 @@ impl VotingSystem {
             };
 
             // Simple confidence based on participation
-            let confidence = (total_votes as f64 / period.decision_slots.len() as f64).min(1.0);
+            let confidence = (total_votes as f64
+                / period.decision_slots.len() as f64)
+                .min(1.0);
 
             let resolution = DecisionResolution::new(
                 *decision_id,
                 period_id,
                 current_timestamp + 3600, // 1 hour voting deadline
-                1, // min_votes_required
+                1,                        // min_votes_required
                 current_timestamp,
                 block_height,
             );
@@ -773,7 +868,11 @@ impl VotingSystem {
         }
 
         // Update period status to resolved
-        self.databases.update_period_status(rwtxn, period_id, VotingPeriodStatus::Resolved)?;
+        self.databases.update_period_status(
+            rwtxn,
+            period_id,
+            VotingPeriodStatus::Resolved,
+        )?;
 
         Ok(outcomes)
     }
@@ -815,16 +914,21 @@ impl VotingSystem {
         let (total_voters, total_votes, participation_rate) =
             self.get_participation_stats(rotxn, period_id)?;
 
-        let period = self.databases.get_voting_period(rotxn, period_id)?
+        let period = self
+            .databases
+            .get_voting_period(rotxn, period_id)?
             .ok_or_else(|| Error::InvalidTransaction {
                 reason: format!("Period {:?} not found", period_id),
             })?;
 
-        let reputation_weights = self.get_reputation_weights(rotxn, period_id)?;
+        let reputation_weights =
+            self.get_reputation_weights(rotxn, period_id)?;
         let total_reputation_weight: f64 = reputation_weights.values().sum();
 
-        let outcomes = self.databases.get_outcomes_for_period(rotxn, period_id)?;
-        let consensus_decisions = outcomes.values()
+        let outcomes =
+            self.databases.get_outcomes_for_period(rotxn, period_id)?;
+        let consensus_decisions = outcomes
+            .values()
             .filter(|outcome| outcome.is_consensus)
             .count() as u64;
 
@@ -868,18 +972,27 @@ impl VotingSystem {
         let all_voters = self.databases.get_all_voters(rotxn)?;
         let total_voters = all_voters.len() as u64;
 
-        let (_, avg_reputation, _, _) = self.databases.get_reputation_stats(rotxn)?;
+        let (_, avg_reputation, _, _) =
+            self.databases.get_reputation_stats(rotxn)?;
 
         // Count periods
         // Count periods by iterating through all periods
-        let total_periods = self.databases.get_periods_by_status(rotxn, VotingPeriodStatus::Pending)?
+        let total_periods = self
+            .databases
+            .get_periods_by_status(rotxn, VotingPeriodStatus::Pending)?
             .len() as u64
-            + self.databases.get_periods_by_status(rotxn, VotingPeriodStatus::Active)?
-            .len() as u64
-            + self.databases.get_periods_by_status(rotxn, VotingPeriodStatus::Closed)?
-            .len() as u64
-            + self.databases.get_periods_by_status(rotxn, VotingPeriodStatus::Resolved)?
-            .len() as u64;
+            + self
+                .databases
+                .get_periods_by_status(rotxn, VotingPeriodStatus::Active)?
+                .len() as u64
+            + self
+                .databases
+                .get_periods_by_status(rotxn, VotingPeriodStatus::Closed)?
+                .len() as u64
+            + self
+                .databases
+                .get_periods_by_status(rotxn, VotingPeriodStatus::Resolved)?
+                .len() as u64;
 
         Ok((total_periods, total_votes, total_voters, avg_reputation))
     }

@@ -21,7 +21,7 @@ use tokio_stream::{StreamMap, wrappers::WatchStream};
 
 use crate::{
     authorization::{self, Authorization, Signature, get_address},
-    state::markets::{parse_dimensions, DimensionSpec},
+    state::markets::{DimensionSpec, parse_dimensions},
     types::{
         Address, AmountOverflowError, AmountUnderflowError, AssetId,
         AuthorizedTransaction, BitcoinOutputContent, EncryptionPubKey,
@@ -552,7 +552,9 @@ impl Wallet {
         // CRITICAL FIX: Only select CONFIRMED UTXOs (utxos database), NOT unconfirmed_utxos
         // This prevents spending mempool UTXOs that haven't been mined yet
         let mut iter = self.utxos.iter(&rotxn).map_err(DbError::from)?;
-        while let Some((outpoint, filled_output)) = iter.next().map_err(DbError::from)? {
+        while let Some((outpoint, filled_output)) =
+            iter.next().map_err(DbError::from)?
+        {
             if filled_output.is_bitcoin()
                 && !filled_output.content.is_withdrawal()
                 && !filled_output.is_votecoin()
@@ -568,7 +570,9 @@ impl Wallet {
         // This enforces Bitcoin Hivemind's confirmed-only spending requirement
 
         // Sort by value for optimal selection (smallest first for exact change)
-        bitcoin_utxos.sort_unstable_by_key(|(_, output): &(OutPoint, Output)| output.get_bitcoin_value());
+        bitcoin_utxos.sort_unstable_by_key(
+            |(_, output): &(OutPoint, Output)| output.get_bitcoin_value(),
+        );
 
         // Greedy selection with early termination
         let mut selected = HashMap::with_capacity(bitcoin_utxos.len().min(10)); // Most selections use few UTXOs
@@ -603,7 +607,9 @@ impl Wallet {
         // CRITICAL FIX: Only select CONFIRMED Votecoin UTXOs, not unconfirmed ones
         let mut iter = self.utxos.iter(&rotxn)?;
         while let Some((outpoint, filled_output)) = iter.next()? {
-            if filled_output.is_votecoin() && !filled_output.content.is_withdrawal() {
+            if filled_output.is_votecoin()
+                && !filled_output.content.is_withdrawal()
+            {
                 if let Some(votecoin_value) = filled_output.votecoin() {
                     // Convert FilledOutput to Output for uniform handling
                     let output: Output = filled_output.into();
@@ -613,14 +619,16 @@ impl Wallet {
         }
 
         // Sort by votecoin value (smallest first for optimal selection)
-        votecoin_utxos.sort_unstable_by_key(|(_, _, votecoin_value)| *votecoin_value);
+        votecoin_utxos
+            .sort_unstable_by_key(|(_, _, votecoin_value)| *votecoin_value);
 
         // Greedy selection with early termination
         let mut selected = HashMap::with_capacity(votecoin_utxos.len().min(8)); // Votecoin selections typically use few UTXOs
         let mut total_value: u32 = 0;
 
         for (outpoint, output, votecoin_value) in votecoin_utxos {
-            total_value = total_value.checked_add(votecoin_value)
+            total_value = total_value
+                .checked_add(votecoin_value)
                 .ok_or(Error::AmountOverflow(AmountOverflowError))?;
             selected.insert(outpoint, output);
 
@@ -651,9 +659,6 @@ impl Wallet {
     }
 
     // Select LP tokens with optimized collection and selection
-
-
-
 
     /// Given a regular transaction, add a decision slot claim.
     pub fn claim_decision_slot(
@@ -697,39 +702,52 @@ impl Wallet {
         Ok(())
     }
 
-
-
     /// Estimate storage fee for dimensional market
-    fn estimate_dimensional_storage_fee(&self, total_slots: usize, num_dimensions: usize) -> Result<bitcoin::Amount, Error> {
+    fn estimate_dimensional_storage_fee(
+        &self,
+        total_slots: usize,
+        num_dimensions: usize,
+    ) -> Result<bitcoin::Amount, Error> {
         // Dimensional markets have more complex outcome spaces
         // Base cost scales with slot count, bonus cost for multi-dimensional complexity
         let base_cost = (total_slots as u64) * 1000; // 1000 sats per slot
-        let complexity_cost = (num_dimensions as u64) * (num_dimensions as u64) * 100; // Quadratic complexity cost
-        
+        let complexity_cost =
+            (num_dimensions as u64) * (num_dimensions as u64) * 100; // Quadratic complexity cost
+
         let total_cost = base_cost + complexity_cost;
         Ok(bitcoin::Amount::from_sat(total_cost))
     }
 
     /// Estimate storage fee for market based on decision slots
-    fn estimate_market_storage_fee(&self, decision_slots: &[String]) -> Result<bitcoin::Amount, Error> {
+    fn estimate_market_storage_fee(
+        &self,
+        decision_slots: &[String],
+    ) -> Result<bitcoin::Amount, Error> {
         // Simple validation: prevent creating markets with too many decision slots
         // This is a rough approximation - the actual outcome count depends on the specific decisions
         // but this provides early validation in the wallet layer
         const MAX_DECISION_SLOTS: usize = 8; // Conservative limit - prevents most > 256 outcome scenarios
-        
+
         if decision_slots.len() > MAX_DECISION_SLOTS {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Too many decision slots: {} (max {})", decision_slots.len(), MAX_DECISION_SLOTS)
+                format!(
+                    "Too many decision slots: {} (max {})",
+                    decision_slots.len(),
+                    MAX_DECISION_SLOTS
+                ),
             )));
         }
-        
+
         // Base fee + quadratic scaling based on market complexity
         // This is a simplified estimation - actual fee calculated in market creation
         let base_fee = bitcoin::Amount::from_sat(1000); // BASE_MARKET_STORAGE_COST_SATS
         let complexity_factor = decision_slots.len() as u64;
-        let complexity_fee = bitcoin::Amount::from_sat(complexity_factor * complexity_factor);
-        base_fee.checked_add(complexity_fee).ok_or(Error::AmountOverflow(AmountOverflowError))
+        let complexity_fee =
+            bitcoin::Amount::from_sat(complexity_factor * complexity_factor);
+        base_fee
+            .checked_add(complexity_fee)
+            .ok_or(Error::AmountOverflow(AmountOverflowError))
     }
 
     /// Market creation method supporting all market types
@@ -751,27 +769,37 @@ impl Wallet {
         // Determine transaction data type and estimate storage fee based on market type
         let (tx_data, storage_fee) = match market_type.as_str() {
             "dimensional" => {
-                let dimensions = dimensions.ok_or_else(|| Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Dimensional markets require dimensions specification"
-                )))?;
-                
+                let dimensions = dimensions.ok_or_else(|| {
+                    Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Dimensional markets require dimensions specification",
+                    ))
+                })?;
+
                 // Parse dimensions to estimate storage fee
-                let dimension_specs = parse_dimensions(&dimensions)
-                    .map_err(|_| Error::InvalidSlotId {
-                        reason: "Failed to parse dimension specification".to_string(),
+                let dimension_specs =
+                    parse_dimensions(&dimensions).map_err(|_| {
+                        Error::InvalidSlotId {
+                            reason: "Failed to parse dimension specification"
+                                .to_string(),
+                        }
                     })?;
-                
+
                 // Count total slots for storage fee estimation
                 let mut total_slots = 0;
                 for spec in &dimension_specs {
                     match spec {
                         DimensionSpec::Single(_) => total_slots += 1,
-                        DimensionSpec::Categorical(slots) => total_slots += slots.len(),
+                        DimensionSpec::Categorical(slots) => {
+                            total_slots += slots.len()
+                        }
                     }
                 }
-                
-                let storage_fee = self.estimate_dimensional_storage_fee(total_slots, dimension_specs.len())?;
+
+                let storage_fee = self.estimate_dimensional_storage_fee(
+                    total_slots,
+                    dimension_specs.len(),
+                )?;
                 let tx_data = TxData::CreateMarketDimensional {
                     title,
                     description,
@@ -780,7 +808,7 @@ impl Wallet {
                     trading_fee,
                     tags,
                 };
-                
+
                 (tx_data, storage_fee)
             }
             "independent" | "categorical" => {
@@ -788,8 +816,9 @@ impl Wallet {
                     std::io::ErrorKind::InvalidInput,
                     "Independent and categorical markets require decision_slots specification"
                 )))?;
-                
-                let storage_fee = self.estimate_market_storage_fee(&decision_slots)?;
+
+                let storage_fee =
+                    self.estimate_market_storage_fee(&decision_slots)?;
                 let tx_data = TxData::CreateMarket {
                     title,
                     description,
@@ -800,25 +829,31 @@ impl Wallet {
                     trading_fee,
                     tags,
                 };
-                
+
                 (tx_data, storage_fee)
             }
-            _ => return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Unsupported market type: {}", market_type)
-            ))),
+            _ => {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Unsupported market type: {}", market_type),
+                )));
+            }
         };
-        
+
         // Calculate total cost: transaction fee + storage fee + initial liquidity
-        let mut total_cost = fee.checked_add(storage_fee).ok_or(AmountOverflowError)?;
-        
+        let mut total_cost =
+            fee.checked_add(storage_fee).ok_or(AmountOverflowError)?;
+
         // Add initial liquidity cost if specified
         if let Some(liquidity_sats) = initial_liquidity {
             let liquidity_amount = bitcoin::Amount::from_sat(liquidity_sats);
-            total_cost = total_cost.checked_add(liquidity_amount).ok_or(AmountOverflowError)?;
+            total_cost = total_cost
+                .checked_add(liquidity_amount)
+                .ok_or(AmountOverflowError)?;
         }
-        
-        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(total_cost)?;
+
+        let (total_bitcoin, bitcoin_utxos) =
+            self.select_bitcoins(total_cost)?;
         let change = total_bitcoin - total_cost;
 
         let inputs = bitcoin_utxos.into_keys().collect();
@@ -849,9 +884,11 @@ impl Wallet {
     ) -> Result<Transaction, Error> {
         // Estimate maximum cost including slippage protection
         let estimated_cost = bitcoin::Amount::from_sat(max_cost);
-        let total_cost = fee.checked_add(estimated_cost).ok_or(AmountOverflowError)?;
-        
-        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(total_cost)?;
+        let total_cost =
+            fee.checked_add(estimated_cost).ok_or(AmountOverflowError)?;
+
+        let (total_bitcoin, bitcoin_utxos) =
+            self.select_bitcoins(total_cost)?;
         let change = total_bitcoin - total_cost;
 
         let inputs = bitcoin_utxos.into_keys().collect();

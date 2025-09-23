@@ -20,7 +20,7 @@ use crate::state::{Error, voting::types::*};
 use fallible_iterator::FallibleIterator;
 use heed::types::SerdeBincode;
 // Removed unused serde imports - types module handles serialization
-use sneed::{DatabaseUnique, Env, RwTxn, RoTxn};
+use sneed::{DatabaseUnique, Env, RoTxn, RwTxn};
 use std::collections::{HashMap, HashSet};
 
 /// Database collection for Bitcoin Hivemind voting system
@@ -32,27 +32,43 @@ use std::collections::{HashMap, HashSet};
 pub struct VotingDatabases {
     /// Core voting periods database
     /// Key: VotingPeriodId, Value: VotingPeriod
-    voting_periods: DatabaseUnique<SerdeBincode<VotingPeriodId>, SerdeBincode<VotingPeriod>>,
+    voting_periods: DatabaseUnique<
+        SerdeBincode<VotingPeriodId>,
+        SerdeBincode<VotingPeriod>,
+    >,
 
     /// Individual votes in sparse matrix format
     /// Key: VoteMatrixKey, Value: VoteMatrixEntry
-    votes: DatabaseUnique<SerdeBincode<VoteMatrixKey>, SerdeBincode<VoteMatrixEntry>>,
+    votes: DatabaseUnique<
+        SerdeBincode<VoteMatrixKey>,
+        SerdeBincode<VoteMatrixEntry>,
+    >,
 
     /// Bulk vote batches for efficient processing
     /// Key: (VotingPeriodId, batch_index), Value: VoteBatch
-    vote_batches: DatabaseUnique<SerdeBincode<(VotingPeriodId, u32)>, SerdeBincode<VoteBatch>>,
+    vote_batches: DatabaseUnique<
+        SerdeBincode<(VotingPeriodId, u32)>,
+        SerdeBincode<VoteBatch>,
+    >,
 
     /// Voter reputation tracking
     /// Key: VoterId, Value: VoterReputation
-    voter_reputation: DatabaseUnique<SerdeBincode<VoterId>, SerdeBincode<VoterReputation>>,
+    voter_reputation:
+        DatabaseUnique<SerdeBincode<VoterId>, SerdeBincode<VoterReputation>>,
 
     /// Final decision outcomes after consensus
     /// Key: (VotingPeriodId, SlotId), Value: DecisionOutcome
-    decision_outcomes: DatabaseUnique<SerdeBincode<(VotingPeriodId, crate::state::slots::SlotId)>, SerdeBincode<DecisionOutcome>>,
+    decision_outcomes: DatabaseUnique<
+        SerdeBincode<(VotingPeriodId, crate::state::slots::SlotId)>,
+        SerdeBincode<DecisionOutcome>,
+    >,
 
     /// Period statistics and analytics
     /// Key: VotingPeriodId, Value: VotingPeriodStats
-    period_stats: DatabaseUnique<SerdeBincode<VotingPeriodId>, SerdeBincode<VotingPeriodStats>>,
+    period_stats: DatabaseUnique<
+        SerdeBincode<VotingPeriodId>,
+        SerdeBincode<VotingPeriodStats>,
+    >,
 }
 
 impl VotingDatabases {
@@ -72,11 +88,23 @@ impl VotingDatabases {
     /// Returns database creation errors if any table fails to initialize
     pub fn new(env: &Env, rwtxn: &mut RwTxn<'_>) -> Result<Self, Error> {
         Ok(Self {
-            voting_periods: DatabaseUnique::create(env, rwtxn, "voting_periods")?,
+            voting_periods: DatabaseUnique::create(
+                env,
+                rwtxn,
+                "voting_periods",
+            )?,
             votes: DatabaseUnique::create(env, rwtxn, "votes")?,
             vote_batches: DatabaseUnique::create(env, rwtxn, "vote_batches")?,
-            voter_reputation: DatabaseUnique::create(env, rwtxn, "voter_reputation")?,
-            decision_outcomes: DatabaseUnique::create(env, rwtxn, "decision_outcomes")?,
+            voter_reputation: DatabaseUnique::create(
+                env,
+                rwtxn,
+                "voter_reputation",
+            )?,
+            decision_outcomes: DatabaseUnique::create(
+                env,
+                rwtxn,
+                "decision_outcomes",
+            )?,
             period_stats: DatabaseUnique::create(env, rwtxn, "period_stats")?,
         })
     }
@@ -135,7 +163,9 @@ impl VotingDatabases {
         period_id: VotingPeriodId,
         new_status: VotingPeriodStatus,
     ) -> Result<(), Error> {
-        if let Some(mut period) = self.voting_periods.try_get(rwtxn, &period_id)? {
+        if let Some(mut period) =
+            self.voting_periods.try_get(rwtxn, &period_id)?
+        {
             period.status = new_status;
             self.voting_periods.put(rwtxn, &period_id, &period)?;
         }
@@ -187,7 +217,9 @@ impl VotingDatabases {
 
         while let Some((_period_id, period)) = iter.next()? {
             // Period overlaps range if it starts before end_time and ends after start_time
-            if period.start_timestamp < end_time && period.end_timestamp > start_time {
+            if period.start_timestamp < end_time
+                && period.end_timestamp > start_time
+            {
                 periods.push(period);
             }
         }
@@ -213,8 +245,10 @@ impl VotingDatabases {
         rwtxn: &mut RwTxn,
         vote: &Vote,
     ) -> Result<(), Error> {
-        let key = VoteMatrixKey::new(vote.period_id, vote.voter_id, vote.decision_id);
-        let entry = VoteMatrixEntry::new(vote.value, vote.timestamp, vote.block_height);
+        let key =
+            VoteMatrixKey::new(vote.period_id, vote.voter_id, vote.decision_id);
+        let entry =
+            VoteMatrixEntry::new(vote.value, vote.timestamp, vote.block_height);
 
         self.votes.put(rwtxn, &key, &entry)?;
         Ok(())
@@ -426,7 +460,8 @@ impl VotingDatabases {
         rwtxn: &mut RwTxn,
         reputation: &VoterReputation,
     ) -> Result<(), Error> {
-        self.voter_reputation.put(rwtxn, &reputation.voter_id, reputation)?;
+        self.voter_reputation
+            .put(rwtxn, &reputation.voter_id, reputation)?;
         Ok(())
     }
 
@@ -505,7 +540,12 @@ impl VotingDatabases {
             reputations[reputations.len() / 2]
         };
 
-        Ok((total_voters, avg_reputation, median_reputation, total_weight))
+        Ok((
+            total_voters,
+            avg_reputation,
+            median_reputation,
+            total_weight,
+        ))
     }
 
     // ================================================================================
@@ -562,7 +602,8 @@ impl VotingDatabases {
         &self,
         rotxn: &RoTxn,
         period_id: VotingPeriodId,
-    ) -> Result<HashMap<crate::state::slots::SlotId, DecisionOutcome>, Error> {
+    ) -> Result<HashMap<crate::state::slots::SlotId, DecisionOutcome>, Error>
+    {
         let mut outcomes = HashMap::new();
         let mut iter = self.decision_outcomes.iter(rotxn)?;
 
@@ -692,7 +733,10 @@ impl VotingDatabases {
     ///
     /// # Returns
     /// Set of all unique voter IDs
-    pub fn get_all_voters(&self, rotxn: &RoTxn) -> Result<HashSet<VoterId>, Error> {
+    pub fn get_all_voters(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<HashSet<VoterId>, Error> {
         let mut voters = HashSet::new();
         let mut iter = self.votes.iter(rotxn)?;
 
@@ -710,7 +754,10 @@ impl VotingDatabases {
     ///
     /// # Returns
     /// Vector of consistency warnings/errors found
-    pub fn check_consistency(&self, rotxn: &RoTxn) -> Result<Vec<String>, Error> {
+    pub fn check_consistency(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<Vec<String>, Error> {
         let mut issues = Vec::new();
 
         // Check that all votes reference valid periods
@@ -732,7 +779,9 @@ impl VotingDatabases {
 
         // Check that all outcomes reference valid periods
         let mut outcome_iter = self.decision_outcomes.iter(rotxn)?;
-        while let Some(((period_id, _decision_id), _outcome)) = outcome_iter.next()? {
+        while let Some(((period_id, _decision_id), _outcome)) =
+            outcome_iter.next()?
+        {
             if !valid_periods.contains(&period_id) {
                 issues.push(format!(
                     "Outcome references invalid period: {:?}",

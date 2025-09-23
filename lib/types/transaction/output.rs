@@ -461,9 +461,7 @@ mod content {
         #[inline(always)]
         fn get_bitcoin_value(&self) -> bitcoin::Amount {
             match self {
-                Self::Votecoin(_) => {
-                    bitcoin::Amount::ZERO
-                }
+                Self::Votecoin(_) => bitcoin::Amount::ZERO,
                 Self::Bitcoin(value) => value.0,
                 Self::Withdrawal(withdrawal) => withdrawal.get_bitcoin_value(),
             }
@@ -576,7 +574,7 @@ mod filled_content {
 
         /// `true` if the output content corresponds to an LP token
         pub fn is_lp_token(&self) -> bool {
-false
+            false
         }
 
         /// `true` if the output content corresponds to a withdrawal

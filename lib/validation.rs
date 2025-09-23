@@ -1,16 +1,13 @@
-//! Validation utilities for Bitcoin Hivemind sidechain.
-//! This module is the single source of truth for all validation logic.
-
-use crate::state::slots::{SlotId, Decision};
-use crate::state::markets::{MarketError, DFunction, DimensionSpec, MarketState};
 use crate::state::Error;
-use crate::types::{FilledTransaction, Address};
+use crate::state::markets::{
+    DFunction, DimensionSpec, MarketError, MarketState,
+};
+use crate::state::slots::{Decision, SlotId};
+use crate::types::{Address, FilledTransaction};
 use sneed::RoTxn;
 use std::collections::HashSet;
 
-/// Slot validation database interface.
 pub trait SlotValidationInterface {
-    /// Validate that a slot can be claimed according to Hivemind rules
     fn validate_slot_claim(
         &self,
         rotxn: &RoTxn,
@@ -20,31 +17,29 @@ pub trait SlotValidationInterface {
         current_height: Option<u32>,
     ) -> Result<(), Error>;
 
-    /// Try to get current blockchain height for validation context
     fn try_get_height(&self, rotxn: &RoTxn) -> Result<Option<u32>, Error>;
 }
 
-/// Slot ID validation utilities.
 pub struct SlotValidator;
 
 impl SlotValidator {
-    /// Parse slot ID from hex string.
-    /// Delegates to SlotId::from_hex for consistency and single source of truth.
     pub fn parse_slot_id_from_hex(slot_id_hex: &str) -> Result<SlotId, Error> {
         SlotId::from_hex(slot_id_hex)
     }
 
-    /// Validate slot ID bytes consistency.
-    pub fn validate_slot_id_consistency(slot_id: &SlotId, slot_id_bytes: [u8; 3]) -> Result<(), Error> {
+    pub fn validate_slot_id_consistency(
+        slot_id: &SlotId,
+        slot_id_bytes: [u8; 3],
+    ) -> Result<(), Error> {
         if slot_id.as_bytes() != slot_id_bytes {
             return Err(Error::InvalidSlotId {
-                reason: "Slot ID bytes don't match computed slot ID".to_string(),
+                reason: "Slot ID bytes don't match computed slot ID"
+                    .to_string(),
             });
         }
         Ok(())
     }
 
-    /// Validate decision structure.
     pub fn validate_decision_structure(
         market_maker_address_bytes: [u8; 20],
         slot_id_bytes: [u8; 3],
@@ -65,7 +60,6 @@ impl SlotValidator {
         )
     }
 
-    /// Validate complete decision slot claim.
     pub fn validate_complete_decision_slot_claim<T>(
         slots_db: &T,
         rotxn: &RoTxn,
@@ -75,25 +69,19 @@ impl SlotValidator {
     where
         T: SlotValidationInterface,
     {
-        // Validate transaction contains slot claim data
-        let claim = tx.claim_decision_slot()
-            .ok_or_else(|| Error::InvalidTransaction {
+        let claim = tx.claim_decision_slot().ok_or_else(|| {
+            Error::InvalidTransaction {
                 reason: "Not a decision slot claim transaction".to_string(),
-            })?;
+            }
+        })?;
 
-        // Parse and validate slot ID
         let slot_id = SlotId::from_bytes(claim.slot_id_bytes)?;
-
-        // Validate slot ID consistency
         Self::validate_slot_id_consistency(&slot_id, claim.slot_id_bytes)?;
 
-        // Validate market maker authorization
-        let market_maker_address = MarketValidator::validate_market_maker_authorization(tx)?;
-        let market_maker_address_bytes = market_maker_address.0;
-
-        // Validate decision structure
+        let market_maker_address =
+            MarketValidator::validate_market_maker_authorization(tx)?;
         let decision = Self::validate_decision_structure(
-            market_maker_address_bytes,
+            market_maker_address.0,
             claim.slot_id_bytes,
             claim.is_standard,
             claim.is_scaled,
@@ -102,49 +90,48 @@ impl SlotValidator {
             claim.max,
         )?;
 
-        // Get current timestamp
         let current_ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_else(|_| std::time::Duration::from_secs(0))
             .as_secs();
-        
-        // Get current height
-        let current_height = override_height.or_else(|| slots_db.try_get_height(rotxn).ok().flatten());
-        
-        // Perform slot claim validation
-        slots_db.validate_slot_claim(
-            rotxn,
-            slot_id,
-            &decision,
-            current_ts,
-            current_height
-        ).map_err(|e| match e {
-            // Convert slot-specific errors to InvalidSlotId for API consistency
-            Error::SlotNotAvailable { slot_id: _, reason } => Error::InvalidSlotId { reason },
-            Error::SlotAlreadyClaimed { slot_id: _ } => Error::InvalidSlotId { 
-                reason: "Slot already claimed".to_string() 
-            },
-            other => other,
-        })?;
 
-        Ok(())
+        let current_height = override_height
+            .or_else(|| slots_db.try_get_height(rotxn).ok().flatten());
+
+        slots_db
+            .validate_slot_claim(
+                rotxn,
+                slot_id,
+                &decision,
+                current_ts,
+                current_height,
+            )
+            .map_err(|e| match e {
+                Error::SlotNotAvailable { slot_id: _, reason } => {
+                    Error::InvalidSlotId { reason }
+                }
+                Error::SlotAlreadyClaimed { slot_id: _ } => {
+                    Error::InvalidSlotId {
+                        reason: "Slot already claimed".to_string(),
+                    }
+                }
+                other => other,
+            })
     }
 }
 
-/// Market validation utilities.
 pub struct MarketValidator;
 
 impl MarketValidator {
-    /// Validate market maker authorization from transaction UTXOs.
-    pub fn validate_market_maker_authorization(tx: &FilledTransaction) -> Result<Address, Error> {
-        // Validate inputs exist
+    pub fn validate_market_maker_authorization(
+        tx: &FilledTransaction,
+    ) -> Result<Address, Error> {
         if tx.inputs().is_empty() {
             return Err(Error::InvalidTransaction {
                 reason: "Transaction must have at least one input".to_string(),
             });
         }
 
-        // Validate spent UTXOs exist
         if tx.spent_utxos.is_empty() {
             return Err(Error::InvalidTransaction {
                 reason: "No spent UTXOs found".to_string(),
@@ -154,7 +141,6 @@ impl MarketValidator {
         // Extract market maker address from first UTXO
         let first_utxo = &tx.spent_utxos[0];
         let market_maker_address = first_utxo.address;
-
 
         Ok(market_maker_address)
     }
@@ -187,10 +173,14 @@ impl DFunctionValidator {
                     return Err(MarketError::InvalidDimensions);
                 }
                 Ok(())
-            },
+            }
             DFunction::Equals(func, value) => {
                 // Validate the nested function
-                Self::validate_constraint(func, max_decision_index, decision_slots)?;
+                Self::validate_constraint(
+                    func,
+                    max_decision_index,
+                    decision_slots,
+                )?;
                 // For decision equality, ensure value is within valid range
                 if let DFunction::Decision(_) = func.as_ref() {
                     // For binary decisions, valid values are 0, 1, 2 (No, Yes, Invalid)
@@ -201,21 +191,41 @@ impl DFunctionValidator {
                     }
                 }
                 Ok(())
-            },
+            }
             DFunction::And(left, right) => {
-                Self::validate_constraint(left, max_decision_index, decision_slots)?;
-                Self::validate_constraint(right, max_decision_index, decision_slots)?;
+                Self::validate_constraint(
+                    left,
+                    max_decision_index,
+                    decision_slots,
+                )?;
+                Self::validate_constraint(
+                    right,
+                    max_decision_index,
+                    decision_slots,
+                )?;
                 Ok(())
-            },
+            }
             DFunction::Or(left, right) => {
-                Self::validate_constraint(left, max_decision_index, decision_slots)?;
-                Self::validate_constraint(right, max_decision_index, decision_slots)?;
+                Self::validate_constraint(
+                    left,
+                    max_decision_index,
+                    decision_slots,
+                )?;
+                Self::validate_constraint(
+                    right,
+                    max_decision_index,
+                    decision_slots,
+                )?;
                 Ok(())
-            },
+            }
             DFunction::Not(func) => {
-                Self::validate_constraint(func, max_decision_index, decision_slots)?;
+                Self::validate_constraint(
+                    func,
+                    max_decision_index,
+                    decision_slots,
+                )?;
                 Ok(())
-            },
+            }
             DFunction::True => Ok(()),
         }
     }
@@ -286,7 +296,11 @@ impl DFunctionValidator {
         // Validate each D-function against its corresponding combination
         for (df, combo) in d_functions.iter().zip(all_combos.iter()) {
             // Basic constraint validation
-            Self::validate_constraint(df, decision_slots.len(), decision_slots)?;
+            Self::validate_constraint(
+                df,
+                decision_slots.len(),
+                decision_slots,
+            )?;
 
             // Evaluate the D-function against its own combination - should be true
             if !df.evaluate(combo, decision_slots)? {
@@ -299,10 +313,16 @@ impl DFunctionValidator {
                 match spec {
                     DimensionSpec::Single(_) => {
                         slot_idx += 1;
-                    },
+                    }
                     DimensionSpec::Categorical(slots) => {
-                        let categorical_indices: Vec<usize> = (slot_idx..slot_idx + slots.len()).collect();
-                        if !Self::validate_categorical_constraint(df, &categorical_indices, combo, decision_slots)? {
+                        let categorical_indices: Vec<usize> =
+                            (slot_idx..slot_idx + slots.len()).collect();
+                        if !Self::validate_categorical_constraint(
+                            df,
+                            &categorical_indices,
+                            combo,
+                            decision_slots,
+                        )? {
                             return Err(MarketError::InvalidOutcomeCombination);
                         }
                         slot_idx += slots.len();
@@ -359,10 +379,10 @@ impl MarketStateValidator {
 
             // Valid forward transitions
             (Trading, Voting) => true,
-            (Trading, Cancelled) => true,  // Only if no trades occurred (checked elsewhere)
-            (Trading, Invalid) => true,    // Governance action
+            (Trading, Cancelled) => true, // Only if no trades occurred (checked elsewhere)
+            (Trading, Invalid) => true,   // Governance action
             (Voting, Resolved) => true,
-            (Voting, Invalid) => true,     // Governance action
+            (Voting, Invalid) => true, // Governance action
             (Resolved, Ossified) => true,
 
             // All other transitions are invalid
@@ -371,7 +391,10 @@ impl MarketStateValidator {
 
         if !valid_transition {
             return Err(Error::InvalidTransaction {
-                reason: format!("Invalid market state transition from {:?} to {:?}", from_state, to_state),
+                reason: format!(
+                    "Invalid market state transition from {:?} to {:?}",
+                    from_state, to_state
+                ),
             });
         }
 
@@ -393,7 +416,9 @@ impl MarketStateValidator {
         market_slots: &HashSet<SlotId>,
         slots_in_voting: &HashSet<SlotId>,
     ) -> bool {
-        market_slots.iter().any(|slot_id| slots_in_voting.contains(slot_id))
+        market_slots
+            .iter()
+            .any(|slot_id| slots_in_voting.contains(slot_id))
     }
 
     /// Check if all decision slots are ossified.
@@ -411,9 +436,9 @@ impl MarketStateValidator {
         market_slots: &HashSet<SlotId>,
         slot_states: &std::collections::HashMap<SlotId, bool>,
     ) -> bool {
-        market_slots.iter().all(|slot_id| {
-            slot_states.get(slot_id).copied().unwrap_or(false)
-        })
+        market_slots
+            .iter()
+            .all(|slot_id| slot_states.get(slot_id).copied().unwrap_or(false))
     }
 }
 
@@ -423,7 +448,10 @@ pub struct PeriodCalculator;
 impl PeriodCalculator {
     /// Convert block height to testing period.
     #[inline(always)]
-    pub const fn block_height_to_testing_period(block_height: u32, testing_blocks_per_period: u32) -> u32 {
+    pub const fn block_height_to_testing_period(
+        block_height: u32,
+        testing_blocks_per_period: u32,
+    ) -> u32 {
         // Use const function for compile-time optimization when possible
         if testing_blocks_per_period == 0 {
             0
@@ -439,24 +467,25 @@ impl PeriodCalculator {
         if timestamp < crate::types::BITCOIN_GENESIS_TIMESTAMP {
             return 0;
         }
-        
-        let elapsed_seconds = timestamp - crate::types::BITCOIN_GENESIS_TIMESTAMP;
-        
+
+        let elapsed_seconds =
+            timestamp - crate::types::BITCOIN_GENESIS_TIMESTAMP;
+
         (elapsed_seconds / crate::types::SECONDS_PER_QUARTER) as u32
     }
 
     /// Get human-readable period name for timestamp with stack allocation
-    /// 
+    ///
     /// Provides quarter-year formatting for period display using stack-based string building
     #[inline]
     pub fn period_to_name(period_index: u32) -> String {
         let year = 2009_u32.wrapping_add(period_index / 4);
         let quarter = (period_index % 4) + 1;
-        
+
         // Use format! which is more efficient than string concatenation
         format!("Q{} {}", quarter, year)
     }
-    
+
     /// Validate period index is within reasonable bounds (performance optimization)
     #[inline(always)]
     pub const fn is_valid_period_index(period_index: u32) -> bool {
@@ -464,4 +493,3 @@ impl PeriodCalculator {
         period_index < 4000
     }
 }
-

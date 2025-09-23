@@ -1,27 +1,7 @@
-//! Bitcoin Hivemind Voting Data Types
-//!
-//! This module implements the core data structures for the Bitcoin Hivemind voting mechanism
-//! as specified in the whitepaper. All types are designed for efficient storage and retrieval
-//! in LMDB databases with minimal memory overhead.
-//!
-//! ## Bitcoin Hivemind Specification References
-//! - Section 3: "Voting" - Core voting mechanism and period structure
-//! - Section 4: "Consensus Algorithm" - Vote matrix and reputation systems
-//! - Section 5: "Economics" - Voter incentives and decision outcomes
-
-use serde::{Deserialize, Serialize};
-// HashMap used in function signatures but not in this file directly
 use crate::state::slots::SlotId;
 use crate::types::{Address, hashes};
+use serde::{Deserialize, Serialize};
 
-/// Unique identifier for a voting period
-///
-/// Voting periods in Bitcoin Hivemind are sequential time windows where voters
-/// can cast votes on decisions. Each period has a deterministic start/end time
-/// and contains a specific set of decisions available for voting.
-///
-/// # Specification Reference
-/// Bitcoin Hivemind whitepaper Section 3.1: "Voting Periods"
 #[derive(
     Clone,
     Copy,
@@ -37,79 +17,42 @@ use crate::types::{Address, hashes};
 pub struct VotingPeriodId(pub u32);
 
 impl VotingPeriodId {
-    /// Create a new voting period ID
     pub const fn new(period: u32) -> Self {
         Self(period)
     }
 
-    /// Get the underlying period number
     pub const fn as_u32(self) -> u32 {
         self.0
     }
 
-    /// Get the period as bytes for database storage
     pub fn as_bytes(self) -> [u8; 4] {
         self.0.to_be_bytes()
     }
 
-    /// Create from bytes (for database retrieval)
     pub fn from_bytes(bytes: [u8; 4]) -> Self {
         Self(u32::from_be_bytes(bytes))
     }
 }
 
-/// Status of a voting period according to Bitcoin Hivemind consensus rules
-///
-/// # Specification Reference
-/// Bitcoin Hivemind whitepaper Section 3.2: "Voting Period Lifecycle"
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VotingPeriodStatus {
-    /// Period is not yet open for voting
     Pending,
-    /// Period is currently accepting votes
     Active,
-    /// Voting has closed, outcomes being calculated
     Closed,
-    /// Final outcomes determined and ossified
     Resolved,
 }
 
-/// Bitcoin Hivemind voting period with deterministic boundaries
-///
-/// Each voting period represents a consensus window where voters evaluate
-/// decisions and cast votes. Periods have fixed durations and sequential
-/// ordering to ensure deterministic consensus across all network participants.
-///
-/// # Specification Reference
-/// Bitcoin Hivemind whitepaper Section 3: "Voting" - Period structure and timing
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VotingPeriod {
-    /// Unique identifier for this period
     pub id: VotingPeriodId,
-    /// L1 timestamp when voting period begins (Unix seconds)
     pub start_timestamp: u64,
-    /// L1 timestamp when voting period ends (Unix seconds)
     pub end_timestamp: u64,
-    /// Current status of this voting period
     pub status: VotingPeriodStatus,
-    /// Decision slots available for voting in this period
     pub decision_slots: Vec<SlotId>,
-    /// Block height when this period was created
     pub created_at_height: u64,
 }
 
 impl VotingPeriod {
-    /// Create a new voting period
-    ///
-    /// # Arguments
-    /// * `id` - Unique period identifier
-    /// * `start_timestamp` - L1 timestamp when voting begins
-    /// * `end_timestamp` - L1 timestamp when voting ends
-    /// * `decision_slots` - Slots available for voting in this period
-    /// * `created_at_height` - Block height when period was created
-    ///
-    /// # Returns
-    /// New VotingPeriod instance with Pending status
     pub fn new(
         id: VotingPeriodId,
         start_timestamp: u64,
@@ -127,44 +70,21 @@ impl VotingPeriod {
         }
     }
 
-    /// Check if this period is currently active for voting
-    ///
-    /// # Arguments
-    /// * `current_timestamp` - Current L1 timestamp
-    ///
-    /// # Returns
-    /// True if period is within voting window and has Active status
     pub fn is_active(&self, current_timestamp: u64) -> bool {
         self.status == VotingPeriodStatus::Active
             && current_timestamp >= self.start_timestamp
             && current_timestamp < self.end_timestamp
     }
 
-    /// Check if voting period has ended
-    ///
-    /// # Arguments
-    /// * `current_timestamp` - Current L1 timestamp
-    ///
-    /// # Returns
-    /// True if current time is past end_timestamp
     pub fn has_ended(&self, current_timestamp: u64) -> bool {
         current_timestamp >= self.end_timestamp
     }
 
-    /// Get the duration of this voting period in seconds
     pub fn duration_seconds(&self) -> u64 {
         self.end_timestamp.saturating_sub(self.start_timestamp)
     }
 }
 
-/// Unique identifier for a voter in the Bitcoin Hivemind system
-///
-/// Voter IDs are derived from addresses to ensure one identity per economic actor
-/// while maintaining pseudonymity. The system uses 20-byte address hashes for
-/// efficient storage and lookup.
-///
-/// # Specification Reference
-/// Bitcoin Hivemind whitepaper Section 4.1: "Voter Registration"
 #[derive(
     Clone,
     Copy,
@@ -180,23 +100,14 @@ impl VotingPeriod {
 pub struct VoterId([u8; 20]);
 
 impl VoterId {
-    /// Create a VoterId from an address
-    ///
-    /// # Arguments
-    /// * `address` - Voter's sidechain address
-    ///
-    /// # Returns
-    /// VoterId derived from address hash
     pub fn from_address(address: &Address) -> Self {
         Self(address.0)
     }
 
-    /// Create VoterId from raw bytes
     pub fn from_bytes(bytes: [u8; 20]) -> Self {
         Self(bytes)
     }
 
-    /// Get the underlying bytes
     pub fn as_bytes(&self) -> &[u8; 20] {
         &self.0
     }
@@ -455,7 +366,11 @@ impl VoterReputation {
     /// # Bitcoin Hivemind Specification
     /// This implements the Votecoin Holdings Proportion component of:
     /// **Final Voting Weight = Base Reputation × Votecoin Holdings Proportion**
-    pub fn update_votecoin_proportion(&mut self, votecoin_proportion: f64, current_height: u64) {
+    pub fn update_votecoin_proportion(
+        &mut self,
+        votecoin_proportion: f64,
+        current_height: u64,
+    ) {
         self.votecoin_proportion = votecoin_proportion.clamp(0.0, 1.0);
         self.votecoin_updated_height = Some(current_height);
         self.update_voting_weight();
@@ -506,10 +421,16 @@ impl VoterReputation {
     ///
     /// # Returns
     /// True if proportion should be refreshed from UTXO set
-    pub fn needs_votecoin_refresh(&self, current_height: u64, max_staleness: u64) -> bool {
+    pub fn needs_votecoin_refresh(
+        &self,
+        current_height: u64,
+        max_staleness: u64,
+    ) -> bool {
         match self.votecoin_updated_height {
             None => true, // Never updated
-            Some(last_height) => current_height.saturating_sub(last_height) > max_staleness,
+            Some(last_height) => {
+                current_height.saturating_sub(last_height) > max_staleness
+            }
         }
     }
 }
@@ -637,7 +558,8 @@ impl DecisionResolution {
     /// Check if decision is ready for consensus calculation
     pub fn is_ready_for_consensus(&self, current_timestamp: u64) -> bool {
         matches!(self.status, DecisionResolutionStatus::Pending)
-            && (self.is_voting_expired(current_timestamp) || self.has_minimum_votes())
+            && (self.is_voting_expired(current_timestamp)
+                || self.has_minimum_votes())
     }
 
     /// Mark outcome as ready
@@ -778,7 +700,18 @@ impl DecisionOutcome {
 ///
 /// # Specification Reference
 /// Bitcoin Hivemind whitepaper Section 4.4: "Vote Matrix Structure"
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    PartialEq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+)]
 pub struct VoteMatrixKey {
     /// Voting period this key belongs to
     pub period_id: VotingPeriodId,
@@ -790,7 +723,11 @@ pub struct VoteMatrixKey {
 
 impl VoteMatrixKey {
     /// Create a new vote matrix key
-    pub fn new(period_id: VotingPeriodId, voter_id: VoterId, decision_id: SlotId) -> Self {
+    pub fn new(
+        period_id: VotingPeriodId,
+        voter_id: VoterId,
+        decision_id: SlotId,
+    ) -> Self {
         Self {
             period_id,
             voter_id,
@@ -852,7 +789,11 @@ pub struct VoteBatch {
 
 impl VoteBatch {
     /// Create a new vote batch
-    pub fn new(period_id: VotingPeriodId, created_at: u64, block_height: u64) -> Self {
+    pub fn new(
+        period_id: VotingPeriodId,
+        created_at: u64,
+        block_height: u64,
+    ) -> Self {
         Self {
             period_id,
             votes: Vec::new(),
@@ -919,7 +860,8 @@ impl VotingPeriodStats {
     /// Calculate participation rate
     pub fn participation_rate(&self) -> f64 {
         if self.total_decisions > 0 && self.total_voters > 0 {
-            self.total_votes as f64 / (self.total_decisions * self.total_voters) as f64
+            self.total_votes as f64
+                / (self.total_decisions * self.total_voters) as f64
         } else {
             0.0
         }
@@ -978,13 +920,8 @@ mod tests {
     fn test_voting_period() {
         let start = 1000;
         let end = 2000;
-        let period = VotingPeriod::new(
-            VotingPeriodId::new(1),
-            start,
-            end,
-            vec![],
-            100,
-        );
+        let period =
+            VotingPeriod::new(VotingPeriodId::new(1), start, end, vec![], 100);
 
         assert_eq!(period.duration_seconds(), 1000);
         assert!(!period.is_active(500)); // Before start
@@ -996,12 +933,8 @@ mod tests {
     #[test]
     fn test_voter_reputation() {
         let voter_id = VoterId::from_bytes([1u8; 20]);
-        let mut reputation = VoterReputation::new(
-            voter_id,
-            0.5,
-            1000,
-            VotingPeriodId::new(1),
-        );
+        let mut reputation =
+            VoterReputation::new(voter_id, 0.5, 1000, VotingPeriodId::new(1));
 
         assert_eq!(reputation.reputation, 0.5);
         assert_eq!(reputation.total_decisions, 0);

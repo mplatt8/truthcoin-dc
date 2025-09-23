@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
-use bitcoin::Amount;
 use bip39;
+use bitcoin::Amount;
 use jsonrpsee::{
     core::{RpcResult, async_trait},
     server::{RpcServiceBuilder, Server},
@@ -22,13 +22,13 @@ use truthcoin_dc::{
         FilledOutputContent, PointedOutput, Transaction, Txid, VerifyingKey,
         WithdrawalBundle,
     },
-    validation::{SlotValidator, PeriodCalculator},
+    validation::{PeriodCalculator, SlotValidator},
     wallet::Balance,
 };
 use truthcoin_dc_app_rpc_api::{
-    AvailableSlotId, RegisterVoterRequest, RpcServer, SubmitVoteRequest,
-    SubmitVoteBatchRequest, TxInfo, VoteInfo, VoterInfo, VoterParticipation,
-    VotingPeriodDetails
+    AvailableSlotId, RegisterVoterRequest, RpcServer, SubmitVoteBatchRequest,
+    SubmitVoteRequest, TxInfo, VoteInfo, VoterInfo, VoterParticipation,
+    VotingPeriodDetails,
 };
 
 use crate::app::App;
@@ -45,14 +45,16 @@ where
     custom_err_msg(format!("{error:#}"))
 }
 
-fn parse_market_id(market_id: &str) -> RpcResult<truthcoin_dc::state::MarketId> {
+fn parse_market_id(
+    market_id: &str,
+) -> RpcResult<truthcoin_dc::state::MarketId> {
     let market_id_bytes = hex::decode(market_id)
         .map_err(|_| custom_err_msg("Invalid market ID hex format"))?;
-    
+
     if market_id_bytes.len() != 6 {
         return Err(custom_err_msg("Market ID must be exactly 6 bytes"));
     }
-    
+
     let mut id_array = [0u8; 6];
     id_array.copy_from_slice(&market_id_bytes);
     Ok(truthcoin_dc::state::MarketId::new(id_array))
@@ -64,7 +66,6 @@ pub struct RpcServerImpl {
 
 #[async_trait]
 impl RpcServer for RpcServerImpl {
-
     async fn get_block(&self, block_hash: BlockHash) -> RpcResult<Block> {
         let block = self
             .app
@@ -455,13 +456,18 @@ impl RpcServer for RpcServerImpl {
                 .try_get_tip_height()
                 .map_err(custom_err)?
                 .unwrap_or(0);
-            let testing_blocks_per_period = self.app.node.get_slots_testing_config();
-            PeriodCalculator::block_height_to_testing_period(tip_height, testing_blocks_per_period)
+            let testing_blocks_per_period =
+                self.app.node.get_slots_testing_config();
+            PeriodCalculator::block_height_to_testing_period(
+                tip_height,
+                testing_blocks_per_period,
+            )
         } else {
             PeriodCalculator::timestamp_to_period(current_timestamp)
         };
 
-        let current_period_name = PeriodCalculator::period_to_name(current_period);
+        let current_period_name =
+            PeriodCalculator::period_to_name(current_period);
 
         Ok(truthcoin_dc_app_rpc_api::SlotStatus {
             is_testing_mode,
@@ -483,10 +489,11 @@ impl RpcServer for RpcServerImpl {
         &self,
         block_height: u32,
     ) -> RpcResult<u32> {
-        let testing_blocks_per_period = self.app.node.get_slots_testing_config();
+        let testing_blocks_per_period =
+            self.app.node.get_slots_testing_config();
         Ok(PeriodCalculator::block_height_to_testing_period(
-            block_height, 
-            testing_blocks_per_period
+            block_height,
+            testing_blocks_per_period,
         ))
     }
 
@@ -509,7 +516,8 @@ impl RpcServer for RpcServerImpl {
             ));
         }
 
-        let slot_id = SlotId::new(period_index, slot_index).map_err(custom_err)?;
+        let slot_id =
+            SlotId::new(period_index, slot_index).map_err(custom_err)?;
         let slot_id_bytes = slot_id.as_bytes();
         let mut tx = Transaction::default();
         let fee = Amount::from_sat(fee_sats);
@@ -659,7 +667,8 @@ impl RpcServer for RpcServerImpl {
     async fn is_slot_in_voting(&self, slot_id_hex: String) -> RpcResult<bool> {
         use truthcoin_dc::validation::SlotValidator;
 
-        let slot_id = SlotValidator::parse_slot_id_from_hex(&slot_id_hex).map_err(custom_err)?;
+        let slot_id = SlotValidator::parse_slot_id_from_hex(&slot_id_hex)
+            .map_err(custom_err)?;
         let is_voting = self
             .app
             .node
@@ -669,8 +678,11 @@ impl RpcServer for RpcServerImpl {
         Ok(is_voting)
     }
 
-    async fn get_ossified_slots(&self) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::OssifiedSlotInfo>> {
-        let ossified_slots = self.app.node.get_ossified_slots().map_err(custom_err)?;
+    async fn get_ossified_slots(
+        &self,
+    ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::OssifiedSlotInfo>> {
+        let ossified_slots =
+            self.app.node.get_ossified_slots().map_err(custom_err)?;
 
         let result = ossified_slots
             .into_iter()
@@ -701,8 +713,9 @@ impl RpcServer for RpcServerImpl {
         Ok(result)
     }
 
-
-    async fn list_markets(&self) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::MarketSummary>> {
+    async fn list_markets(
+        &self,
+    ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::MarketSummary>> {
         let markets = self
             .app
             .node
@@ -732,7 +745,10 @@ impl RpcServer for RpcServerImpl {
         Ok(market_summaries)
     }
 
-    async fn view_market(&self, market_id: String) -> RpcResult<Option<truthcoin_dc_app_rpc_api::MarketData>> {
+    async fn view_market(
+        &self,
+        market_id: String,
+    ) -> RpcResult<Option<truthcoin_dc_app_rpc_api::MarketData>> {
         let market_id_struct = parse_market_id(&market_id)?;
 
         let market = match self
@@ -754,7 +770,12 @@ impl RpcServer for RpcServerImpl {
         let mut outcomes = Vec::new();
         let valid_state_combos = market.get_valid_state_combos();
 
-        let prices = if let Some(mempool_shares) = self.app.node.get_mempool_shares(&market_id_struct).map_err(custom_err)? {
+        let prices = if let Some(mempool_shares) = self
+            .app
+            .node
+            .get_mempool_shares(&market_id_struct)
+            .map_err(custom_err)?
+        {
             let all_prices = market.calculate_prices(&mempool_shares);
             let valid_prices: Vec<f64> = valid_state_combos
                 .iter()
@@ -774,7 +795,9 @@ impl RpcServer for RpcServerImpl {
         let total_volume = market.total_volume_sats as f64;
 
         for (i, (state_idx, _combo)) in valid_state_combos.iter().enumerate() {
-            let name = match market.describe_outcome_by_state(*state_idx, &decisions) {
+            let name = match market
+                .describe_outcome_by_state(*state_idx, &decisions)
+            {
                 Ok(description) => description,
                 Err(_) => format!("Outcome {}", state_idx),
             };
@@ -823,7 +846,6 @@ impl RpcServer for RpcServerImpl {
         Ok(Some(market_data))
     }
 
-
     async fn redeem_shares(
         &self,
         market_id: String,
@@ -854,19 +876,27 @@ impl RpcServer for RpcServerImpl {
         &self,
         request: truthcoin_dc_app_rpc_api::CreateMarketRequest,
     ) -> RpcResult<String> {
-        let tx = self.app.wallet.create_market(
-            request.title,
-            request.description,
-            request.market_type,
-            if request.decision_slots.is_empty() { None } else { Some(request.decision_slots) },
-            request.dimensions,
-            request.has_residual,
-            request.beta,
-            request.trading_fee,
-            request.tags,
-            request.initial_liquidity,
-            bitcoin::Amount::from_sat(request.fee_sats),
-        ).map_err(custom_err)?;
+        let tx = self
+            .app
+            .wallet
+            .create_market(
+                request.title,
+                request.description,
+                request.market_type,
+                if request.decision_slots.is_empty() {
+                    None
+                } else {
+                    Some(request.decision_slots)
+                },
+                request.dimensions,
+                request.has_residual,
+                request.beta,
+                request.trading_fee,
+                request.tags,
+                request.initial_liquidity,
+                bitcoin::Amount::from_sat(request.fee_sats),
+            )
+            .map_err(custom_err)?;
 
         let txid = tx.txid();
 
@@ -886,52 +916,98 @@ impl RpcServer for RpcServerImpl {
 
         if beta <= 0.0 {
             return Err(custom_err_msg(format!(
-                "Beta parameter must be positive, got: {}", beta
+                "Beta parameter must be positive, got: {}",
+                beta
             )));
         }
-        let (num_outcomes, market_config, outcome_breakdown) = if let Some(num) = request.num_outcomes {
+        let (num_outcomes, market_config, outcome_breakdown) = if let Some(
+            num,
+        ) =
+            request.num_outcomes
+        {
             if num < 2 {
                 return Err(custom_err_msg(
-                    "Number of outcomes must be at least 2".to_string()
+                    "Number of outcomes must be at least 2".to_string(),
                 ));
             }
-            (num, format!("Preview: {} outcomes", num), format!("{} outcomes specified", num))
+            (
+                num,
+                format!("Preview: {} outcomes", num),
+                format!("{} outcomes specified", num),
+            )
         } else if let Some(ref decision_slots) = request.decision_slots {
             match request.market_type.as_str() {
                 "independent" => {
                     let num = 2_usize.pow(decision_slots.len() as u32);
-                    (num, format!("Independent: {} binary decisions", decision_slots.len()),
-                     format!("{} binary decisions = 2^{} = {} total outcome combinations",
-                             decision_slots.len(), decision_slots.len(), num))
-                },
+                    (
+                        num,
+                        format!(
+                            "Independent: {} binary decisions",
+                            decision_slots.len()
+                        ),
+                        format!(
+                            "{} binary decisions = 2^{} = {} total outcome combinations",
+                            decision_slots.len(),
+                            decision_slots.len(),
+                            num
+                        ),
+                    )
+                }
                 "categorical" => {
                     let base_outcomes = decision_slots.len();
                     let has_residual = request.has_residual.unwrap_or(false);
-                    let total = if has_residual { base_outcomes + 1 } else { base_outcomes };
-                    (total, format!("Categorical: {} categories{}", base_outcomes,
-                                  if has_residual { " + residual" } else { "" }),
-                     format!("{} categories{} = {} total outcomes", base_outcomes,
-                            if has_residual { " + 1 residual" } else { "" }, total))
-                },
+                    let total = if has_residual {
+                        base_outcomes + 1
+                    } else {
+                        base_outcomes
+                    };
+                    (
+                        total,
+                        format!(
+                            "Categorical: {} categories{}",
+                            base_outcomes,
+                            if has_residual { " + residual" } else { "" }
+                        ),
+                        format!(
+                            "{} categories{} = {} total outcomes",
+                            base_outcomes,
+                            if has_residual { " + 1 residual" } else { "" },
+                            total
+                        ),
+                    )
+                }
                 "dimensional" => {
                     if let Some(ref dims) = request.dimensions {
                         let estimated_outcomes = decision_slots.len() * 2;
-                        (estimated_outcomes, format!("Dimensional: {} dimensions", decision_slots.len()),
-                         format!("Estimated {} outcomes from {} dimensions (actual calculation requires dimension parsing)",
-                                estimated_outcomes, decision_slots.len()))
+                        (
+                            estimated_outcomes,
+                            format!(
+                                "Dimensional: {} dimensions",
+                                decision_slots.len()
+                            ),
+                            format!(
+                                "Estimated {} outcomes from {} dimensions (actual calculation requires dimension parsing)",
+                                estimated_outcomes,
+                                decision_slots.len()
+                            ),
+                        )
                     } else {
                         return Err(custom_err_msg(
                             "Dimensional markets require dimension specification".to_string()
                         ));
                     }
-                },
-                _ => return Err(custom_err_msg(format!(
-                    "Unknown market type: {}", request.market_type
-                )))
+                }
+                _ => {
+                    return Err(custom_err_msg(format!(
+                        "Unknown market type: {}",
+                        request.market_type
+                    )));
+                }
             }
         } else {
             return Err(custom_err_msg(
-                "Either decision_slots or num_outcomes must be provided".to_string()
+                "Either decision_slots or num_outcomes must be provided"
+                    .to_string(),
             ));
         };
 
@@ -964,12 +1040,13 @@ impl RpcServer for RpcServerImpl {
         let mut active_markets = std::collections::HashSet::new();
         let mut last_updated_height = 0u64;
 
-        let unique_market_ids: Vec<truthcoin_dc::state::MarketId> = positions_data
-            .iter()
-            .map(|(market_id, _, _)| market_id.clone())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
+        let unique_market_ids: Vec<truthcoin_dc::state::MarketId> =
+            positions_data
+                .iter()
+                .map(|(market_id, _, _)| market_id.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
 
         let markets_map = node
             .get_markets_batch(&unique_market_ids)
@@ -981,12 +1058,19 @@ impl RpcServer for RpcServerImpl {
         }
 
         for (market_id, outcome_index, position_data) in positions_data {
-            if let (Some(market), Some(current_prices)) = (markets_map.get(&market_id), prices_cache.get(&market_id)) {
-                let outcome_price = current_prices.get(outcome_index as usize).copied().unwrap_or(0.0);
+            if let (Some(market), Some(current_prices)) =
+                (markets_map.get(&market_id), prices_cache.get(&market_id))
+            {
+                let outcome_price = current_prices
+                    .get(outcome_index as usize)
+                    .copied()
+                    .unwrap_or(0.0);
                 let shares_held = position_data;
                 let current_value = shares_held * outcome_price;
 
-                let outcome_name = if let Some(combo) = market.state_combos.get(outcome_index as usize) {
+                let outcome_name = if let Some(combo) =
+                    market.state_combos.get(outcome_index as usize)
+                {
                     format!("Outcome {}: {:?}", outcome_index, combo)
                 } else {
                     format!("Outcome {}", outcome_index)
@@ -1040,13 +1124,18 @@ impl RpcServer for RpcServerImpl {
 
         if let Ok(Some(market)) = node.get_market_by_id(&market_id_struct) {
             let current_prices = market.get_current_prices();
-            
+
             for (outcome_index, position_data) in positions_data {
-                let outcome_price = current_prices.get(outcome_index as usize).copied().unwrap_or(0.0);
+                let outcome_price = current_prices
+                    .get(outcome_index as usize)
+                    .copied()
+                    .unwrap_or(0.0);
                 let shares_held = position_data;
                 let current_value = shares_held * outcome_price;
-                
-                let outcome_name = if let Some(combo) = market.state_combos.get(outcome_index as usize) {
+
+                let outcome_name = if let Some(combo) =
+                    market.state_combos.get(outcome_index as usize)
+                {
                     format!("Outcome {}: {:?}", outcome_index, combo)
                 } else {
                     format!("Outcome {}", outcome_index)
@@ -1079,7 +1168,8 @@ impl RpcServer for RpcServerImpl {
         let node = &self.app.node;
 
         if let Ok(Some(market)) = node.get_market_by_id(&market_id_struct) {
-            let cost_sats = market.calculate_buy_cost(outcome_index as u32, shares_amount)
+            let cost_sats = market
+                .calculate_buy_cost(outcome_index as u32, shares_amount)
                 .map_err(custom_err)?;
             Ok(cost_sats)
         } else {
@@ -1095,11 +1185,13 @@ impl RpcServer for RpcServerImpl {
         max_cost: u64,
         fee_sats: u64,
     ) -> RpcResult<String> {
-        let calculated_cost = self.calculate_share_cost(
-            market_id.clone(),
-            outcome_index,
-            shares_amount,
-        ).await?;
+        let calculated_cost = self
+            .calculate_share_cost(
+                market_id.clone(),
+                outcome_index,
+                shares_amount,
+            )
+            .await?;
 
         if calculated_cost > max_cost {
             return Err(custom_err_msg(format!(
@@ -1138,17 +1230,23 @@ impl RpcServer for RpcServerImpl {
         value_sats: u64,
         fee_sats: u64,
     ) -> RpcResult<bitcoin::Txid> {
-        let tx = self.app.wallet.create_transfer(
-            address,
-            bitcoin::Amount::from_sat(value_sats),
-            bitcoin::Amount::from_sat(fee_sats),
-            None,
-        ).map_err(custom_err)?;
+        let tx = self
+            .app
+            .wallet
+            .create_transfer(
+                address,
+                bitcoin::Amount::from_sat(value_sats),
+                bitcoin::Amount::from_sat(fee_sats),
+                None,
+            )
+            .map_err(custom_err)?;
 
         let txid = tx.txid();
         self.app.sign_and_send(tx).map_err(custom_err)?;
 
-        let bitcoin_txid = bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(txid.0));
+        let bitcoin_txid = bitcoin::Txid::from_raw_hash(
+            bitcoin::hashes::Hash::from_byte_array(txid.0),
+        );
         Ok(bitcoin_txid)
     }
 
@@ -1162,14 +1260,19 @@ impl RpcServer for RpcServerImpl {
         ciphertext: String,
     ) -> RpcResult<String> {
         let ciphertext_bytes = hex::decode(&ciphertext).map_err(|e| {
-            ErrorObject::owned(-32602, "Invalid hex string", Some(e.to_string()))
+            ErrorObject::owned(
+                -32602,
+                "Invalid hex string",
+                Some(e.to_string()),
+            )
         })?;
-        
-        let decrypted_bytes = self.app
+
+        let decrypted_bytes = self
+            .app
             .wallet
             .decrypt_msg(&encryption_pubkey, &ciphertext_bytes)
             .map_err(custom_err)?;
-        
+
         Ok(hex::encode(decrypted_bytes))
     }
 
@@ -1182,11 +1285,14 @@ impl RpcServer for RpcServerImpl {
         Err(ErrorObject::owned(
             -32601,
             "Encryption not implemented",
-            Some("Use external encryption tools")
+            Some("Use external encryption tools"),
         ))
     }
 
-    async fn format_deposit_address(&self, address: Address) -> RpcResult<String> {
+    async fn format_deposit_address(
+        &self,
+        address: Address,
+    ) -> RpcResult<String> {
         Ok(format!("{}", address))
     }
 
@@ -1202,35 +1308,55 @@ impl RpcServer for RpcServerImpl {
         &self,
         _request: RegisterVoterRequest,
     ) -> RpcResult<String> {
-        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+        Err(ErrorObject::owned(
+            -32601,
+            "Not implemented",
+            Some("Voting system not yet implemented"),
+        ))
     }
 
     async fn submit_vote(
         &self,
         _request: SubmitVoteRequest,
     ) -> RpcResult<String> {
-        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+        Err(ErrorObject::owned(
+            -32601,
+            "Not implemented",
+            Some("Voting system not yet implemented"),
+        ))
     }
 
     async fn submit_vote_batch(
         &self,
         _request: SubmitVoteBatchRequest,
     ) -> RpcResult<String> {
-        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+        Err(ErrorObject::owned(
+            -32601,
+            "Not implemented",
+            Some("Voting system not yet implemented"),
+        ))
     }
 
     async fn get_voter_info(
         &self,
         _address: Address,
     ) -> RpcResult<Option<VoterInfo>> {
-        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+        Err(ErrorObject::owned(
+            -32601,
+            "Not implemented",
+            Some("Voting system not yet implemented"),
+        ))
     }
 
     async fn get_voting_period_details(
         &self,
         _period_id: u32,
     ) -> RpcResult<Option<VotingPeriodDetails>> {
-        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+        Err(ErrorObject::owned(
+            -32601,
+            "Not implemented",
+            Some("Voting system not yet implemented"),
+        ))
     }
 
     async fn get_voter_votes(
@@ -1238,14 +1364,22 @@ impl RpcServer for RpcServerImpl {
         _address: Address,
         _period_id: Option<u32>,
     ) -> RpcResult<Vec<VoteInfo>> {
-        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+        Err(ErrorObject::owned(
+            -32601,
+            "Not implemented",
+            Some("Voting system not yet implemented"),
+        ))
     }
 
     async fn get_decision_votes(
         &self,
         _decision_id: String,
     ) -> RpcResult<Vec<VoteInfo>> {
-        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+        Err(ErrorObject::owned(
+            -32601,
+            "Not implemented",
+            Some("Voting system not yet implemented"),
+        ))
     }
 
     async fn get_voter_participation(
@@ -1253,29 +1387,45 @@ impl RpcServer for RpcServerImpl {
         _address: Address,
         _period_id: u32,
     ) -> RpcResult<Option<VoterParticipation>> {
-        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+        Err(ErrorObject::owned(
+            -32601,
+            "Not implemented",
+            Some("Voting system not yet implemented"),
+        ))
     }
 
     async fn list_voters(&self) -> RpcResult<Vec<VoterInfo>> {
-        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+        Err(ErrorObject::owned(
+            -32601,
+            "Not implemented",
+            Some("Voting system not yet implemented"),
+        ))
     }
 
-    async fn is_registered_voter(
+    async fn is_registered_voter(&self, _address: Address) -> RpcResult<bool> {
+        Err(ErrorObject::owned(
+            -32601,
+            "Not implemented",
+            Some("Voting system not yet implemented"),
+        ))
+    }
+
+    async fn get_voting_power(&self, _address: Address) -> RpcResult<u32> {
+        Err(ErrorObject::owned(
+            -32601,
+            "Not implemented",
+            Some("Voting system not yet implemented"),
+        ))
+    }
+
+    async fn get_current_voting_stats(
         &self,
-        _address: Address,
-    ) -> RpcResult<bool> {
-        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
-    }
-
-    async fn get_voting_power(
-        &self,
-        _address: Address,
-    ) -> RpcResult<u32> {
-        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
-    }
-
-    async fn get_current_voting_stats(&self) -> RpcResult<Option<VotingPeriodDetails>> {
-        Err(ErrorObject::owned(-32601, "Not implemented", Some("Voting system not yet implemented")))
+    ) -> RpcResult<Option<VotingPeriodDetails>> {
+        Err(ErrorObject::owned(
+            -32601,
+            "Not implemented",
+            Some("Voting system not yet implemented"),
+        ))
     }
 }
 

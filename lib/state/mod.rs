@@ -16,11 +16,11 @@ use crate::{
         WithdrawalBundleStatus, proto::mainchain::TwoWayPegData,
     },
     util::Watchable,
-    validation::{SlotValidator, MarketValidator, SlotValidationInterface},
+    validation::{MarketValidator, SlotValidationInterface, SlotValidator},
 };
 
 /// Trait for managing UTXO operations with address indexing
-/// 
+///
 /// This trait consolidates the repetitive pattern of updating both the primary UTXO database
 /// and the secondary address index atomically. This ensures compliance with Bitcoin Hivemind
 /// whitepaper specifications for UTXO management while eliminating code duplication.
@@ -41,7 +41,10 @@ pub trait UtxoManager {
     ) -> Result<bool, Error>;
 
     /// Clear both UTXO database and address index
-    fn clear_utxos_and_address_index(&self, rwtxn: &mut RwTxn) -> Result<(), Error>;
+    fn clear_utxos_and_address_index(
+        &self,
+        rwtxn: &mut RwTxn,
+    ) -> Result<(), Error>;
 }
 
 pub mod block;
@@ -49,16 +52,18 @@ pub mod error;
 pub mod markets;
 mod rollback;
 pub mod slots;
-use slots::{SlotId, Decision};
+use slots::{Decision, SlotId};
 mod two_way_peg_data;
 pub mod votecoin;
 pub mod voting;
 
-
 pub use error::Error;
-pub use markets::{Market, MarketBuilder, MarketId, MarketState, MarketsDatabase, ShareAccount, BatchedMarketTrade};
-pub use voting::VotingSystem;
+pub use markets::{
+    BatchedMarketTrade, Market, MarketBuilder, MarketId, MarketState,
+    MarketsDatabase, ShareAccount,
+};
 use rollback::{HeightStamped, RollBack};
+pub use voting::VotingSystem;
 
 pub const WITHDRAWAL_BUNDLE_FAILURE_GAP: u32 = 4;
 
@@ -109,7 +114,8 @@ pub struct State {
     /// Address-indexed UTXO database for efficient address-based lookups
     /// Maps (Address, OutPoint) -> () for O(k) address filtering where k is the number of UTXOs for the address
     /// Uses compound key approach to maintain Bitcoin Hivemind sidechain compliance for UTXO management per whitepaper specifications
-    utxos_by_address: DatabaseUnique<SerdeBincode<(Address, OutPoint)>, SerdeBincode<()>>,
+    utxos_by_address:
+        DatabaseUnique<SerdeBincode<(Address, OutPoint)>, SerdeBincode<()>>,
     stxos: DatabaseUnique<SerdeBincode<OutPoint>, SerdeBincode<SpentOutput>>,
     /// Pending withdrawal bundle and block height
     pending_withdrawal_bundle:
@@ -135,12 +141,12 @@ pub struct State {
 }
 
 /// Implementation of SlotValidationInterface for State
-/// 
+///
 /// Provides the necessary database operations for slot validation
 /// while maintaining Bitcoin Hivemind compliance and performance.
 impl SlotValidationInterface for State {
     /// Delegate slot claim validation to slots database
-    /// 
+    ///
     /// Uses the single source of truth for slot validation as specified
     /// in the Bitcoin Hivemind whitepaper slot allocation procedures.
     fn validate_slot_claim(
@@ -151,11 +157,17 @@ impl SlotValidationInterface for State {
         current_ts: u64,
         current_height: Option<u32>,
     ) -> Result<(), Error> {
-        self.slots().validate_slot_claim(rotxn, slot_id, decision, current_ts, current_height)
+        self.slots().validate_slot_claim(
+            rotxn,
+            slot_id,
+            decision,
+            current_ts,
+            current_height,
+        )
     }
 
     /// Delegate height retrieval to State's try_get_height method
-    /// 
+    ///
     /// Provides current blockchain height for validation context as needed
     /// for period-based slot availability calculations.
     fn try_get_height(&self, rotxn: &RoTxn) -> Result<Option<u32>, Error> {
@@ -164,7 +176,11 @@ impl SlotValidationInterface for State {
 }
 
 impl State {
-    pub const NUM_DBS: u32 = votecoin::Dbs::NUM_DBS + slots::Dbs::NUM_DBS + MarketsDatabase::NUM_DBS + VotingSystem::NUM_DBS + 14;
+    pub const NUM_DBS: u32 = votecoin::Dbs::NUM_DBS
+        + slots::Dbs::NUM_DBS
+        + MarketsDatabase::NUM_DBS
+        + VotingSystem::NUM_DBS
+        + 14;
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn()?;
@@ -177,7 +193,8 @@ impl State {
         let markets = MarketsDatabase::new(env, &mut rwtxn)?;
         let voting = VotingSystem::new(env, &mut rwtxn)?;
         let utxos = DatabaseUnique::create(env, &mut rwtxn, "utxos")?;
-        let utxos_by_address = DatabaseUnique::create(env, &mut rwtxn, "utxos_by_address")?;
+        let utxos_by_address =
+            DatabaseUnique::create(env, &mut rwtxn, "utxos_by_address")?;
         let stxos = DatabaseUnique::create(env, &mut rwtxn, "stxos")?;
         let pending_withdrawal_bundle = DatabaseUnique::create(
             env,
@@ -222,7 +239,6 @@ impl State {
             _version: version,
         })
     }
-
 
     pub fn votecoin(&self) -> &votecoin::Dbs {
         &self.votecoin
@@ -300,22 +316,22 @@ impl State {
     }
 
     /// Efficient O(k) address-based UTXO lookup using address index
-    /// 
+    ///
     /// Returns UTXOs for the specified addresses, leveraging the secondary index
     /// to achieve O(k) performance where k is the number of matching UTXOs,
     /// compared to the previous O(n) implementation that scanned all UTXOs.
-    /// 
+    ///
     /// # Performance
     /// - Time Complexity: O(k) where k = number of UTXOs for requested addresses
     /// - Space Complexity: O(k) for result storage
-    /// 
+    ///
     /// # Arguments
     /// * `rotxn` - Read-only database transaction
     /// * `addresses` - Set of addresses to lookup UTXOs for
-    /// 
+    ///
     /// # Returns
     /// HashMap mapping OutPoint to FilledOutput for all UTXOs owned by the specified addresses
-    /// 
+    ///
     /// # Bitcoin Hivemind Compliance
     /// This optimization maintains full compatibility with Bitcoin Hivemind sidechain
     /// UTXO management while dramatically improving performance for address-based queries.
@@ -326,35 +342,36 @@ impl State {
     ) -> Result<HashMap<OutPoint, FilledOutput>, Error> {
         // Pre-allocate with estimated capacity to reduce reallocations
         let mut result = HashMap::with_capacity(addresses.len() * 4); // Estimate 4 UTXOs per address
-        
+
         // Iterate through all address-indexed UTXOs and filter by requested addresses
         let mut iter = self.utxos_by_address.iter(rotxn)?;
         while let Some(((addr, outpoint), _)) = iter.next()? {
             if addresses.contains(&addr) {
-                if let Some(filled_output) = self.utxos.try_get(rotxn, &outpoint)? {
+                if let Some(filled_output) =
+                    self.utxos.try_get(rotxn, &outpoint)?
+                {
                     result.insert(outpoint, filled_output);
                 }
             }
         }
-        
+
         Ok(result)
     }
-
 }
 
 /// Implementation of UtxoManager trait for State with ACID transaction safety
-/// 
+///
 /// This provides a interface for UTXO operations that maintains consistency
 /// between the primary UTXO database and the address index, following Bitcoin Hivemind
 /// whitepaper specifications for sidechain UTXO management.
-/// 
+///
 /// # Transaction Safety
 /// All operations use LMDB's ACID transaction semantics:
 /// - Atomicity: Either all operations succeed or all fail and rollback
 /// - Consistency: Database invariants are maintained across operations  
 /// - Isolation: Concurrent transactions don't interfere
 /// - Durability: Committed changes survive system failures
-/// 
+///
 /// # Rollback Behavior
 /// If any operation within a transaction fails, the entire RwTxn automatically rolls back
 /// all changes, ensuring database consistency per Bitcoin Hivemind specifications.
@@ -367,10 +384,14 @@ impl UtxoManager for State {
     ) -> Result<(), Error> {
         // Insert into primary UTXO database
         self.utxos.put(rwtxn, outpoint, filled_output)?;
-        
+
         // Insert into address index for efficient lookup using compound key
-        self.utxos_by_address.put(rwtxn, &(filled_output.address, *outpoint), &())?;
-        
+        self.utxos_by_address.put(
+            rwtxn,
+            &(filled_output.address, *outpoint),
+            &(),
+        )?;
+
         Ok(())
     }
 
@@ -380,16 +401,18 @@ impl UtxoManager for State {
         outpoint: &OutPoint,
     ) -> Result<bool, Error> {
         // Get the UTXO to find its address before deletion
-        let filled_output = if let Some(output) = self.utxos.try_get(rwtxn, outpoint)? {
-            output
-        } else {
-            // UTXO not found, nothing to delete
-            return Ok(false);
-        };
+        let filled_output =
+            if let Some(output) = self.utxos.try_get(rwtxn, outpoint)? {
+                output
+            } else {
+                // UTXO not found, nothing to delete
+                return Ok(false);
+            };
 
         // Perform atomic deletion: both operations must succeed or both must fail
         // Remove from address index first (less critical if this fails)
-        self.utxos_by_address.delete(rwtxn, &(filled_output.address, *outpoint))?;
+        self.utxos_by_address
+            .delete(rwtxn, &(filled_output.address, *outpoint))?;
 
         // Remove from primary UTXO database (this is the critical operation)
         let deleted = self.utxos.delete(rwtxn, outpoint)?;
@@ -398,14 +421,21 @@ impl UtxoManager for State {
         // This should never happen due to LMDB transaction atomicity, but we check for safety
         if !deleted {
             // Restore address index entry
-            self.utxos_by_address.put(rwtxn, &(filled_output.address, *outpoint), &())?;
+            self.utxos_by_address.put(
+                rwtxn,
+                &(filled_output.address, *outpoint),
+                &(),
+            )?;
             return Ok(false);
         }
 
         Ok(true)
     }
 
-    fn clear_utxos_and_address_index(&self, rwtxn: &mut RwTxn) -> Result<(), Error> {
+    fn clear_utxos_and_address_index(
+        &self,
+        rwtxn: &mut RwTxn,
+    ) -> Result<(), Error> {
         // Clear both databases atomically
         self.utxos.clear(rwtxn)?;
         self.utxos_by_address.clear(rwtxn)?;
@@ -627,22 +657,28 @@ impl State {
         tx: &FilledTransaction,
         _override_height: Option<u32>,
     ) -> Result<(), Error> {
-        let market_data = tx.create_market()
-            .ok_or_else(|| Error::InvalidSlotId {
+        let market_data =
+            tx.create_market().ok_or_else(|| Error::InvalidSlotId {
                 reason: "Not a market creation transaction".to_string(),
             })?;
 
         // Validate market type
-        if market_data.market_type != "independent" && market_data.market_type != "categorical" {
+        if market_data.market_type != "independent"
+            && market_data.market_type != "categorical"
+        {
             return Err(Error::InvalidSlotId {
-                reason: format!("Invalid market type: {}", market_data.market_type),
+                reason: format!(
+                    "Invalid market type: {}",
+                    market_data.market_type
+                ),
             });
         }
 
         // Validate decision slots exist and are properly formatted
         if market_data.decision_slots.is_empty() {
             return Err(Error::InvalidSlotId {
-                reason: "Market must have at least one decision slot".to_string(),
+                reason: "Market must have at least one decision slot"
+                    .to_string(),
             });
         }
 
@@ -651,19 +687,21 @@ impl State {
         for slot_hex in &market_data.decision_slots {
             // Use common validation utility for slot ID parsing
             let slot_id = SlotValidator::parse_slot_id_from_hex(slot_hex)?;
-            
+
             // Verify slot exists and has a decision
-            let slot = self.slots.get_slot(rotxn, slot_id)?
-                .ok_or_else(|| Error::InvalidSlotId {
-                    reason: format!("Slot {} does not exist", slot_hex),
+            let slot =
+                self.slots.get_slot(rotxn, slot_id)?.ok_or_else(|| {
+                    Error::InvalidSlotId {
+                        reason: format!("Slot {} does not exist", slot_hex),
+                    }
                 })?;
-            
+
             if slot.decision.is_none() {
                 return Err(Error::InvalidSlotId {
                     reason: format!("Slot {} has no decision", slot_hex),
                 });
             }
-            
+
             slot_ids.push(slot_id);
         }
 
@@ -675,7 +713,9 @@ impl State {
                 let decision = slot.decision.unwrap();
                 if decision.is_scaled {
                     return Err(Error::InvalidSlotId {
-                        reason: "Categorical markets can only use binary decisions".to_string(),
+                        reason:
+                            "Categorical markets can only use binary decisions"
+                                .to_string(),
                     });
                 }
             }
@@ -692,13 +732,17 @@ impl State {
         if let Some(fee) = market_data.trading_fee {
             if fee < 0.0 || fee > 1.0 {
                 return Err(Error::InvalidSlotId {
-                    reason: format!("Trading fee must be between 0 and 1: {}", fee),
+                    reason: format!(
+                        "Trading fee must be between 0 and 1: {}",
+                        fee
+                    ),
                 });
             }
         }
 
         // Use common validation utility for market maker authorization
-        let _market_maker_address = MarketValidator::validate_market_maker_authorization(tx)?;
+        let _market_maker_address =
+            MarketValidator::validate_market_maker_authorization(tx)?;
 
         Ok(())
     }
@@ -709,47 +753,63 @@ impl State {
         tx: &FilledTransaction,
         _override_height: Option<u32>,
     ) -> Result<(), Error> {
-        use crate::state::markets::{MarketId, MarketState};
         use crate::math::lmsr::Lmsr;
+        use crate::state::markets::{MarketId, MarketState};
 
-        let buy_data = tx.buy_shares()
-            .ok_or_else(|| Error::InvalidSlotId {
-                reason: "Not a buy shares transaction".to_string(),
-            })?;
+        let buy_data = tx.buy_shares().ok_or_else(|| Error::InvalidSlotId {
+            reason: "Not a buy shares transaction".to_string(),
+        })?;
 
         // Validate market exists
         let market_id = MarketId::new(buy_data.market_id);
-        let market = self.markets().get_market(rotxn, &market_id)?
-            .ok_or_else(|| Error::InvalidSlotId {
-                reason: format!("Market {:?} does not exist", buy_data.market_id),
-            })?;
+        let market =
+            self.markets()
+                .get_market(rotxn, &market_id)?
+                .ok_or_else(|| Error::InvalidSlotId {
+                    reason: format!(
+                        "Market {:?} does not exist",
+                        buy_data.market_id
+                    ),
+                })?;
 
         // Validate market is in trading state
         if market.state() != MarketState::Trading {
             return Err(Error::InvalidSlotId {
-                reason: format!("Market is not in trading state (current state: {:?})", market.state()),
+                reason: format!(
+                    "Market is not in trading state (current state: {:?})",
+                    market.state()
+                ),
             });
         }
 
         // Validate outcome index
         if buy_data.outcome_index as usize >= market.shares().len() {
             return Err(Error::InvalidSlotId {
-                reason: format!("Outcome index {} exceeds market outcomes {}",
-                    buy_data.outcome_index, market.shares().len()),
+                reason: format!(
+                    "Outcome index {} exceeds market outcomes {}",
+                    buy_data.outcome_index,
+                    market.shares().len()
+                ),
             });
         }
 
         // Validate shares amount is positive
         if buy_data.shares_to_buy <= 0.0 {
             return Err(Error::InvalidSlotId {
-                reason: format!("Shares to buy must be positive: {}", buy_data.shares_to_buy),
+                reason: format!(
+                    "Shares to buy must be positive: {}",
+                    buy_data.shares_to_buy
+                ),
             });
         }
 
         // Validate max cost is positive
         if buy_data.max_cost <= 0 {
             return Err(Error::InvalidSlotId {
-                reason: format!("Max cost must be positive: {}", buy_data.max_cost),
+                reason: format!(
+                    "Max cost must be positive: {}",
+                    buy_data.max_cost
+                ),
             });
         }
 
@@ -759,11 +819,16 @@ impl State {
 
         // Validate LMSR constraints
         let lmsr = Lmsr::new(market.shares().len());
-        let current_cost = lmsr.cost_function(market.b(), &market.shares().view())
+        let current_cost = lmsr
+            .cost_function(market.b(), &market.shares().view())
             .map_err(|e| Error::InvalidSlotId {
-                reason: format!("Failed to calculate current market cost: {:?}", e),
+                reason: format!(
+                    "Failed to calculate current market cost: {:?}",
+                    e
+                ),
             })?;
-        let new_cost = lmsr.cost_function(market.b(), &new_shares.view())
+        let new_cost = lmsr
+            .cost_function(market.b(), &new_shares.view())
             .map_err(|e| Error::InvalidSlotId {
                 reason: format!("Failed to calculate new market cost: {:?}", e),
             })?;
@@ -773,12 +838,16 @@ impl State {
         // Validate trade cost doesn't exceed max cost
         if trade_cost > buy_data.max_cost as f64 {
             return Err(Error::InvalidSlotId {
-                reason: format!("Trade cost {} exceeds max cost {}", trade_cost, buy_data.max_cost),
+                reason: format!(
+                    "Trade cost {} exceeds max cost {}",
+                    trade_cost, buy_data.max_cost
+                ),
             });
         }
 
         // Use common validation utility for trader authorization
-        let _trader_address = MarketValidator::validate_market_maker_authorization(tx)?;
+        let _trader_address =
+            MarketValidator::validate_market_maker_authorization(tx)?;
 
         Ok(())
     }
@@ -803,7 +872,12 @@ impl State {
         }
 
         // Validate buy shares transactions
-        if tx.transaction.data.as_ref().map_or(false, |data| data.is_buy_shares()) {
+        if tx
+            .transaction
+            .data
+            .as_ref()
+            .map_or(false, |data| data.is_buy_shares())
+        {
             self.validate_buy_shares(rotxn, tx, override_height)?;
         }
 
@@ -863,7 +937,7 @@ impl State {
     ) -> Result<bitcoin::Amount, Error> {
         // Single-pass calculation with early termination on overflow
         let mut total_deposit_utxo_value = bitcoin::Amount::ZERO;
-        
+
         // UTXO iteration using fallible iterator
         let mut utxo_iter = self.utxos.iter(rotxn)?;
         while let Some((outpoint, output)) = utxo_iter.next()? {
@@ -874,22 +948,22 @@ impl State {
                     .ok_or(AmountOverflowError)?;
             }
         }
-        
+
         // Single-pass STXO iteration with logic
         let mut total_deposit_stxo_value = bitcoin::Amount::ZERO;
         let mut total_withdrawal_stxo_value = bitcoin::Amount::ZERO;
-        
+
         let mut stxo_iter = self.stxos.iter(rotxn)?;
         while let Some((outpoint, spent_output)) = stxo_iter.next()? {
             let bitcoin_value = spent_output.output.get_bitcoin_value();
-            
+
             // Process deposit STXOs
             if matches!(outpoint, OutPoint::Deposit(_)) {
                 total_deposit_stxo_value = total_deposit_stxo_value
                     .checked_add(bitcoin_value)
                     .ok_or(AmountOverflowError)?;
             }
-            
+
             // Process withdrawal STXOs (fixed bug - was using wrong variable)
             if matches!(spent_output.inpoint, InPoint::Withdrawal { .. }) {
                 total_withdrawal_stxo_value = total_withdrawal_stxo_value
@@ -897,13 +971,13 @@ impl State {
                     .ok_or(AmountOverflowError)?;
             }
         }
-        
+
         // Consolidated calculation with overflow protection
         let total_wealth = total_deposit_utxo_value
             .checked_add(total_deposit_stxo_value)
             .and_then(|sum| sum.checked_sub(total_withdrawal_stxo_value))
             .ok_or(AmountOverflowError)?;
-        
+
         Ok(total_wealth)
     }
 
@@ -987,7 +1061,10 @@ impl State {
         )
     }
 
-    pub fn get_ossified_slots(&self, rotxn: &RoTxn) -> Result<Vec<crate::state::slots::Slot>, Error> {
+    pub fn get_ossified_slots(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<Vec<crate::state::slots::Slot>, Error> {
         let current_ts = self.try_get_mainchain_timestamp(rotxn)?.unwrap_or(0);
         let current_height = self.try_get_height(rotxn)?;
         self.slots
@@ -1068,7 +1145,9 @@ impl State {
         let mut total_votecoin = 0u32;
 
         for (_, filled_output) in utxos {
-            if let crate::types::FilledOutputContent::Votecoin(amount) = &filled_output.content {
+            if let crate::types::FilledOutputContent::Votecoin(amount) =
+                &filled_output.content
+            {
                 total_votecoin = total_votecoin.saturating_add(*amount);
             }
         }
@@ -1107,11 +1186,14 @@ impl State {
 
         // Sum Votecoin amounts for each address
         for (_, filled_output) in utxos {
-            if let crate::types::FilledOutputContent::Votecoin(amount) = &filled_output.content {
-                let current_balance = balances.get(&filled_output.address).unwrap_or(&0);
+            if let crate::types::FilledOutputContent::Votecoin(amount) =
+                &filled_output.content
+            {
+                let current_balance =
+                    balances.get(&filled_output.address).unwrap_or(&0);
                 balances.insert(
                     filled_output.address,
-                    current_balance.saturating_add(*amount)
+                    current_balance.saturating_add(*amount),
                 );
             }
         }
@@ -1142,7 +1224,9 @@ impl State {
         let mut total_supply = 0u32;
 
         for (_, filled_output) in utxos {
-            if let crate::types::FilledOutputContent::Votecoin(amount) = &filled_output.content {
+            if let crate::types::FilledOutputContent::Votecoin(amount) =
+                &filled_output.content
+            {
                 total_supply = total_supply.saturating_add(*amount);
             }
         }

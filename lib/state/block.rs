@@ -554,6 +554,22 @@ pub fn connect(
             Some(TxData::ClaimDecisionSlot { .. }) => {
                 apply_slot_claim(state, rwtxn, &filled_tx, &mut state_update, height, mainchain_timestamp)?;
             }
+            Some(TxData::SubmitVote { .. }) => {
+                // TODO: Implement voting system integration
+                // apply_submit_vote(state, rwtxn, &filled_tx, &mut state_update, height)?;
+            }
+            Some(TxData::RegisterVoter { .. }) => {
+                // TODO: Implement voter registration
+                // apply_register_voter(state, rwtxn, &filled_tx, &mut state_update, height)?;
+            }
+            Some(TxData::UpdateReputation { .. }) => {
+                // TODO: Implement reputation update system
+                // apply_update_reputation(state, rwtxn, &filled_tx, &mut state_update, height)?;
+            }
+            Some(TxData::SubmitVoteBatch { .. }) => {
+                // TODO: Implement batch voting
+                // apply_submit_vote_batch(state, rwtxn, &filled_tx, &mut state_update, height)?;
+            }
             None => {
                 // Regular UTXO-only transactions
             }
@@ -630,6 +646,22 @@ pub fn disconnect_tip(
             }
             Some(TxData::RedeemShares { .. }) => {
                 let () = revert_redeem_shares(state, rwtxn, &filled_tx)?;
+            }
+            Some(TxData::SubmitVote { .. }) => {
+                // TODO: Implement voting system revert
+                // let () = revert_submit_vote(state, rwtxn, &filled_tx)?;
+            }
+            Some(TxData::RegisterVoter { .. }) => {
+                // TODO: Implement voter registration revert
+                // let () = revert_register_voter(state, rwtxn, &filled_tx)?;
+            }
+            Some(TxData::UpdateReputation { .. }) => {
+                // TODO: Implement reputation update revert
+                // let () = revert_update_reputation(state, rwtxn, &filled_tx)?;
+            }
+            Some(TxData::SubmitVoteBatch { .. }) => {
+                // TODO: Implement batch voting revert
+                // let () = revert_submit_vote_batch(state, rwtxn, &filled_tx)?;
             }
         }
         // delete UTXOs, last-to-first

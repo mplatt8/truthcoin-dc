@@ -280,6 +280,128 @@ pub struct InitialLiquidityCalculation {
     pub outcome_breakdown: String,
 }
 
+/// Request to register as a voter in the Bitcoin Hivemind voting system
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct RegisterVoterRequest {
+    /// Initial reputation bond in sats (optional, defaults to minimum required)
+    pub reputation_bond_sats: Option<u64>,
+    /// Transaction fee in sats
+    pub fee_sats: u64,
+}
+
+/// Request to submit a single vote for a decision
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct SubmitVoteRequest {
+    /// Decision slot ID (hex-encoded)
+    pub slot_id: String,
+    /// Vote value (0.0-1.0 for binary, scaled range for scaled decisions)
+    pub vote_value: f64,
+    /// Voting period this vote belongs to
+    pub voting_period: u32,
+    /// Transaction fee in sats
+    pub fee_sats: u64,
+}
+
+/// Individual vote item for batch submission
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct VoteBatchItem {
+    /// Decision slot ID (hex-encoded)
+    pub slot_id: String,
+    /// Vote value (0.0-1.0 for binary, scaled range for scaled decisions)
+    pub vote_value: f64,
+}
+
+/// Request to submit multiple votes efficiently in a single transaction
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct SubmitVoteBatchRequest {
+    /// List of votes to submit
+    pub votes: Vec<VoteBatchItem>,
+    /// Voting period these votes belong to
+    pub voting_period: u32,
+    /// Transaction fee in sats
+    pub fee_sats: u64,
+}
+
+/// Information about a voter's registration and reputation
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct VoterInfo {
+    /// Voter address
+    pub address: String,
+    /// Current reputation score (0.0-1.0)
+    pub reputation: f64,
+    /// Total number of votes cast
+    pub total_votes: u64,
+    /// Number of voting periods participated in
+    pub periods_active: u32,
+    /// Average accuracy score
+    pub accuracy_score: f64,
+    /// Block height when voter was registered
+    pub registered_at_height: u64,
+    /// Whether voter is currently active
+    pub is_active: bool,
+}
+
+/// Information about a specific vote
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct VoteInfo {
+    /// Voter address
+    pub voter_address: String,
+    /// Decision slot ID (hex-encoded)
+    pub slot_id: String,
+    /// Vote value submitted
+    pub vote_value: f64,
+    /// Voting period when vote was cast
+    pub voting_period: u32,
+    /// Block height when vote was included
+    pub block_height: u64,
+    /// Transaction ID containing this vote
+    pub txid: String,
+    /// Whether this vote was part of a batch submission
+    pub is_batch_vote: bool,
+}
+
+/// Comprehensive voting period information
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct VotingPeriodDetails {
+    /// Period index
+    pub period_id: u32,
+    /// L1 timestamp when period started
+    pub start_time: u64,
+    /// L1 timestamp when period ends
+    pub end_time: u64,
+    /// Current period status
+    pub status: String,
+    /// Decision slots available for voting
+    pub decision_slots: Vec<String>,
+    /// Block height when period was created
+    pub created_at_height: u64,
+    /// Total number of registered voters
+    pub total_voters: u64,
+    /// Number of active voters in this period
+    pub active_voters: u64,
+    /// Total votes cast in this period
+    pub total_votes: u64,
+    /// Whether consensus has been calculated for this period
+    pub consensus_reached: bool,
+}
+
+/// Summary of voter participation in a voting period
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct VoterParticipation {
+    /// Voter address
+    pub address: String,
+    /// Voting period
+    pub period_id: u32,
+    /// Number of votes cast in this period
+    pub votes_cast: u32,
+    /// Number of decisions available in this period
+    pub decisions_available: u32,
+    /// Participation rate (votes_cast / decisions_available)
+    pub participation_rate: f64,
+    /// Whether voter participated in consensus calculation
+    pub participated_in_consensus: bool,
+}
+
 #[open_api(ref_schemas[
     truthcoin_schema::BitcoinAddr, truthcoin_schema::BitcoinBlockHash,
     truthcoin_schema::BitcoinTransaction, truthcoin_schema::BitcoinOutPoint,
@@ -288,9 +410,10 @@ pub struct InitialLiquidityCalculation {
     CreateMarketRequest, EncryptionPubKey, FilledOutputContent, Header,
     InitialLiquidityCalculation, MarketData, MarketOutcome, MarketSummary,
     MerkleRoot, OutPoint, Output, OutputContent,
-    PeerConnectionStatus, SharePosition, Signature, SlotInfo, SlotStatus, 
-    Transaction, TxData, Txid, TxIn, UserHoldings,
-    VotingPeriodInfo, WithdrawalOutputContent, VerifyingKey,
+    PeerConnectionStatus, RegisterVoterRequest, SharePosition, Signature, SlotInfo, SlotStatus,
+    SubmitVoteRequest, SubmitVoteBatchRequest, Transaction, TxData, Txid, TxIn, UserHoldings,
+    VoteBatchItem, VoteInfo, VoterInfo, VoterParticipation,
+    VotingPeriodDetails, VotingPeriodInfo, WithdrawalOutputContent, VerifyingKey,
 ])]
 #[rpc(client, server)]
 pub trait Rpc {
@@ -704,4 +827,101 @@ pub trait Rpc {
         shares_amount: f64,
         fee_sats: u64, // Transaction fee
     ) -> RpcResult<String>; // Returns transaction ID
+
+    /// Register as a voter in the Bitcoin Hivemind voting system
+    /// This is a one-time registration that establishes voter identity and reputation bond
+    #[open_api_method(output_schema(ToSchema = "String"))]
+    #[method(name = "register_voter")]
+    async fn register_voter(
+        &self,
+        request: RegisterVoterRequest,
+    ) -> RpcResult<String>; // Returns transaction ID
+
+    /// Submit a single vote for a decision in the current voting period
+    /// Vote value should be 0.0-1.0 for binary decisions, scaled appropriately for scalar decisions
+    #[open_api_method(output_schema(ToSchema = "String"))]
+    #[method(name = "submit_vote")]
+    async fn submit_vote(
+        &self,
+        request: SubmitVoteRequest,
+    ) -> RpcResult<String>; // Returns transaction ID
+
+    /// Submit multiple votes efficiently in a single transaction
+    /// Useful for voters who want to vote on many decisions at once
+    #[open_api_method(output_schema(ToSchema = "String"))]
+    #[method(name = "submit_vote_batch")]
+    async fn submit_vote_batch(
+        &self,
+        request: SubmitVoteBatchRequest,
+    ) -> RpcResult<String>; // Returns transaction ID
+
+    /// Get information about a specific voter including reputation and voting history
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "get_voter_info")]
+    async fn get_voter_info(
+        &self,
+        address: Address,
+    ) -> RpcResult<Option<VoterInfo>>;
+
+    /// Get detailed information about a specific voting period
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "get_voting_period_details")]
+    async fn get_voting_period_details(
+        &self,
+        period_id: u32,
+    ) -> RpcResult<Option<VotingPeriodDetails>>;
+
+    /// Get all votes cast by a specific voter in a voting period
+    #[open_api_method(output_schema(ToSchema = "Vec<VoteInfo>"))]
+    #[method(name = "get_voter_votes")]
+    async fn get_voter_votes(
+        &self,
+        address: Address,
+        period_id: Option<u32>, // If None, returns votes from all periods
+    ) -> RpcResult<Vec<VoteInfo>>;
+
+    /// Get all votes cast for a specific decision slot
+    #[open_api_method(output_schema(ToSchema = "Vec<VoteInfo>"))]
+    #[method(name = "get_decision_votes")]
+    async fn get_decision_votes(
+        &self,
+        slot_id: String,
+    ) -> RpcResult<Vec<VoteInfo>>;
+
+    /// Get voter participation summary for a specific period
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "get_voter_participation")]
+    async fn get_voter_participation(
+        &self,
+        address: Address,
+        period_id: u32,
+    ) -> RpcResult<Option<VoterParticipation>>;
+
+    /// List all registered voters with their current reputation
+    #[open_api_method(output_schema(ToSchema = "Vec<VoterInfo>"))]
+    #[method(name = "list_voters")]
+    async fn list_voters(&self) -> RpcResult<Vec<VoterInfo>>;
+
+    /// Check if an address is registered as a voter
+    #[open_api_method(output_schema(ToSchema = "bool"))]
+    #[method(name = "is_registered_voter")]
+    async fn is_registered_voter(
+        &self,
+        address: Address,
+    ) -> RpcResult<bool>;
+
+    /// Get the current voting power (Votecoin balance) for an address
+    /// Voting power determines weight in consensus calculations
+    #[open_api_method(output_schema(ToSchema = "u32"))]
+    #[method(name = "get_voting_power")]
+    async fn get_voting_power(
+        &self,
+        address: Address,
+    ) -> RpcResult<u32>; // Returns Votecoin balance
+
+    /// Get voting statistics for the current active voting period
+    /// Returns aggregated data about participation and vote counts
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "get_current_voting_stats")]
+    async fn get_current_voting_stats(&self) -> RpcResult<Option<VotingPeriodDetails>>;
 }

@@ -52,10 +52,12 @@ pub mod slots;
 use slots::{SlotId, Decision};
 mod two_way_peg_data;
 pub mod votecoin;
+pub mod voting;
 
 
 pub use error::Error;
 pub use markets::{Market, MarketBuilder, MarketId, MarketState, MarketsDatabase, ShareAccount, BatchedMarketTrade};
+pub use voting::VotingSystem;
 use rollback::{HeightStamped, RollBack};
 
 pub const WITHDRAWAL_BUNDLE_FAILURE_GAP: u32 = 4;
@@ -102,6 +104,7 @@ pub struct State {
     votecoin: votecoin::Dbs,
     slots: slots::Dbs,
     markets: MarketsDatabase,
+    voting: VotingSystem,
     utxos: DatabaseUnique<SerdeBincode<OutPoint>, SerdeBincode<FilledOutput>>,
     /// Address-indexed UTXO database for efficient address-based lookups
     /// Maps (Address, OutPoint) -> () for O(k) address filtering where k is the number of UTXOs for the address
@@ -161,7 +164,7 @@ impl SlotValidationInterface for State {
 }
 
 impl State {
-    pub const NUM_DBS: u32 = votecoin::Dbs::NUM_DBS + slots::Dbs::NUM_DBS + MarketsDatabase::NUM_DBS + 14;
+    pub const NUM_DBS: u32 = votecoin::Dbs::NUM_DBS + slots::Dbs::NUM_DBS + MarketsDatabase::NUM_DBS + VotingSystem::NUM_DBS + 14;
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn()?;
@@ -172,6 +175,7 @@ impl State {
         let votecoin = votecoin::Dbs::new(env, &mut rwtxn)?;
         let slots = slots::Dbs::new(env, &mut rwtxn)?;
         let markets = MarketsDatabase::new(env, &mut rwtxn)?;
+        let voting = VotingSystem::new(env, &mut rwtxn)?;
         let utxos = DatabaseUnique::create(env, &mut rwtxn, "utxos")?;
         let utxos_by_address = DatabaseUnique::create(env, &mut rwtxn, "utxos_by_address")?;
         let stxos = DatabaseUnique::create(env, &mut rwtxn, "stxos")?;
@@ -206,6 +210,7 @@ impl State {
             votecoin,
             slots,
             markets,
+            voting,
             utxos,
             utxos_by_address,
             stxos,
@@ -229,6 +234,15 @@ impl State {
 
     pub fn markets(&self) -> &MarketsDatabase {
         &self.markets
+    }
+
+    pub fn voting(&self) -> &VotingSystem {
+        &self.voting
+    }
+
+    /// Create a mutable reference to the voting system for advanced operations
+    pub fn voting_mut(&mut self) -> &mut VotingSystem {
+        &mut self.voting
     }
 
     pub fn deposit_blocks(
@@ -1019,6 +1033,189 @@ impl State {
     ) -> Result<u64, Error> {
         self.slots
             .get_claimed_slot_count_in_period(rotxn, period_index)
+    }
+
+    // ================================================================================
+    // Votecoin Balance Queries for Voting System Integration
+    // ================================================================================
+
+    /// Get Votecoin balance for a specific address
+    ///
+    /// This method calculates the total Votecoin holdings for an address by
+    /// summing all Votecoin UTXOs owned by that address. This is essential
+    /// for the Bitcoin Hivemind voting weight calculation.
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only database transaction
+    /// * `address` - Address to query Votecoin balance for
+    ///
+    /// # Returns
+    /// Total Votecoin balance (u32) for the address
+    ///
+    /// # Bitcoin Hivemind Specification
+    /// According to the Bitcoin Hivemind whitepaper, voting weight is calculated as:
+    /// **Final Voting Weight = Base Reputation × Votecoin Holdings Proportion**
+    /// This method provides the Votecoin holdings component of that calculation.
+    pub fn get_votecoin_balance(
+        &self,
+        rotxn: &RoTxn,
+        address: &Address,
+    ) -> Result<u32, Error> {
+        let mut addresses = HashSet::new();
+        addresses.insert(*address);
+
+        let utxos = self.get_utxos_by_addresses(rotxn, &addresses)?;
+        let mut total_votecoin = 0u32;
+
+        for (_, filled_output) in utxos {
+            if let crate::types::FilledOutputContent::Votecoin(amount) = &filled_output.content {
+                total_votecoin = total_votecoin.saturating_add(*amount);
+            }
+        }
+
+        Ok(total_votecoin)
+    }
+
+    /// Get Votecoin balances for multiple addresses efficiently
+    ///
+    /// This method performs batch querying of Votecoin balances for multiple
+    /// addresses simultaneously, which is more efficient than individual queries
+    /// when calculating voting weights for all participants in a voting period.
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only database transaction
+    /// * `addresses` - Set of addresses to query balances for
+    ///
+    /// # Returns
+    /// HashMap mapping Address to Votecoin balance (u32)
+    ///
+    /// # Performance
+    /// - Time Complexity: O(k) where k = total UTXOs for all addresses
+    /// - Leverages the existing address index for efficient lookups
+    pub fn get_votecoin_balances_batch(
+        &self,
+        rotxn: &RoTxn,
+        addresses: &HashSet<Address>,
+    ) -> Result<HashMap<Address, u32>, Error> {
+        let utxos = self.get_utxos_by_addresses(rotxn, addresses)?;
+        let mut balances = HashMap::new();
+
+        // Initialize all addresses with zero balance
+        for &address in addresses {
+            balances.insert(address, 0u32);
+        }
+
+        // Sum Votecoin amounts for each address
+        for (_, filled_output) in utxos {
+            if let crate::types::FilledOutputContent::Votecoin(amount) = &filled_output.content {
+                let current_balance = balances.get(&filled_output.address).unwrap_or(&0);
+                balances.insert(
+                    filled_output.address,
+                    current_balance.saturating_add(*amount)
+                );
+            }
+        }
+
+        Ok(balances)
+    }
+
+    /// Get total Votecoin supply currently in circulation
+    ///
+    /// This method calculates the total amount of Votecoin currently held in UTXOs,
+    /// which should equal the fixed supply of 1,000,000 unless some coins are
+    /// permanently lost (spent to invalid outputs).
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only database transaction
+    ///
+    /// # Returns
+    /// Total Votecoin supply in circulation
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Used for calculating proportional voting weights as specified in the whitepaper.
+    /// Each voter's Votecoin proportion = voter_votecoin_balance / total_supply
+    pub fn get_total_votecoin_supply(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<u32, Error> {
+        let utxos = self.get_utxos(rotxn)?;
+        let mut total_supply = 0u32;
+
+        for (_, filled_output) in utxos {
+            if let crate::types::FilledOutputContent::Votecoin(amount) = &filled_output.content {
+                total_supply = total_supply.saturating_add(*amount);
+            }
+        }
+
+        Ok(total_supply)
+    }
+
+    /// Get Votecoin holdings proportion for an address
+    ///
+    /// This method calculates the proportional Votecoin holdings for an address
+    /// relative to the total supply, which is used directly in the Bitcoin Hivemind
+    /// voting weight calculation.
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only database transaction
+    /// * `address` - Address to calculate proportion for
+    ///
+    /// # Returns
+    /// Proportion of total Votecoin supply held by address (0.0 to 1.0)
+    ///
+    /// # Bitcoin Hivemind Specification
+    /// This implements the Votecoin Holdings Proportion component of:
+    /// **Final Voting Weight = Base Reputation × Votecoin Holdings Proportion**
+    pub fn get_votecoin_proportion(
+        &self,
+        rotxn: &RoTxn,
+        address: &Address,
+    ) -> Result<f64, Error> {
+        let balance = self.get_votecoin_balance(rotxn, address)?;
+        let total_supply = self.get_total_votecoin_supply(rotxn)?;
+
+        if total_supply == 0 {
+            return Ok(0.0);
+        }
+
+        Ok(balance as f64 / total_supply as f64)
+    }
+
+    /// Get Votecoin proportions for multiple addresses efficiently
+    ///
+    /// Batch calculation of Votecoin proportions for multiple addresses.
+    /// This is optimized for voting weight calculations across all participants
+    /// in a voting period.
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only database transaction
+    /// * `addresses` - Set of addresses to calculate proportions for
+    ///
+    /// # Returns
+    /// HashMap mapping Address to Votecoin proportion (0.0 to 1.0)
+    pub fn get_votecoin_proportions_batch(
+        &self,
+        rotxn: &RoTxn,
+        addresses: &HashSet<Address>,
+    ) -> Result<HashMap<Address, f64>, Error> {
+        let balances = self.get_votecoin_balances_batch(rotxn, addresses)?;
+        let total_supply = self.get_total_votecoin_supply(rotxn)?;
+        let mut proportions = HashMap::new();
+
+        if total_supply == 0 {
+            // No Votecoin in circulation - all proportions are 0.0
+            for &address in addresses {
+                proportions.insert(address, 0.0);
+            }
+            return Ok(proportions);
+        }
+
+        for (&address, &balance) in &balances {
+            let proportion = balance as f64 / total_supply as f64;
+            proportions.insert(address, proportion);
+        }
+
+        Ok(proportions)
     }
 }
 

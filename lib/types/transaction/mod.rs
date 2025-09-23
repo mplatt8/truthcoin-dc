@@ -105,6 +105,15 @@ pub type TxInputs = Vec<OutPoint>;
 
 pub type TxOutputs = Vec<Output>;
 
+/// Struct representing a single vote in a batch vote transaction
+#[derive(BorshSerialize, Clone, Copy, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
+pub struct VoteBatchItem {
+    /// 3 byte slot ID
+    pub slot_id_bytes: [u8; 3],
+    /// The vote value (0.0-1.0 for binary, scaled range for scaled decisions)
+    pub vote_value: f64,
+}
+
 #[allow(clippy::enum_variant_names)]
 #[derive(BorshSerialize, Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[schema(as = TxData)]
@@ -178,6 +187,38 @@ pub enum TransactionData {
         /// Number of shares to redeem
         shares_to_redeem: f64,
     },
+    /// Submit a vote for a decision in the current voting period
+    SubmitVote {
+        /// 3 byte slot ID of the decision being voted on
+        slot_id_bytes: [u8; 3],
+        /// The vote value (0.0-1.0 for binary, scaled range for scaled decisions)
+        vote_value: f64,
+        /// The voting period this vote belongs to
+        voting_period: u32,
+    },
+    /// Register as a voter (one-time setup)
+    RegisterVoter {
+        /// Commitment hash for voter identity
+        voter_commitment: [u8; 32],
+        /// Initial reputation bond in satoshis
+        reputation_bond: u64,
+    },
+    /// Update voter reputation after consensus (system transaction)
+    UpdateReputation {
+        /// Voter identifier
+        voter_id: [u8; 32],
+        /// New reputation score
+        new_reputation: f64,
+        /// Period this reputation update applies to
+        voting_period: u32,
+    },
+    /// Submit multiple votes efficiently
+    SubmitVoteBatch {
+        /// List of votes to submit
+        votes: Vec<VoteBatchItem>,
+        /// The voting period these votes belong to
+        voting_period: u32,
+    },
 }
 
 pub type TxData = TransactionData;
@@ -207,6 +248,26 @@ impl TxData {
     /// `true` if the tx data corresponds to redeeming shares
     pub fn is_redeem_shares(&self) -> bool {
         matches!(self, Self::RedeemShares { .. })
+    }
+
+    /// `true` if the tx data corresponds to submitting a vote
+    pub fn is_submit_vote(&self) -> bool {
+        matches!(self, Self::SubmitVote { .. })
+    }
+
+    /// `true` if the tx data corresponds to registering a voter
+    pub fn is_register_voter(&self) -> bool {
+        matches!(self, Self::RegisterVoter { .. })
+    }
+
+    /// `true` if the tx data corresponds to updating reputation
+    pub fn is_update_reputation(&self) -> bool {
+        matches!(self, Self::UpdateReputation { .. })
+    }
+
+    /// `true` if the tx data corresponds to submitting a batch of votes
+    pub fn is_submit_vote_batch(&self) -> bool {
+        matches!(self, Self::SubmitVoteBatch { .. })
     }
 
 }
@@ -289,6 +350,46 @@ pub struct RedeemShares {
     pub outcome_index: u32,
     /// Number of shares to redeem
     pub shares_to_redeem: f64,
+}
+
+/// Struct describing a vote submission
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SubmitVote {
+    /// 3 byte slot ID of the decision being voted on
+    pub slot_id_bytes: [u8; 3],
+    /// The vote value (0.0-1.0 for binary, scaled range for scaled decisions)
+    pub vote_value: f64,
+    /// The voting period this vote belongs to
+    pub voting_period: u32,
+}
+
+/// Struct describing voter registration
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegisterVoter {
+    /// Commitment hash for voter identity
+    pub voter_commitment: [u8; 32],
+    /// Initial reputation bond in satoshis
+    pub reputation_bond: u64,
+}
+
+/// Struct describing a reputation update (system transaction)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UpdateReputation {
+    /// Voter identifier
+    pub voter_id: [u8; 32],
+    /// New reputation score
+    pub new_reputation: f64,
+    /// Period this reputation update applies to
+    pub voting_period: u32,
+}
+
+/// Struct describing a batch vote submission
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubmitVoteBatch {
+    /// List of votes to submit
+    pub votes: Vec<VoteBatchItem>,
+    /// The voting period these votes belong to
+    pub voting_period: u32,
 }
 
 
@@ -384,6 +485,38 @@ impl FilledTransaction {
     pub fn is_create_market(&self) -> bool {
         match &self.transaction.data {
             Some(tx_data) => tx_data.is_create_market(),
+            None => false,
+        }
+    }
+
+    /// `true` if the tx data corresponds to submitting a vote
+    pub fn is_submit_vote(&self) -> bool {
+        match &self.transaction.data {
+            Some(tx_data) => tx_data.is_submit_vote(),
+            None => false,
+        }
+    }
+
+    /// `true` if the tx data corresponds to registering a voter
+    pub fn is_register_voter(&self) -> bool {
+        match &self.transaction.data {
+            Some(tx_data) => tx_data.is_register_voter(),
+            None => false,
+        }
+    }
+
+    /// `true` if the tx data corresponds to updating reputation
+    pub fn is_update_reputation(&self) -> bool {
+        match &self.transaction.data {
+            Some(tx_data) => tx_data.is_update_reputation(),
+            None => false,
+        }
+    }
+
+    /// `true` if the tx data corresponds to submitting a batch of votes
+    pub fn is_submit_vote_batch(&self) -> bool {
+        match &self.transaction.data {
+            Some(tx_data) => tx_data.is_submit_vote_batch(),
             None => false,
         }
     }
@@ -488,6 +621,66 @@ impl FilledTransaction {
                 market_id: *market_id,
                 outcome_index: *outcome_index,
                 shares_to_redeem: *shares_to_redeem,
+            }),
+            _ => None,
+        }
+    }
+
+    /// If the tx is a vote submission, returns the corresponding [`SubmitVote`].
+    pub fn submit_vote(&self) -> Option<SubmitVote> {
+        match &self.transaction.data {
+            Some(TransactionData::SubmitVote {
+                slot_id_bytes,
+                vote_value,
+                voting_period,
+            }) => Some(SubmitVote {
+                slot_id_bytes: *slot_id_bytes,
+                vote_value: *vote_value,
+                voting_period: *voting_period,
+            }),
+            _ => None,
+        }
+    }
+
+    /// If the tx is a voter registration, returns the corresponding [`RegisterVoter`].
+    pub fn register_voter(&self) -> Option<RegisterVoter> {
+        match &self.transaction.data {
+            Some(TransactionData::RegisterVoter {
+                voter_commitment,
+                reputation_bond,
+            }) => Some(RegisterVoter {
+                voter_commitment: *voter_commitment,
+                reputation_bond: *reputation_bond,
+            }),
+            _ => None,
+        }
+    }
+
+    /// If the tx is a reputation update, returns the corresponding [`UpdateReputation`].
+    pub fn update_reputation(&self) -> Option<UpdateReputation> {
+        match &self.transaction.data {
+            Some(TransactionData::UpdateReputation {
+                voter_id,
+                new_reputation,
+                voting_period,
+            }) => Some(UpdateReputation {
+                voter_id: *voter_id,
+                new_reputation: *new_reputation,
+                voting_period: *voting_period,
+            }),
+            _ => None,
+        }
+    }
+
+    /// If the tx is a vote batch submission, returns the corresponding [`SubmitVoteBatch`].
+    pub fn submit_vote_batch(&self) -> Option<SubmitVoteBatch> {
+        match &self.transaction.data {
+            Some(TransactionData::SubmitVoteBatch {
+                votes,
+                voting_period,
+            }) => Some(SubmitVoteBatch {
+                votes: votes.clone(),
+                voting_period: *voting_period,
             }),
             _ => None,
         }

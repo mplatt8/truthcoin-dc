@@ -1,0 +1,537 @@
+//! Comprehensive tests for Bitcoin Hivemind Phase 1 voting system
+//!
+//! This module tests all voting system components for compliance with the
+//! Bitcoin Hivemind whitepaper specifications.
+
+use super::*;
+use super::types::*;
+use crate::state::{State, slots::SlotId};
+use crate::types::Address;
+use sneed::Env;
+use std::collections::HashMap;
+use tempfile::TempDir;
+
+/// Test environment setup using State instead of raw voting system
+struct TestEnv {
+    _temp_dir: TempDir,
+    state: State,
+}
+
+impl TestEnv {
+    fn new() -> Result<Self, Error> {
+        let temp_dir = TempDir::new().map_err(|e| Error::Sneed {
+            msg: format!("Failed to create temp dir: {}", e),
+        })?;
+
+        let env = Env::new(&temp_dir, 1024 * 1024 * 10).map_err(|e| Error::Sneed {
+            msg: format!("Failed to create environment: {}", e),
+        })?;
+
+        let mut rwtxn = env.write_txn().map_err(|e| Error::Sneed {
+            msg: format!("Failed to create transaction: {}", e),
+        })?;
+
+        let state = State::new(&env, &mut rwtxn)?;
+        rwtxn.commit().map_err(|e| Error::Sneed {
+            msg: format!("Failed to commit transaction: {}", e),
+        })?;
+
+        Ok(Self {
+            _temp_dir: temp_dir,
+            state,
+        })
+    }
+}
+
+// Helper functions for creating test data
+fn create_test_voter_ids(count: usize) -> Vec<VoterId> {
+    (0..count)
+        .map(|i| {
+            let mut addr_bytes = [0u8; 20];
+            addr_bytes[0] = i as u8;
+            VoterId::from_address(&Address(addr_bytes))
+        })
+        .collect()
+}
+
+fn create_test_decision_ids(count: usize) -> Vec<SlotId> {
+    (0..count)
+        .map(|i| SlotId::new(1, i as u16).unwrap())
+        .collect()
+}
+
+fn create_test_tx_hash(seed: u8) -> [u8; 32] {
+    let mut hash = [0u8; 32];
+    hash[0] = seed;
+    hash
+}
+
+/// Test voting period creation and management
+#[test]
+fn test_voting_period_lifecycle() {
+    let test_env = TestEnv::new().unwrap();
+
+    let period_id = VotingPeriodId::new(1);
+    let start_time = 1000;
+    let end_time = 2000;
+    let decision_slots = create_test_decision_ids(3);
+    let created_height = 100;
+
+    // Test period creation
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+        test_env.state.voting_system().create_voting_period(
+            &mut rwtxn,
+            period_id,
+            start_time,
+            end_time,
+            decision_slots.clone(),
+            created_height,
+        ).unwrap();
+        rwtxn.commit().unwrap();
+    }
+
+    // Test period retrieval
+    {
+        let rotxn = test_env.state.ro_txn().unwrap();
+        let period = test_env.state.voting_system().databases()
+            .get_voting_period(&rotxn, period_id).unwrap().unwrap();
+        assert_eq!(period.id, period_id);
+        assert_eq!(period.start_timestamp, start_time);
+        assert_eq!(period.end_timestamp, end_time);
+        assert_eq!(period.decision_slots, decision_slots);
+        assert_eq!(period.status, VotingPeriodStatus::Pending);
+        rotxn.commit().unwrap();
+    }
+
+    // Test period activation
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+        test_env.state.voting_system().activate_voting_period(
+            &mut rwtxn,
+            period_id,
+            start_time,
+        ).unwrap();
+        rwtxn.commit().unwrap();
+    }
+
+    // Verify activation
+    {
+        let rotxn = test_env.state.ro_txn().unwrap();
+        let period = test_env.state.voting_system().databases()
+            .get_voting_period(&rotxn, period_id).unwrap().unwrap();
+        assert_eq!(period.status, VotingPeriodStatus::Active);
+        rotxn.commit().unwrap();
+    }
+
+    // Test period closure
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+        test_env.state.voting_system().close_voting_period(
+            &mut rwtxn,
+            period_id,
+            end_time,
+        ).unwrap();
+        rwtxn.commit().unwrap();
+    }
+
+    // Verify closure
+    {
+        let rotxn = test_env.state.ro_txn().unwrap();
+        let period = test_env.state.voting_system().databases()
+            .get_voting_period(&rotxn, period_id).unwrap().unwrap();
+        assert_eq!(period.status, VotingPeriodStatus::Closed);
+        rotxn.commit().unwrap();
+    }
+}
+
+/// Test voting period validation rules
+#[test]
+fn test_voting_period_validation() {
+    let test_env = TestEnv::new().unwrap();
+
+    let period_id = VotingPeriodId::new(1);
+    let decision_slots = create_test_decision_ids(2);
+
+    // Test invalid timestamp range
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+        let result = test_env.state.voting_system().create_voting_period(
+            &mut rwtxn,
+            period_id,
+            2000, // start after end
+            1000,
+            decision_slots.clone(),
+            100,
+        );
+        assert!(result.is_err());
+        if let Err(Error::InvalidTransaction { reason }) = result {
+            assert!(reason.contains("start must be before end"));
+        } else {
+            panic!("Expected InvalidTransaction error");
+        }
+        rwtxn.abort();
+    }
+
+    // Create valid period
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+        test_env.state.voting_system().create_voting_period(
+            &mut rwtxn,
+            period_id,
+            1000,
+            2000,
+            decision_slots.clone(),
+            100,
+        ).unwrap();
+        rwtxn.commit().unwrap();
+    }
+
+    // Test duplicate period creation
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+        let result = test_env.state.voting_system().create_voting_period(
+            &mut rwtxn,
+            period_id,
+            1500,
+            2500,
+            decision_slots,
+            101,
+        );
+        assert!(result.is_err());
+        if let Err(Error::InvalidTransaction { reason }) = result {
+            assert!(reason.contains("already exists"));
+        } else {
+            panic!("Expected InvalidTransaction error");
+        }
+        rwtxn.abort();
+    }
+
+    // Test premature activation
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+        let result = test_env.state.voting_system().activate_voting_period(
+            &mut rwtxn,
+            period_id,
+            500, // before start time
+        );
+        assert!(result.is_err());
+        if let Err(Error::InvalidTransaction { reason }) = result {
+            assert!(reason.contains("before start time"));
+        } else {
+            panic!("Expected InvalidTransaction error");
+        }
+        rwtxn.abort();
+    }
+}
+
+/// Test vote casting and validation
+#[test]
+fn test_vote_casting() {
+    let test_env = TestEnv::new().unwrap();
+
+    let period_id = VotingPeriodId::new(1);
+    let voters = create_test_voter_ids(3);
+    let decisions = create_test_decision_ids(2);
+
+    // Create and activate voting period
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+        test_env.state.voting_system().create_voting_period(
+            &mut rwtxn,
+            period_id,
+            1000,
+            2000,
+            decisions.clone(),
+            100,
+        ).unwrap();
+
+        test_env.state.voting_system().activate_voting_period(
+            &mut rwtxn,
+            period_id,
+            1000,
+        ).unwrap();
+        rwtxn.commit().unwrap();
+    }
+
+    // Test valid vote casting
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+
+        // Cast binary votes
+        test_env.state.voting_system().cast_vote(
+            &mut rwtxn,
+            voters[0],
+            period_id,
+            decisions[0],
+            VoteValue::Binary(true),
+            1500,
+            200,
+            create_test_tx_hash(1),
+        ).unwrap();
+
+        test_env.state.voting_system().cast_vote(
+            &mut rwtxn,
+            voters[1],
+            period_id,
+            decisions[0],
+            VoteValue::Binary(false),
+            1600,
+            201,
+            create_test_tx_hash(2),
+        ).unwrap();
+
+        // Cast scalar vote
+        test_env.state.voting_system().cast_vote(
+            &mut rwtxn,
+            voters[2],
+            period_id,
+            decisions[1],
+            VoteValue::Scalar(0.75),
+            1700,
+            202,
+            create_test_tx_hash(3),
+        ).unwrap();
+
+        rwtxn.commit().unwrap();
+    }
+
+    // Verify votes were stored correctly
+    {
+        let rotxn = test_env.state.ro_txn().unwrap();
+
+        let vote1 = test_env.state.voting_system().databases()
+            .get_vote(&rotxn, period_id, voters[0], decisions[0]).unwrap().unwrap();
+        assert_eq!(vote1.value, VoteValue::Binary(true));
+        assert_eq!(vote1.timestamp, 1500);
+
+        let vote2 = test_env.state.voting_system().databases()
+            .get_vote(&rotxn, period_id, voters[1], decisions[0]).unwrap().unwrap();
+        assert_eq!(vote2.value, VoteValue::Binary(false));
+
+        let vote3 = test_env.state.voting_system().databases()
+            .get_vote(&rotxn, period_id, voters[2], decisions[1]).unwrap().unwrap();
+        assert_eq!(vote3.value, VoteValue::Scalar(0.75));
+
+        rotxn.commit().unwrap();
+    }
+
+    // Test vote matrix creation
+    {
+        let rotxn = test_env.state.ro_txn().unwrap();
+        let vote_matrix = test_env.state.voting_system().get_vote_matrix(&rotxn, period_id).unwrap();
+
+        // Check binary votes converted to f64
+        assert_eq!(vote_matrix.get(&(voters[0], decisions[0])), Some(&1.0));
+        assert_eq!(vote_matrix.get(&(voters[1], decisions[0])), Some(&0.0));
+        assert_eq!(vote_matrix.get(&(voters[2], decisions[1])), Some(&0.75));
+
+        rotxn.commit().unwrap();
+    }
+}
+
+/// Test basic functionality with smaller test case
+#[test]
+fn test_basic_voting_operations() {
+    let test_env = TestEnv::new().unwrap();
+
+    let period_id = VotingPeriodId::new(1);
+    let voter = create_test_voter_ids(1)[0];
+    let decision = create_test_decision_ids(1)[0];
+
+    // Create and activate period
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+        test_env.state.voting_system().create_voting_period(
+            &mut rwtxn,
+            period_id,
+            1000,
+            2000,
+            vec![decision],
+            100,
+        ).unwrap();
+        test_env.state.voting_system().activate_voting_period(&mut rwtxn, period_id, 1000).unwrap();
+        rwtxn.commit().unwrap();
+    }
+
+    // Cast vote
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+        test_env.state.voting_system().cast_vote(
+            &mut rwtxn,
+            voter,
+            period_id,
+            decision,
+            VoteValue::Binary(true),
+            1500,
+            200,
+            create_test_tx_hash(1),
+        ).unwrap();
+        rwtxn.commit().unwrap();
+    }
+
+    // Verify vote
+    {
+        let rotxn = test_env.state.ro_txn().unwrap();
+        let votes = test_env.state.voting_system().get_votes_for_period(&rotxn, period_id).unwrap();
+        assert_eq!(votes.len(), 1);
+        assert_eq!(votes.get(&(voter, decision)), Some(&VoteValue::Binary(true)));
+        rotxn.commit().unwrap();
+    }
+}
+
+/// Test reputation management
+#[test]
+fn test_reputation_management() {
+    let test_env = TestEnv::new().unwrap();
+
+    let period_id = VotingPeriodId::new(1);
+    let voters = create_test_voter_ids(2);
+
+    // Test reputation initialization
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+
+        test_env.state.voting_system().initialize_voter_reputation(
+            &mut rwtxn,
+            voters[0],
+            0.5,
+            1000,
+            period_id,
+        ).unwrap();
+
+        test_env.state.voting_system().initialize_voter_reputation(
+            &mut rwtxn,
+            voters[1],
+            0.6,
+            1000,
+            period_id,
+        ).unwrap();
+
+        rwtxn.commit().unwrap();
+    }
+
+    // Verify reputation was stored
+    {
+        let rotxn = test_env.state.ro_txn().unwrap();
+
+        let rep1 = test_env.state.voting_system().databases()
+            .get_voter_reputation(&rotxn, voters[0]).unwrap().unwrap();
+        assert_eq!(rep1.reputation, 0.5);
+        assert_eq!(rep1.last_updated_period, period_id);
+
+        let rep2 = test_env.state.voting_system().databases()
+            .get_voter_reputation(&rotxn, voters[1]).unwrap().unwrap();
+        assert_eq!(rep2.reputation, 0.6);
+
+        rotxn.commit().unwrap();
+    }
+
+    // Test reputation updates
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+        let next_period = VotingPeriodId::new(2);
+
+        // Update reputation based on performance
+        test_env.state.voting_system().update_voter_reputation(
+            &mut rwtxn,
+            voters[0],
+            true, // was correct
+            2000,
+            next_period,
+        ).unwrap();
+
+        test_env.state.voting_system().update_voter_reputation(
+            &mut rwtxn,
+            voters[1],
+            false, // was incorrect
+            2000,
+            next_period,
+        ).unwrap();
+
+        rwtxn.commit().unwrap();
+    }
+
+    // Verify reputation updates
+    {
+        let rotxn = test_env.state.ro_txn().unwrap();
+
+        let rep1 = test_env.state.voting_system().databases()
+            .get_voter_reputation(&rotxn, voters[0]).unwrap().unwrap();
+        assert!(rep1.reputation > 0.5); // Should increase for correct vote
+
+        let rep2 = test_env.state.voting_system().databases()
+            .get_voter_reputation(&rotxn, voters[1]).unwrap().unwrap();
+        assert!(rep2.reputation < 0.6); // Should decrease for incorrect vote
+
+        rotxn.commit().unwrap();
+    }
+}
+
+/// Test participation statistics
+#[test]
+fn test_participation_statistics() {
+    let test_env = TestEnv::new().unwrap();
+
+    let period_id = VotingPeriodId::new(1);
+    let voters = create_test_voter_ids(3);
+    let decisions = create_test_decision_ids(2);
+
+    // Create and activate voting period
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+        test_env.state.voting_system().create_voting_period(
+            &mut rwtxn,
+            period_id,
+            1000,
+            2000,
+            decisions.clone(),
+            100,
+        ).unwrap();
+
+        test_env.state.voting_system().activate_voting_period(&mut rwtxn, period_id, 1000).unwrap();
+        rwtxn.commit().unwrap();
+    }
+
+    // Cast some votes
+    {
+        let mut rwtxn = test_env.state.rw_txn().unwrap();
+
+        // Voter 0: votes on both decisions
+        test_env.state.voting_system().cast_vote(
+            &mut rwtxn, voters[0], period_id, decisions[0],
+            VoteValue::Binary(true), 1500, 200, create_test_tx_hash(1)
+        ).unwrap();
+        test_env.state.voting_system().cast_vote(
+            &mut rwtxn, voters[0], period_id, decisions[1],
+            VoteValue::Binary(false), 1500, 200, create_test_tx_hash(2)
+        ).unwrap();
+
+        // Voter 1: votes on 1 decision
+        test_env.state.voting_system().cast_vote(
+            &mut rwtxn, voters[1], period_id, decisions[0],
+            VoteValue::Binary(true), 1500, 200, create_test_tx_hash(3)
+        ).unwrap();
+
+        // Voter 2: no votes
+
+        rwtxn.commit().unwrap();
+    }
+
+    // Calculate statistics
+    {
+        let rotxn = test_env.state.ro_txn().unwrap();
+        let (total_voters, total_votes, participation_rate) =
+            test_env.state.voting_system().get_participation_stats(&rotxn, period_id).unwrap();
+
+        // 2 voters participated out of 3 possible
+        // Total votes: 2 + 1 = 3 votes
+        // Total possible: 2 voters * 2 decisions = 4
+        // Participation rate: 3/4 = 0.75
+        assert_eq!(total_voters, 2);
+        assert_eq!(total_votes, 3);
+        assert_eq!(participation_rate, 0.75);
+
+        rotxn.commit().unwrap();
+    }
+}

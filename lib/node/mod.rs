@@ -17,7 +17,7 @@ use crate::{
     archive::{self, Archive},
     mempool::{self, MemPool},
     net::{self, Net, Peer},
-    state::{self, State},
+    state::{self, State, markets::MarketId},
     types::{
         Address, AmountOverflowError, AmountUnderflowError, Authorized,
         AuthorizedTransaction, Block, BlockHash, BmmResult, Body, FilledOutput,
@@ -366,7 +366,7 @@ where
                 {
                     self.update_mempool_buy(
                         &mut rwtxn,
-                        *market_id,
+                        market_id.clone(),
                         *outcome_index,
                         *shares_to_buy,
                     )?;
@@ -446,15 +446,14 @@ where
     fn update_mempool_buy(
         &self,
         rwtxn: &mut RwTxn,
-        market_id_bytes: [u8; 6],
+        market_id: MarketId,
         outcome_index: u32,
         shares_to_buy: f64,
     ) -> Result<(), Error> {
-        use crate::math::lmsr::{Lmsr, LmsrState};
+        use crate::math::lmsr::LmsrService;
         use crate::state;
-        use crate::state::markets::MarketId;
 
-        let market_id = MarketId::new(market_id_bytes);
+        // market_id is already MarketId type
 
         // Get current market state
         let market = self
@@ -465,7 +464,7 @@ where
                 Error::State(Box::new(state::Error::InvalidSlotId {
                     reason: format!(
                         "Market {:?} does not exist",
-                        market_id_bytes
+                        market_id
                     ),
                 }))
             })?;
@@ -499,17 +498,8 @@ where
         let mut new_shares = current_shares.clone();
         new_shares[outcome_index as usize] += shares_to_buy;
 
-        // Validate the new shares using LMSR
-        let lmsr = Lmsr::new(market.shares().len());
-        let lmsr_state = LmsrState {
-            beta: market.b(),
-            shares: new_shares.clone(),
-            treasury_balance: u64::MAX, // We don't enforce treasury limits for mempool calculations
-            trading_fee: market.trading_fee(),
-        };
-
-        // Validate LMSR state consistency
-        lmsr.validate_state(&lmsr_state).map_err(|e| {
+        // Validate the new shares using centralized LMSR service
+        LmsrService::validate_lmsr_parameters(market.b(), &new_shares).map_err(|e| {
             Error::State(Box::new(state::Error::InvalidSlotId {
                 reason: format!(
                     "Invalid LMSR state after mempool update: {:?}",
@@ -525,7 +515,7 @@ where
 
         tracing::debug!(
             "Updated mempool shares for market {}: outcome {} increased by {} shares",
-            hex::encode(market_id_bytes),
+            hex::encode(market_id),
             outcome_index,
             shares_to_buy
         );

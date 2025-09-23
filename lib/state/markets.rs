@@ -306,7 +306,7 @@ fn parse_single_slot(slot_str: &str) -> Result<SlotId, MarketError> {
 
 /// Unique identifier for a market (6 bytes)
 #[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize,
+    Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
 pub struct MarketId(pub [u8; 6]);
 
@@ -323,6 +323,29 @@ impl MarketId {
 impl std::fmt::Display for MarketId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", hex::encode(self.0))
+    }
+}
+
+impl AsRef<[u8]> for MarketId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+// Schema support for MarketId to maintain API compatibility
+impl utoipa::PartialSchema for MarketId {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::Schema> {
+        let schema = utoipa::openapi::ObjectBuilder::new()
+            .description(Some("6-byte market identifier"))
+            .example(Some(serde_json::json!("0x0123456789ab")))
+            .build();
+        utoipa::openapi::RefOr::T(utoipa::openapi::Schema::Object(schema))
+    }
+}
+
+impl utoipa::ToSchema for MarketId {
+    fn name() -> std::borrow::Cow<'static, str> {
+        "MarketId".into()
     }
 }
 
@@ -445,8 +468,8 @@ impl ShareAccount {
 /// along with the market snapshot at the time of block processing.
 #[derive(Debug, Clone)]
 pub struct BatchedMarketTrade {
-    /// Market ID for this trade
-    pub market_id: [u8; 6],
+    /// Market ID for this trade (standardized across all transaction types)
+    pub market_id: MarketId,
     /// Outcome index being traded
     pub outcome_index: u32,
     /// Number of shares to buy (positive) or sell (negative)
@@ -477,7 +500,7 @@ pub struct MarketSnapshot {
 
 impl BatchedMarketTrade {
     pub fn new(
-        market_id: [u8; 6],
+        market_id: MarketId,
         outcome_index: u32,
         shares_to_buy: f64,
         max_cost: u64,
@@ -3231,14 +3254,13 @@ impl MarketsDatabase {
         );
 
         for (trade_index, trade) in batched_trades.iter().enumerate() {
-            // Validate market exists and is in trading state
-            let market_id = MarketId::new(trade.market_id);
+            // Validate market exists and is in trading state (market_id is now standardized MarketId type)
             let market = self
-                .get_market(txn, &market_id)
+                .get_market(txn, &trade.market_id)
                 .map_err(|e| {
                     tracing::error!(
                         "Database error accessing market {} for trade {}: {}",
-                        hex::encode(&trade.market_id),
+                        hex::encode(&trade.market_id.0),
                         trade_index,
                         e
                     );
@@ -3247,11 +3269,11 @@ impl MarketsDatabase {
                 .ok_or_else(|| {
                     tracing::error!(
                         "Market {} not found for trade {}",
-                        hex::encode(&trade.market_id),
+                        hex::encode(&trade.market_id.0),
                         trade_index
                     );
                     Error::Market(MarketError::MarketNotFound {
-                        id: MarketId(trade.market_id),
+                        id: trade.market_id.clone(),
                     })
                 })?;
 
@@ -3322,7 +3344,7 @@ impl MarketsDatabase {
 
             // Accumulate share changes for each market
             let shares_update =
-                market_updates.entry(market_id.clone()).or_insert_with(|| {
+                market_updates.entry(trade.market_id.clone()).or_insert_with(|| {
                     Array::zeros(trade.market_snapshot.shares.len())
                 });
             shares_update[trade.outcome_index as usize] += trade.shares_to_buy;
@@ -3421,7 +3443,7 @@ impl MarketsDatabase {
             self.add_shares_to_account(
                 txn,
                 &trade.trader_address,
-                MarketId::new(trade.market_id),
+                trade.market_id.clone(),
                 trade.outcome_index,
                 trade.shares_to_buy,
                 0, // Height will be set by caller
@@ -3588,16 +3610,15 @@ impl MarketsDatabase {
         &self,
         txn: &mut RwTxn,
         address: &Address,
-        market_id: [u8; 6],
+        market_id: MarketId,
         outcome_index: u32,
         shares_to_redeem: f64,
         height: u64,
     ) -> Result<(), Error> {
-        let market_id_struct = MarketId::new(market_id);
         self.remove_shares_from_account(
             txn,
             address,
-            &market_id_struct,
+            &market_id,
             outcome_index,
             shares_to_redeem,
             height,
@@ -3611,17 +3632,16 @@ impl MarketsDatabase {
         &self,
         txn: &mut RwTxn,
         address: &Address,
-        market_id: [u8; 6],
+        market_id: MarketId,
         outcome_index: u32,
         shares_traded: f64,
         height: u64,
     ) -> Result<(), Error> {
-        let market_id_struct = MarketId::new(market_id);
         // Reverse the trade by removing the shares that were added
         self.remove_shares_from_account(
             txn,
             address,
-            &market_id_struct,
+            &market_id,
             outcome_index,
             shares_traded,
             height,
@@ -3635,17 +3655,16 @@ impl MarketsDatabase {
         &self,
         txn: &mut RwTxn,
         address: &Address,
-        market_id: [u8; 6],
+        market_id: MarketId,
         outcome_index: u32,
         shares_redeemed: f64,
         height: u64,
     ) -> Result<(), Error> {
-        let market_id_struct = MarketId::new(market_id);
         // Reverse the redemption by adding the shares back
         self.add_shares_to_account(
             txn,
             address,
-            market_id_struct,
+            market_id,
             outcome_index,
             shares_redeemed,
             height,
@@ -3853,7 +3872,7 @@ mod tests {
     #[test]
     fn test_mempool_market_processing() {
         // This test validates the structure is in place for mempool processing
-        let market_id = [0u8; 6];
+        let market_id = MarketId([0u8; 6]);
         let shares = Array::from_vec(vec![100.0, 100.0, 100.0]);
 
         let snapshot = MarketSnapshot {

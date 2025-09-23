@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use sneed::{RoTxn, RwTxn};
 
 use crate::{
-    math::lmsr::{Lmsr, LmsrError, LmsrState},
+    math::lmsr::{LmsrError, LmsrService},
     state::{Error, State, UtxoManager, error, markets::MarketId},
     types::{
         Address, AmountOverflowError, Authorization, Body, FilledOutput,
@@ -130,7 +130,7 @@ impl StateUpdate {
         for update in &self.market_updates {
             if let Some(ref shares) = update.new_shares {
                 if let Some(beta) = update.new_beta {
-                    validate_lmsr_params(beta, shares).map_err(|e| {
+                    LmsrService::validate_lmsr_parameters(beta, shares).map_err(|e| {
                         Error::InvalidSlotId {
                             reason: format!("LMSR validation failed: {:?}", e),
                         }
@@ -169,8 +169,8 @@ impl StateUpdate {
                 });
             }
 
-            // Validate LMSR parameters for new market
-            validate_lmsr_params(
+            // Validate LMSR parameters for new market using centralized service
+            LmsrService::validate_lmsr_parameters(
                 creation.market.b(),
                 &creation.market.shares(),
             )
@@ -244,8 +244,8 @@ impl StateUpdate {
                         ),
                     })?;
 
-                // Recalculate treasury with new shares using comprehensive LMSR
-                let new_treasury = calc_treasury(new_shares, market.b())
+                // Recalculate treasury with new shares using centralized LMSR service
+                let new_treasury = LmsrService::calculate_treasury(new_shares, market.b())
                     .map_err(|e| Error::InvalidSlotId {
                         reason: format!("Treasury calculation failed: {:?}", e),
                     })?;
@@ -396,65 +396,14 @@ impl StateUpdate {
     }
 }
 
-/// Calculate treasury using LMSR with actual market size.
-///
-/// This function creates an LMSR calculator with the exact number of outcomes
-/// in the market, ensuring consistency with Hivemind whitepaper specifications.
-///
-/// # Arguments
-/// * `shares` - Current share quantities for all market outcomes
-/// * `beta` - LMSR beta parameter for liquidity
-///
-/// # Returns
-/// * `Ok(treasury)` - Calculated treasury value
-/// * `Err(LmsrError)` - LMSR calculation error
-fn calc_treasury(
-    shares: &Array<f64, Ix1>,
-    beta: f64,
-) -> Result<f64, LmsrError> {
-    // Create LMSR with actual market size instead of hardcoded 256
-    // This ensures proper validation and calculation for markets of any size
-    let lmsr = Lmsr::new(shares.len());
-    lmsr.cost_function(beta, &shares.view())
-}
-
-/// Validate LMSR parameters with actual market size.
-///
-/// Creates an LMSR validator with the correct market size to ensure
-/// proper validation according to Bitcoin Hivemind specifications.
-fn validate_lmsr_params(
-    beta: f64,
-    shares: &Array<f64, Ix1>,
-) -> Result<(), LmsrError> {
-    let state = LmsrState {
-        beta,
-        shares: shares.clone(),
-        treasury_balance: u64::MAX,
-        trading_fee: 0.0,
-    };
-    // Use LMSR with actual market size instead of hardcoded 256
-    let lmsr = Lmsr::new(shares.len());
-    lmsr.validate_state(&state)
-}
-
-/// Calculate share update cost.
+/// Calculate share update cost using centralized LMSR service.
 fn query_update_cost(
     current_shares: &Array<f64, Ix1>,
     new_shares: &Array<f64, Ix1>,
     beta: f64,
 ) -> Result<f64, LmsrError> {
-    if new_shares.len() != current_shares.len() {
-        return Err(LmsrError::InvalidOutcomeCount {
-            count: new_shares.len(),
-            min: 1,
-            max: current_shares.len(),
-        });
-    }
-
-    let current_cost = calc_treasury(current_shares, beta)?;
-    let new_cost = calc_treasury(new_shares, beta)?;
-
-    Ok(new_cost - current_cost)
+    // Use centralized LMSR service for all calculations
+    LmsrService::calculate_update_cost(current_shares, new_shares, beta)
 }
 
 /// Validate a block and return total fees.
@@ -812,6 +761,8 @@ pub fn disconnect_tip(
         // unspend STXOs, last-to-first
         tx.inputs.iter().rev().try_for_each(|outpoint| {
             if let Some(spent_output) = state.stxos.try_get(rwtxn, outpoint)? {
+                // Remove STXO caches before deleting for O(1) sidechain wealth calculation
+                state.remove_stxo_caches(rwtxn, outpoint, &spent_output)?;
                 state.stxos.delete(rwtxn, outpoint)?;
                 state.insert_utxo_with_address_index(
                     rwtxn,
@@ -1135,6 +1086,8 @@ fn apply_utxo_changes(
         };
         state.delete_utxo_with_address_index(rwtxn, input)?;
         state.stxos.put(rwtxn, input, &spent_output)?;
+        // Update STXO caches for O(1) sidechain wealth calculation
+        state.update_stxo_caches(rwtxn, input, &spent_output)?;
     }
 
     // Process outputs (creating new UTXOs)
@@ -1173,10 +1126,10 @@ fn apply_market_trade(
             reason: "Not a buy shares transaction".to_string(),
         })?;
 
-    // Get current market for LMSR calculations
+    // Get current market for LMSR calculations (market_id is now standardized MarketId type)
     let market = state
         .markets()
-        .get_market(rwtxn, &MarketId::new(buy_data.market_id))?
+        .get_market(rwtxn, &buy_data.market_id)?
         .ok_or_else(|| Error::InvalidSlotId {
             reason: format!("Market {:?} does not exist", buy_data.market_id),
         })?;
@@ -1222,9 +1175,9 @@ fn apply_market_trade(
     // Calculate volume in sats (including fees)
     let volume_sats = trade_cost.ceil() as u64;
 
-    // Add to collected changes for atomic application
+    // Add to collected changes for atomic application (market_id is now standardized MarketId type)
     state_update.add_market_update(MarketStateUpdate {
-        market_id: MarketId::new(buy_data.market_id),
+        market_id: buy_data.market_id.clone(),
         new_shares: Some(new_shares),
         new_beta: None,
         trader_address: Some(trader_address),
@@ -1234,10 +1187,10 @@ fn apply_market_trade(
         volume_sats: Some(volume_sats),
     });
 
-    // Add share account change
+    // Add share account change (market_id is now standardized MarketId type)
     state_update.add_share_account_change(
         trader_address,
-        MarketId::new(buy_data.market_id),
+        buy_data.market_id,
         buy_data.outcome_index,
         buy_data.shares_to_buy,
     );

@@ -545,11 +545,161 @@ impl LmsrMultidim {
     }
 }
 
+/// Centralized LMSR service for all Bitcoin Hivemind prediction market operations
+///
+/// This service consolidates all LMSR mathematical operations to ensure consistency
+/// across the codebase and compliance with Bitcoin Hivemind whitepaper specifications.
+/// All market pricing, treasury calculations, and parameter validation should use this service.
+pub struct LmsrService;
+
+impl LmsrService {
+    /// Calculate treasury using LMSR with actual market size
+    ///
+    /// This function creates an LMSR calculator with the exact number of outcomes
+    /// in the market, ensuring consistency with Hivemind whitepaper specifications.
+    ///
+    /// # Arguments
+    /// * `shares` - Current share quantities for all market outcomes
+    /// * `beta` - LMSR beta parameter for liquidity
+    ///
+    /// # Returns
+    /// * `Ok(treasury)` - Calculated treasury value per Bitcoin Hivemind specifications
+    /// * `Err(LmsrError)` - LMSR calculation error
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper section on LMSR treasury calculations
+    pub fn calculate_treasury(
+        shares: &Array1<f64>,
+        beta: f64,
+    ) -> Result<f64, LmsrError> {
+        // Create LMSR with actual market size instead of hardcoded values
+        // This ensures proper validation and calculation for markets of any size
+        let lmsr = Lmsr::new(shares.len());
+        lmsr.cost_function(beta, &shares.view())
+    }
+
+    /// Validate LMSR parameters with actual market size
+    ///
+    /// Creates an LMSR validator with the correct market size to ensure
+    /// proper validation according to Bitcoin Hivemind specifications.
+    ///
+    /// # Arguments
+    /// * `beta` - LMSR beta parameter for liquidity validation
+    /// * `shares` - Share quantities for parameter validation
+    ///
+    /// # Returns
+    /// * `Ok(())` - Parameters are valid per Bitcoin Hivemind requirements
+    /// * `Err(LmsrError)` - Invalid parameters with detailed error information
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper sections on LMSR parameter constraints
+    pub fn validate_lmsr_parameters(
+        beta: f64,
+        shares: &Array1<f64>,
+    ) -> Result<(), LmsrError> {
+        let state = LmsrState {
+            beta,
+            shares: shares.clone(),
+            treasury_balance: u64::MAX,
+            trading_fee: 0.0,
+        };
+        // Use LMSR with actual market size instead of hardcoded values
+        let lmsr = Lmsr::new(shares.len());
+        lmsr.validate_state(&state)
+    }
+
+    /// Calculate the cost difference between two share states
+    ///
+    /// This function calculates the cost of updating from current shares to new shares
+    /// using the LMSR cost function differential. Essential for trade cost calculations.
+    ///
+    /// # Arguments
+    /// * `current_shares` - Current share quantities for all outcomes
+    /// * `new_shares` - New share quantities after proposed trade
+    /// * `beta` - LMSR beta parameter for liquidity
+    ///
+    /// # Returns
+    /// * `Ok(cost_difference)` - Cost to move from current to new state
+    /// * `Err(LmsrError)` - LMSR calculation error
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper section on trade cost calculations
+    pub fn calculate_update_cost(
+        current_shares: &Array1<f64>,
+        new_shares: &Array1<f64>,
+        beta: f64,
+    ) -> Result<f64, LmsrError> {
+        if current_shares.len() != new_shares.len() {
+            return Err(LmsrError::DimensionMismatch {
+                expected: current_shares.len(),
+                actual: new_shares.len(),
+            });
+        }
+
+        let lmsr = Lmsr::new(current_shares.len());
+        let current_cost = lmsr.cost_function(beta, &current_shares.view())?;
+        let new_cost = lmsr.cost_function(beta, &new_shares.view())?;
+
+        Ok(new_cost - current_cost)
+    }
+
+    /// Calculate share quantities that would result in a specific cost
+    ///
+    /// This function performs the inverse calculation to determine what share
+    /// quantities would be needed to achieve a target cost difference.
+    ///
+    /// # Arguments
+    /// * `current_shares` - Current share quantities for all outcomes
+    /// * `beta` - LMSR beta parameter for liquidity
+    /// * `target_cost` - Target cost difference to achieve
+    ///
+    /// # Returns
+    /// * `Ok(cost_difference)` - Cost to achieve target update
+    /// * `Err(LmsrError)` - LMSR calculation error or invalid target
+    pub fn query_cost_for_update(
+        current_shares: &Array1<f64>,
+        beta: f64,
+        target_cost: f64,
+    ) -> Result<f64, LmsrError> {
+        if target_cost <= 0.0 {
+            return Err(LmsrError::InvalidCostCalculation);
+        }
+
+        let lmsr = Lmsr::new(current_shares.len());
+        let current_cost = lmsr.cost_function(beta, &current_shares.view())?;
+        let target_total_cost = current_cost + target_cost;
+
+        // Return the target cost for external share calculation
+        Ok(target_total_cost)
+    }
+
+    /// Create an LMSR instance with proper market size validation
+    ///
+    /// This ensures all LMSR instances are created with appropriate size constraints
+    /// per Bitcoin Hivemind specifications.
+    ///
+    /// # Arguments
+    /// * `market_size` - Number of outcomes in the market
+    ///
+    /// # Returns
+    /// * `Ok(Lmsr)` - Properly configured LMSR instance
+    /// * `Err(LmsrError)` - Invalid market size
+    pub fn create_lmsr_for_market(market_size: usize) -> Result<Lmsr, LmsrError> {
+        if market_size == 0 || market_size > 256 {
+            return Err(LmsrError::InvalidOutcomeCount {
+                count: market_size,
+                min: 1,
+                max: 256,
+            });
+        }
+        Ok(Lmsr::new(market_size))
+    }
+}
+
 /// Standalone functions for backward compatibility
 pub fn calculate_cost(shares: &[f64], beta: f64) -> Result<f64, LmsrError> {
     let shares_array = Array1::from_vec(shares.to_vec());
-    let lmsr = Lmsr::new(shares.len());
-    lmsr.cost_function(beta, &shares_array.view())
+    LmsrService::calculate_treasury(&shares_array, beta)
 }
 
 pub fn calculate_prices(

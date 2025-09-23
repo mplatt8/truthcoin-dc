@@ -8,6 +8,7 @@ use utoipa::{PartialSchema, ToSchema};
 
 use crate::{
     authorization::Authorization,
+    state::markets::MarketId,
     types::{
         AmountOverflowError, GetAddress, GetBitcoinValue,
         address::Address,
@@ -176,8 +177,8 @@ pub enum TransactionData {
     },
     /// Buy shares in a prediction market by spending Bitcoin on L2
     BuyShares {
-        /// Market ID (6 bytes)
-        market_id: [u8; 6],
+        /// Market ID standardized across all transaction types per Bitcoin Hivemind specifications
+        market_id: MarketId,
         /// Outcome index to buy shares for
         outcome_index: u32,
         /// Number of shares to buy
@@ -187,8 +188,8 @@ pub enum TransactionData {
     },
     /// Redeem shares after market resolution for Bitcoin payout
     RedeemShares {
-        /// Market ID (6 bytes)
-        market_id: [u8; 6],
+        /// Market ID standardized across all transaction types per Bitcoin Hivemind specifications
+        market_id: MarketId,
         /// Outcome index to redeem shares for
         outcome_index: u32,
         /// Number of shares to redeem
@@ -333,10 +334,10 @@ pub struct CreateMarketDimensional {
 }
 
 /// Struct describing a share buy operation
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BuyShares {
-    /// Market ID (6 bytes)
-    pub market_id: [u8; 6],
+    /// Market ID standardized across all transaction types per Bitcoin Hivemind specifications
+    pub market_id: MarketId,
     /// Outcome index to buy shares for
     pub outcome_index: u32,
     /// Number of shares to buy
@@ -346,10 +347,10 @@ pub struct BuyShares {
 }
 
 /// Struct describing a share redemption operation after market resolution
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RedeemShares {
-    /// Market ID (6 bytes)
-    pub market_id: [u8; 6],
+    /// Market ID standardized across all transaction types per Bitcoin Hivemind specifications
+    pub market_id: MarketId,
     /// Outcome index to redeem shares for
     pub outcome_index: u32,
     /// Number of shares to redeem
@@ -600,7 +601,7 @@ impl FilledTransaction {
                 shares_to_buy,
                 max_cost,
             }) => Some(BuyShares {
-                market_id: *market_id,
+                market_id: market_id.clone(),
                 outcome_index: *outcome_index,
                 shares_to_buy: *shares_to_buy,
                 max_cost: *max_cost,
@@ -617,7 +618,7 @@ impl FilledTransaction {
                 outcome_index,
                 shares_to_redeem,
             }) => Some(RedeemShares {
-                market_id: *market_id,
+                market_id: market_id.clone(),
                 outcome_index: *outcome_index,
                 shares_to_redeem: *shares_to_redeem,
             }),

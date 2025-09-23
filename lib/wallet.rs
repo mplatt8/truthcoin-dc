@@ -21,7 +21,7 @@ use tokio_stream::{StreamMap, wrappers::WatchStream};
 
 use crate::{
     authorization::{self, Authorization, Signature, get_address},
-    state::markets::{DimensionSpec, parse_dimensions},
+    state::markets::{DimensionSpec, MarketId, parse_dimensions},
     types::{
         Address, AmountOverflowError, AmountUnderflowError, AssetId,
         AuthorizedTransaction, BitcoinOutputContent, EncryptionPubKey,
@@ -906,7 +906,7 @@ impl Wallet {
 
         // Set the transaction data
         tx.data = Some(TxData::BuyShares {
-            market_id: *market_id.as_bytes(),
+            market_id: MarketId::new(*market_id.as_bytes()),
             outcome_index: outcome_index as u32,
             shares_to_buy: shares_amount,
             max_cost,
@@ -943,7 +943,7 @@ impl Wallet {
 
         // Set the transaction data
         tx.data = Some(TxData::RedeemShares {
-            market_id: *market_id.as_bytes(),
+            market_id: MarketId::new(*market_id.as_bytes()),
             outcome_index: outcome_index as u32,
             shares_to_redeem: shares_amount,
         });

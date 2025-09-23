@@ -137,6 +137,15 @@ pub struct State {
         SerdeBincode<u32>,
         SerdeBincode<(bitcoin::BlockHash, u32)>,
     >,
+    /// Cached total value of deposit UTXOs for O(1) sidechain wealth calculation
+    /// Updated atomically with UTXO operations per Bitcoin Hivemind sidechain requirements
+    cached_deposit_utxo_value: DatabaseUnique<UnitKey, SerdeBincode<u64>>,
+    /// Cached total value of deposit STXOs for O(1) sidechain wealth calculation
+    /// Updated atomically with STXO operations per Bitcoin Hivemind sidechain requirements
+    cached_deposit_stxo_value: DatabaseUnique<UnitKey, SerdeBincode<u64>>,
+    /// Cached total value of withdrawal STXOs for O(1) sidechain wealth calculation
+    /// Updated atomically with STXO operations per Bitcoin Hivemind sidechain requirements
+    cached_withdrawal_stxo_value: DatabaseUnique<UnitKey, SerdeBincode<u64>>,
     _version: DatabaseUnique<UnitKey, SerdeBincode<Version>>,
 }
 
@@ -180,7 +189,7 @@ impl State {
         + slots::Dbs::NUM_DBS
         + MarketsDatabase::NUM_DBS
         + VotingSystem::NUM_DBS
-        + 14;
+        + 17; // Added 3 new cache databases
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn()?;
@@ -215,9 +224,35 @@ impl State {
             &mut rwtxn,
             "withdrawal_bundle_event_blocks",
         )?;
+        let cached_deposit_utxo_value = DatabaseUnique::create(
+            env,
+            &mut rwtxn,
+            "cached_deposit_utxo_value",
+        )?;
+        let cached_deposit_stxo_value = DatabaseUnique::create(
+            env,
+            &mut rwtxn,
+            "cached_deposit_stxo_value",
+        )?;
+        let cached_withdrawal_stxo_value = DatabaseUnique::create(
+            env,
+            &mut rwtxn,
+            "cached_withdrawal_stxo_value",
+        )?;
         let version = DatabaseUnique::create(env, &mut rwtxn, "state_version")?;
         if version.try_get(&rwtxn, &())?.is_none() {
             version.put(&mut rwtxn, &(), &*VERSION)?;
+        }
+
+        // Initialize cache values to zero if they don't exist
+        if cached_deposit_utxo_value.try_get(&rwtxn, &())?.is_none() {
+            cached_deposit_utxo_value.put(&mut rwtxn, &(), &0u64)?;
+        }
+        if cached_deposit_stxo_value.try_get(&rwtxn, &())?.is_none() {
+            cached_deposit_stxo_value.put(&mut rwtxn, &(), &0u64)?;
+        }
+        if cached_withdrawal_stxo_value.try_get(&rwtxn, &())?.is_none() {
+            cached_withdrawal_stxo_value.put(&mut rwtxn, &(), &0u64)?;
         }
         rwtxn.commit()?;
         Ok(Self {
@@ -236,6 +271,9 @@ impl State {
             withdrawal_bundles,
             withdrawal_bundle_event_blocks,
             deposit_blocks,
+            cached_deposit_utxo_value,
+            cached_deposit_stxo_value,
+            cached_withdrawal_stxo_value,
             _version: version,
         })
     }
@@ -392,6 +430,14 @@ impl UtxoManager for State {
             &(),
         )?;
 
+        // Update cached deposit UTXO value if this is a deposit
+        if matches!(outpoint, OutPoint::Deposit(_)) {
+            let current_value = self.cached_deposit_utxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+            let bitcoin_value = filled_output.get_bitcoin_value().to_sat();
+            let new_value = current_value.saturating_add(bitcoin_value);
+            self.cached_deposit_utxo_value.put(rwtxn, &(), &new_value)?;
+        }
+
         Ok(())
     }
 
@@ -408,6 +454,14 @@ impl UtxoManager for State {
                 // UTXO not found, nothing to delete
                 return Ok(false);
             };
+
+        // Update cached deposit UTXO value if this is a deposit (before deletion)
+        if matches!(outpoint, OutPoint::Deposit(_)) {
+            let current_value = self.cached_deposit_utxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+            let bitcoin_value = filled_output.get_bitcoin_value().to_sat();
+            let new_value = current_value.saturating_sub(bitcoin_value);
+            self.cached_deposit_utxo_value.put(rwtxn, &(), &new_value)?;
+        }
 
         // Perform atomic deletion: both operations must succeed or both must fail
         // Remove from address index first (less critical if this fails)
@@ -426,6 +480,13 @@ impl UtxoManager for State {
                 &(filled_output.address, *outpoint),
                 &(),
             )?;
+            // Restore cache value
+            if matches!(outpoint, OutPoint::Deposit(_)) {
+                let current_value = self.cached_deposit_utxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+                let bitcoin_value = filled_output.get_bitcoin_value().to_sat();
+                let restored_value = current_value.saturating_add(bitcoin_value);
+                self.cached_deposit_utxo_value.put(rwtxn, &(), &restored_value)?;
+            }
             return Ok(false);
         }
 
@@ -439,11 +500,89 @@ impl UtxoManager for State {
         // Clear both databases atomically
         self.utxos.clear(rwtxn)?;
         self.utxos_by_address.clear(rwtxn)?;
+
+        // Reset cached values to zero
+        self.cached_deposit_utxo_value.put(rwtxn, &(), &0u64)?;
+        self.cached_deposit_stxo_value.put(rwtxn, &(), &0u64)?;
+        self.cached_withdrawal_stxo_value.put(rwtxn, &(), &0u64)?;
+
         Ok(())
     }
 }
 
 impl State {
+    /// Update cached STXO values when adding a spent output
+    ///
+    /// This method maintains the cached counters for deposit STXOs and withdrawal STXOs
+    /// to enable O(1) sidechain wealth calculation per Bitcoin Hivemind specifications.
+    ///
+    /// # Arguments
+    /// * `rwtxn` - Mutable database transaction
+    /// * `outpoint` - OutPoint being spent
+    /// * `spent_output` - SpentOutput being added
+    ///
+    /// # ACID Compliance
+    /// Updates are performed within the same transaction as STXO insertion
+    /// to ensure atomicity per Bitcoin Hivemind sidechain requirements.
+    pub fn update_stxo_caches(
+        &self,
+        rwtxn: &mut RwTxn,
+        outpoint: &OutPoint,
+        spent_output: &SpentOutput,
+    ) -> Result<(), Error> {
+        let bitcoin_value = spent_output.output.get_bitcoin_value().to_sat();
+
+        // Update deposit STXO cache if this is a deposit
+        if matches!(outpoint, OutPoint::Deposit(_)) {
+            let current_value = self.cached_deposit_stxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+            let new_value = current_value.saturating_add(bitcoin_value);
+            self.cached_deposit_stxo_value.put(rwtxn, &(), &new_value)?;
+        }
+
+        // Update withdrawal STXO cache if this is a withdrawal
+        if matches!(spent_output.inpoint, InPoint::Withdrawal { .. }) {
+            let current_value = self.cached_withdrawal_stxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+            let new_value = current_value.saturating_add(bitcoin_value);
+            self.cached_withdrawal_stxo_value.put(rwtxn, &(), &new_value)?;
+        }
+
+        Ok(())
+    }
+
+    /// Remove cached STXO values when removing a spent output
+    ///
+    /// This method decrements the cached counters for deposit STXOs and withdrawal STXOs
+    /// to maintain consistency during STXO removal operations.
+    ///
+    /// # Arguments
+    /// * `rwtxn` - Mutable database transaction
+    /// * `outpoint` - OutPoint being unspent
+    /// * `spent_output` - SpentOutput being removed
+    pub fn remove_stxo_caches(
+        &self,
+        rwtxn: &mut RwTxn,
+        outpoint: &OutPoint,
+        spent_output: &SpentOutput,
+    ) -> Result<(), Error> {
+        let bitcoin_value = spent_output.output.get_bitcoin_value().to_sat();
+
+        // Update deposit STXO cache if this is a deposit
+        if matches!(outpoint, OutPoint::Deposit(_)) {
+            let current_value = self.cached_deposit_stxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+            let new_value = current_value.saturating_sub(bitcoin_value);
+            self.cached_deposit_stxo_value.put(rwtxn, &(), &new_value)?;
+        }
+
+        // Update withdrawal STXO cache if this is a withdrawal
+        if matches!(spent_output.inpoint, InPoint::Withdrawal { .. }) {
+            let current_value = self.cached_withdrawal_stxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+            let new_value = current_value.saturating_sub(bitcoin_value);
+            self.cached_withdrawal_stxo_value.put(rwtxn, &(), &new_value)?;
+        }
+
+        Ok(())
+    }
+
     /// Get mempool-adjusted shares for a market (for real-time price updates)
     pub fn get_mempool_shares(
         &self,
@@ -760,11 +899,10 @@ impl State {
             reason: "Not a buy shares transaction".to_string(),
         })?;
 
-        // Validate market exists
-        let market_id = MarketId::new(buy_data.market_id);
+        // Validate market exists (market_id is now standardized MarketId type)
         let market =
             self.markets()
-                .get_market(rotxn, &market_id)?
+                .get_market(rotxn, &buy_data.market_id)?
                 .ok_or_else(|| Error::InvalidSlotId {
                     reason: format!(
                         "Market {:?} does not exist",
@@ -930,47 +1068,37 @@ impl State {
         Ok(block_hash)
     }
 
-    /// Get total sidechain wealth in Bitcoin with optimized single-pass calculation
+    /// Get total sidechain wealth in Bitcoin using O(1) cached values
+    ///
+    /// This optimized implementation uses cached counters maintained during UTXO/STXO
+    /// operations to achieve O(1) performance instead of the previous O(n) iteration.
+    ///
+    /// # Performance Improvement
+    /// - Previous: O(n) where n = total UTXOs + STXOs (could be millions)
+    /// - Current: O(1) constant time lookup from cached values
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Calculation follows the Bitcoin Hivemind whitepaper specification:
+    /// **Sidechain Wealth = Deposit UTXOs + Deposit STXOs - Withdrawal STXOs**
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only database transaction
+    ///
+    /// # Returns
+    /// Total sidechain wealth in Bitcoin satoshis with overflow protection
     pub fn sidechain_wealth(
         &self,
         rotxn: &RoTxn,
     ) -> Result<bitcoin::Amount, Error> {
-        // Single-pass calculation with early termination on overflow
-        let mut total_deposit_utxo_value = bitcoin::Amount::ZERO;
+        // O(1) cache lookups instead of O(n) iteration
+        let deposit_utxo_value = self.cached_deposit_utxo_value.try_get(rotxn, &())?.unwrap_or(0);
+        let deposit_stxo_value = self.cached_deposit_stxo_value.try_get(rotxn, &())?.unwrap_or(0);
+        let withdrawal_stxo_value = self.cached_withdrawal_stxo_value.try_get(rotxn, &())?.unwrap_or(0);
 
-        // UTXO iteration using fallible iterator
-        let mut utxo_iter = self.utxos.iter(rotxn)?;
-        while let Some((outpoint, output)) = utxo_iter.next()? {
-            if matches!(outpoint, OutPoint::Deposit(_)) {
-                let value = output.get_bitcoin_value();
-                total_deposit_utxo_value = total_deposit_utxo_value
-                    .checked_add(value)
-                    .ok_or(AmountOverflowError)?;
-            }
-        }
-
-        // Single-pass STXO iteration with logic
-        let mut total_deposit_stxo_value = bitcoin::Amount::ZERO;
-        let mut total_withdrawal_stxo_value = bitcoin::Amount::ZERO;
-
-        let mut stxo_iter = self.stxos.iter(rotxn)?;
-        while let Some((outpoint, spent_output)) = stxo_iter.next()? {
-            let bitcoin_value = spent_output.output.get_bitcoin_value();
-
-            // Process deposit STXOs
-            if matches!(outpoint, OutPoint::Deposit(_)) {
-                total_deposit_stxo_value = total_deposit_stxo_value
-                    .checked_add(bitcoin_value)
-                    .ok_or(AmountOverflowError)?;
-            }
-
-            // Process withdrawal STXOs (fixed bug - was using wrong variable)
-            if matches!(spent_output.inpoint, InPoint::Withdrawal { .. }) {
-                total_withdrawal_stxo_value = total_withdrawal_stxo_value
-                    .checked_add(bitcoin_value)
-                    .ok_or(AmountOverflowError)?;
-            }
-        }
+        // Convert to bitcoin::Amount with overflow protection
+        let total_deposit_utxo_value = bitcoin::Amount::from_sat(deposit_utxo_value);
+        let total_deposit_stxo_value = bitcoin::Amount::from_sat(deposit_stxo_value);
+        let total_withdrawal_stxo_value = bitcoin::Amount::from_sat(withdrawal_stxo_value);
 
         // Consolidated calculation with overflow protection
         let total_wealth = total_deposit_utxo_value

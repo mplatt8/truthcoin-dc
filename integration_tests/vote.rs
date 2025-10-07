@@ -82,8 +82,177 @@ impl TruthcoinNodes {
     }
 }
 
+/// Seven-node setup for Phase 1 of the Hivemind voting integration test
+#[derive(Debug)]
+struct SevenNodeSetup {
+    voter_0: PostSetup,
+    voter_1: PostSetup,
+    voter_2: PostSetup,
+    voter_3: PostSetup,
+    voter_4: PostSetup,
+    voter_5: PostSetup,
+    voter_6: PostSetup,
+}
+
+impl SevenNodeSetup {
+    /// Initialize all seven nodes
+    async fn setup(
+        bin_paths: &BinPaths,
+        res_tx: mpsc::UnboundedSender<anyhow::Result<()>>,
+        enforcer_post_setup: &EnforcerPostSetup,
+    ) -> anyhow::Result<Self> {
+        tracing::info!("=== Phase 1.1: Seven-Node Network Setup ===");
+
+        // Initialize a single node
+        let setup_single = |suffix: &str| {
+            PostSetup::setup(
+                Init {
+                    truthcoin_app: bin_paths.truthcoin.clone(),
+                    data_dir_suffix: Some(suffix.to_owned()),
+                },
+                enforcer_post_setup,
+                res_tx.clone(),
+            )
+        };
+
+        tracing::info!("Initializing 7 nodes...");
+        let res = Self {
+            voter_0: setup_single("voter_0").await?,
+            voter_1: setup_single("voter_1").await?,
+            voter_2: setup_single("voter_2").await?,
+            voter_3: setup_single("voter_3").await?,
+            voter_4: setup_single("voter_4").await?,
+            voter_5: setup_single("voter_5").await?,
+            voter_6: setup_single("voter_6").await?,
+        };
+        tracing::info!("All 7 nodes initialized successfully");
+
+        Ok(res)
+    }
+
+    /// Get all nodes as a vector for iteration
+    fn all_nodes(&self) -> Vec<&PostSetup> {
+        vec![
+            &self.voter_0,
+            &self.voter_1,
+            &self.voter_2,
+            &self.voter_3,
+            &self.voter_4,
+            &self.voter_5,
+            &self.voter_6,
+        ]
+    }
+
+    /// Get mutable references to all nodes
+    fn all_nodes_mut(&mut self) -> Vec<&mut PostSetup> {
+        vec![
+            &mut self.voter_0,
+            &mut self.voter_1,
+            &mut self.voter_2,
+            &mut self.voter_3,
+            &mut self.voter_4,
+            &mut self.voter_5,
+            &mut self.voter_6,
+        ]
+    }
+
+    /// Setup mesh network topology - connect all nodes to each other
+    /// This creates 21 peer connections total (7 nodes * 6 connections each / 2)
+    async fn setup_mesh_network(&self) -> anyhow::Result<()> {
+        tracing::info!("=== Setting up mesh network topology ===");
+        tracing::info!("Creating full mesh: each node connected to all others (21 connections total)");
+
+        let nodes = self.all_nodes();
+        let mut connection_count = 0;
+
+        // Connect each node to every other node
+        for (i, node_i) in nodes.iter().enumerate() {
+            for (j, node_j) in nodes.iter().enumerate() {
+                if i < j {  // Only connect once per pair to avoid duplicates
+                    tracing::debug!(
+                        "Connecting voter_{} ({}) to voter_{} ({})",
+                        i,
+                        node_i.net_addr(),
+                        j,
+                        node_j.net_addr()
+                    );
+                    node_i
+                        .rpc_client
+                        .connect_peer(node_j.net_addr().into())
+                        .await?;
+                    connection_count += 1;
+                }
+            }
+        }
+
+        tracing::info!("Mesh network established: {} connections created", connection_count);
+        Ok(())
+    }
+
+    /// Verify peer connectivity for all nodes
+    async fn verify_peer_connectivity(&self) -> anyhow::Result<()> {
+        tracing::info!("=== Verifying peer connectivity ===");
+
+        let nodes = self.all_nodes();
+        for (i, node) in nodes.iter().enumerate() {
+            let peers = node.rpc_client.list_peers().await?;
+            let peer_count = peers.len();
+
+            tracing::info!("voter_{}: {} peers connected", i, peer_count);
+
+            // Each node should be connected to 6 other nodes
+            anyhow::ensure!(
+                peer_count == 6,
+                "voter_{} has {} peers, expected 6",
+                i,
+                peer_count
+            );
+        }
+
+        tracing::info!("Peer connectivity verified: all nodes have 6 peers");
+        Ok(())
+    }
+
+    /// Distribute initial funding (Bitcoin deposits) to all nodes
+    async fn distribute_initial_funding(
+        &mut self,
+        enforcer_post_setup: &mut EnforcerPostSetup,
+        amount_per_node: bitcoin::Amount,
+        fee: bitcoin::Amount,
+    ) -> anyhow::Result<()> {
+        tracing::info!("=== Phase 1.2: Initial Funding Distribution ===");
+        tracing::info!(
+            "Funding each of 7 nodes with {} satoshis",
+            amount_per_node.to_sat()
+        );
+
+        for (i, node) in self.all_nodes_mut().iter_mut().enumerate() {
+            let deposit_address = node.get_deposit_address().await?;
+            tracing::debug!("Depositing to voter_{} at {}", i, deposit_address);
+
+            deposit(
+                enforcer_post_setup,
+                *node,
+                &deposit_address,
+                amount_per_node,
+                fee,
+            )
+            .await?;
+
+            tracing::info!("voter_{}: funded with {} sats", i, amount_per_node.to_sat());
+        }
+
+        tracing::info!("All 7 nodes funded successfully");
+        Ok(())
+    }
+}
+
 const DEPOSIT_AMOUNT: bitcoin::Amount = bitcoin::Amount::from_sat(21_000_000);
 const DEPOSIT_FEE: bitcoin::Amount = bitcoin::Amount::from_sat(1_000_000);
+
+// Phase 1 constants
+const FUNDING_PER_NODE: bitcoin::Amount = bitcoin::Amount::from_sat(50_000_000); // 50M sats each
+const FUNDING_FEE: bitcoin::Amount = bitcoin::Amount::from_sat(1_000_000);       // 1M sats fee
 
 /// Initial setup for the test
 async fn setup(
@@ -127,6 +296,81 @@ const INITIAL_VOTECOIN_SUPPLY: u32 = 1000000;
 const VOTER_ALLOCATION_0: u32 = 60;
 /// Votecoin allocated to voter 1
 const VOTER_ALLOCATION_1: u32 = 40;
+
+/// Phase 1 test: Seven-node network setup with funding and synchronization
+async fn phase1_seven_node_task(
+    bin_paths: BinPaths,
+    res_tx: mpsc::UnboundedSender<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    tracing::info!("========================================");
+    tracing::info!("  PHASE 1: NETWORK & INFRASTRUCTURE");
+    tracing::info!("========================================");
+
+    // Setup enforcer
+    let mut enforcer_post_setup = setup_enforcer(
+        &bin_paths.others,
+        Network::Regtest,
+        Mode::Mempool,
+        res_tx.clone(),
+    )
+    .await?;
+    let () = propose_sidechain::<PostSetup>(&mut enforcer_post_setup).await?;
+    tracing::info!("Proposed sidechain successfully");
+    let () = activate_sidechain::<PostSetup>(&mut enforcer_post_setup).await?;
+    tracing::info!("Activated sidechain successfully");
+    let () = fund_enforcer::<PostSetup>(&mut enforcer_post_setup).await?;
+
+    // Phase 1.1: Setup 7 nodes
+    let mut seven_nodes = SevenNodeSetup::setup(
+        &bin_paths,
+        res_tx.clone(),
+        &enforcer_post_setup,
+    )
+    .await?;
+
+    // Phase 1.1: Setup mesh network (all nodes connected to each other)
+    seven_nodes.setup_mesh_network().await?;
+
+    // Give the network a moment to establish connections
+    sleep(std::time::Duration::from_secs(2)).await;
+
+    // Phase 1.1: Verify peer connectivity
+    seven_nodes.verify_peer_connectivity().await?;
+
+    // Phase 1.2: Fund all 7 nodes with Bitcoin
+    seven_nodes
+        .distribute_initial_funding(
+            &mut enforcer_post_setup,
+            FUNDING_PER_NODE,
+            FUNDING_FEE,
+        )
+        .await?;
+
+    // Mine a few confirmation blocks
+    tracing::info!("Mining confirmation blocks...");
+    seven_nodes.voter_0.bmm(&mut enforcer_post_setup, 3).await?;
+
+    tracing::info!("========================================");
+    tracing::info!("  PHASE 1: COMPLETE ✓");
+    tracing::info!("========================================");
+    tracing::info!("✓ 7 nodes initialized");
+    tracing::info!("✓ Mesh network established (21 connections)");
+    tracing::info!("✓ All nodes funded with Bitcoin");
+
+    // Cleanup
+    {
+        drop(seven_nodes);
+        tracing::info!(
+            "Removing {}",
+            enforcer_post_setup.out_dir.path().display()
+        );
+        drop(enforcer_post_setup.tasks);
+        // Wait for tasks to die
+        sleep(std::time::Duration::from_secs(1)).await;
+        enforcer_post_setup.out_dir.cleanup()?;
+    }
+    Ok(())
+}
 
 async fn vote_task(
     bin_paths: BinPaths,
@@ -309,6 +553,28 @@ async fn vote_task(
         enforcer_post_setup.out_dir.cleanup()?;
     }
     Ok(())
+}
+
+async fn phase1_seven_node(bin_paths: BinPaths) -> anyhow::Result<()> {
+    let (res_tx, mut res_rx) = mpsc::unbounded();
+    let _test_task: AbortOnDrop<()> = tokio::task::spawn({
+        let res_tx = res_tx.clone();
+        async move {
+            let res = phase1_seven_node_task(bin_paths, res_tx.clone()).await;
+            let _send_err: Result<(), _> = res_tx.unbounded_send(res);
+        }
+        .in_current_span()
+    })
+    .into();
+    res_rx.next().await.ok_or_else(|| {
+        anyhow::anyhow!("Unexpected end of test task result stream")
+    })?
+}
+
+pub fn phase1_seven_node_trial(
+    bin_paths: BinPaths,
+) -> AsyncTrial<BoxFuture<'static, anyhow::Result<()>>> {
+    AsyncTrial::new("phase1_seven_node", phase1_seven_node(bin_paths).boxed())
 }
 
 async fn vote(bin_paths: BinPaths) -> anyhow::Result<()> {

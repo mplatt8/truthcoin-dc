@@ -29,8 +29,8 @@ pub use transaction::{
     AssetOutput, AssetOutputContent, Authorized, AuthorizedTransaction,
     BitcoinOutput, BitcoinOutputContent, ClaimDecisionSlot, CreateMarket,
     FilledOutput, FilledOutputContent, FilledTransaction, InPoint, OutPoint,
-    Output, OutputContent, PointedOutput, SpentOutput, Transaction, TxData,
-    TxInputs, WithdrawalOutputContent,
+    Output, OutputContent, PointedOutput, SpentOutput, Transaction,
+    TransactionData, TxData, TxInputs, VoteBatchItem, WithdrawalOutputContent,
 };
 
 pub const THIS_SIDECHAIN: u8 = 13;

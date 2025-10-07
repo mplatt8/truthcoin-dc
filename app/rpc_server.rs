@@ -1308,26 +1308,16 @@ impl RpcServer for RpcServerImpl {
         &self,
         request: RegisterVoterRequest,
     ) -> RpcResult<String> {
-        use truthcoin_dc::types::TransactionData;
-
-        // Create RegisterVoter transaction
-        let tx_data = TransactionData::RegisterVoter {
-            initial_data: [0u8; 32], // Reserved for future metadata
-        };
-
-        // Build transaction with single output containing RegisterVoter data
-        let mut tx = Transaction::default();
         let fee = bitcoin::Amount::from_sat(request.fee_sats);
 
-        // Add inputs and create RegisterVoter output
-        self.app
+        let tx = self
+            .app
             .wallet
-            .fund_transaction(&mut tx, fee, Some(vec![tx_data]))
+            .register_voter(fee)
             .map_err(custom_err)?;
 
         let txid = tx.txid();
 
-        // Sign and send the transaction
         self.app.sign_and_send(tx).map_err(custom_err)?;
 
         Ok(format!("{}", txid))
@@ -1337,32 +1327,27 @@ impl RpcServer for RpcServerImpl {
         &self,
         request: SubmitVoteRequest,
     ) -> RpcResult<String> {
-        use truthcoin_dc::types::TransactionData;
         use truthcoin_dc::validation::SlotValidator;
 
         // Parse decision ID from hex string
-        let decision_id = SlotValidator::parse_slot_id_from_hex(&request.decision_id)
+        let slot_id = SlotValidator::parse_slot_id_from_hex(&request.decision_id)
             .map_err(|e| custom_err_msg(format!("Invalid decision ID: {}", e)))?;
 
-        // Create SubmitVote transaction
-        let tx_data = TransactionData::SubmitVote {
-            voting_period: request.period_id,
-            slot_id_bytes: decision_id.as_bytes(),
-            vote_value: request.vote_value,
-        };
-
-        // Build transaction
-        let mut tx = Transaction::default();
         let fee = bitcoin::Amount::from_sat(request.fee_sats);
 
-        self.app
+        let tx = self
+            .app
             .wallet
-            .fund_transaction(&mut tx, fee, Some(vec![tx_data]))
+            .submit_vote(
+                slot_id.as_bytes(),
+                request.vote_value,
+                request.period_id,
+                fee,
+            )
             .map_err(custom_err)?;
 
         let txid = tx.txid();
 
-        // Sign and send
         self.app.sign_and_send(tx).map_err(custom_err)?;
 
         Ok(format!("{}", txid))
@@ -1372,7 +1357,7 @@ impl RpcServer for RpcServerImpl {
         &self,
         request: SubmitVoteBatchRequest,
     ) -> RpcResult<String> {
-        use truthcoin_dc::types::{TransactionData, VoteBatchItem};
+        use truthcoin_dc::types::VoteBatchItem;
         use truthcoin_dc::validation::SlotValidator;
 
         if request.votes.is_empty() {
@@ -1382,33 +1367,25 @@ impl RpcServer for RpcServerImpl {
         // Parse and convert all vote items
         let mut batch_items = Vec::new();
         for vote in request.votes {
-            let decision_id = SlotValidator::parse_slot_id_from_hex(&vote.decision_id)
+            let slot_id = SlotValidator::parse_slot_id_from_hex(&vote.decision_id)
                 .map_err(|e| custom_err_msg(format!("Invalid decision ID: {}", e)))?;
 
             batch_items.push(VoteBatchItem {
-                slot_id_bytes: decision_id.as_bytes(),
+                slot_id_bytes: slot_id.as_bytes(),
                 vote_value: vote.vote_value,
             });
         }
 
-        // Create SubmitVoteBatch transaction
-        let tx_data = TransactionData::SubmitVoteBatch {
-            voting_period: request.period_id,
-            votes: batch_items,
-        };
-
-        // Build transaction
-        let mut tx = Transaction::default();
         let fee = bitcoin::Amount::from_sat(request.fee_sats);
 
-        self.app
+        let tx = self
+            .app
             .wallet
-            .fund_transaction(&mut tx, fee, Some(vec![tx_data]))
+            .submit_vote_batch(batch_items, request.period_id, fee)
             .map_err(custom_err)?;
 
         let txid = tx.txid();
 
-        // Sign and send
         self.app.sign_and_send(tx).map_err(custom_err)?;
 
         Ok(format!("{}", txid))
@@ -1561,7 +1538,7 @@ impl RpcServer for RpcServerImpl {
                 vote_value: vote_entry.to_f64(),
                 period_id: vote_key.period_id.as_u32(),
                 block_height: vote_entry.block_height,
-                txid: hex::encode(vote_entry.tx_hash),
+                txid: String::from(""), // TODO: Track txid in VoteMatrixEntry
                 is_batch_vote: false, // TODO: Track batch votes in future
             });
         }
@@ -1601,7 +1578,7 @@ impl RpcServer for RpcServerImpl {
                 vote_value: vote_entry.to_f64(),
                 period_id: vote_key.period_id.as_u32(),
                 block_height: vote_entry.block_height,
-                txid: hex::encode(vote_entry.tx_hash),
+                txid: String::from(""), // TODO: Track txid in VoteMatrixEntry
                 is_batch_vote: false,
             });
         }
@@ -1698,8 +1675,7 @@ impl RpcServer for RpcServerImpl {
             let reputation_opt = self
                 .app
                 .node
-                .state
-                .voting()
+                .voting_state()
                 .databases()
                 .get_voter_reputation(&rotxn, voter_id)
                 .map_err(custom_err)?;
@@ -1712,8 +1688,7 @@ impl RpcServer for RpcServerImpl {
             let votes = self
                 .app
                 .node
-                .state
-                .voting()
+                .voting_state()
                 .databases()
                 .get_votes_by_voter(&rotxn, voter_id)
                 .map_err(custom_err)?;
@@ -1784,27 +1759,30 @@ impl RpcServer for RpcServerImpl {
     async fn get_current_voting_stats(
         &self,
     ) -> RpcResult<Option<VotingPeriodDetails>> {
-        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        // Get current period ID first, then drop rotxn before await
+        let period_id = {
+            let rotxn = self.app.node.read_txn().map_err(custom_err)?;
 
-        // Get current timestamp
-        let current_timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| custom_err_msg(format!("System time error: {}", e)))?
-            .as_secs();
+            // Get current timestamp
+            let current_timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| custom_err_msg(format!("System time error: {}", e)))?
+                .as_secs();
 
-        // Get active period
-        let active_period_opt = self
-            .app
-            .node
-            .voting_state()
-            .get_active_period(&rotxn, current_timestamp)
-            .map_err(custom_err)?;
+            // Get active period
+            let active_period_opt = self
+                .app
+                .node
+                .voting_state()
+                .get_active_period(&rotxn, current_timestamp)
+                .map_err(custom_err)?;
 
-        let Some(period) = active_period_opt else {
-            return Ok(None);
-        };
+            let Some(period) = active_period_opt else {
+                return Ok(None);
+            };
 
-        let period_id = period.id.as_u32();
+            period.id.as_u32()
+        }; // rotxn dropped here
 
         // Delegate to get_voting_period_details for full stats
         self.get_voting_period_details(period_id).await

@@ -1195,6 +1195,98 @@ impl Wallet {
             signature,
         })
     }
+
+    /// Register as a voter
+    pub fn register_voter(&self, fee: bitcoin::Amount) -> Result<Transaction, Error> {
+        let tx_data = crate::types::TransactionData::RegisterVoter {
+            initial_data: [0u8; 32],
+        };
+
+        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(fee)?;
+        let change = total_bitcoin - fee;
+
+        let inputs = bitcoin_utxos.into_keys().collect();
+        let mut outputs = Vec::new();
+
+        // Add change output if needed
+        if change > bitcoin::Amount::ZERO {
+            outputs.push(Output::new(
+                self.get_new_address()?,
+                OutputContent::Bitcoin(BitcoinOutputContent(change)),
+            ));
+        }
+
+        let mut tx = Transaction::new(inputs, outputs);
+        tx.data = Some(tx_data);
+
+        Ok(tx)
+    }
+
+    /// Submit a single vote
+    pub fn submit_vote(
+        &self,
+        slot_id_bytes: [u8; 3],
+        vote_value: f64,
+        voting_period: u32,
+        fee: bitcoin::Amount,
+    ) -> Result<Transaction, Error> {
+        let tx_data = crate::types::TransactionData::SubmitVote {
+            slot_id_bytes,
+            vote_value,
+            voting_period,
+        };
+
+        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(fee)?;
+        let change = total_bitcoin - fee;
+
+        let inputs = bitcoin_utxos.into_keys().collect();
+        let mut outputs = Vec::new();
+
+        // Add change output if needed
+        if change > bitcoin::Amount::ZERO {
+            outputs.push(Output::new(
+                self.get_new_address()?,
+                OutputContent::Bitcoin(BitcoinOutputContent(change)),
+            ));
+        }
+
+        let mut tx = Transaction::new(inputs, outputs);
+        tx.data = Some(tx_data);
+
+        Ok(tx)
+    }
+
+    /// Submit multiple votes in a batch
+    pub fn submit_vote_batch(
+        &self,
+        votes: Vec<crate::types::VoteBatchItem>,
+        voting_period: u32,
+        fee: bitcoin::Amount,
+    ) -> Result<Transaction, Error> {
+        let tx_data = crate::types::TransactionData::SubmitVoteBatch {
+            votes,
+            voting_period,
+        };
+
+        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(fee)?;
+        let change = total_bitcoin - fee;
+
+        let inputs = bitcoin_utxos.into_keys().collect();
+        let mut outputs = Vec::new();
+
+        // Add change output if needed
+        if change > bitcoin::Amount::ZERO {
+            outputs.push(Output::new(
+                self.get_new_address()?,
+                OutputContent::Bitcoin(BitcoinOutputContent(change)),
+            ));
+        }
+
+        let mut tx = Transaction::new(inputs, outputs);
+        tx.data = Some(tx_data);
+
+        Ok(tx)
+    }
 }
 
 impl Watchable<()> for Wallet {

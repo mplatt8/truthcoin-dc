@@ -206,10 +206,8 @@ pub enum TransactionData {
     },
     /// Register as a voter (one-time setup)
     RegisterVoter {
-        /// Commitment hash for voter identity
-        voter_commitment: [u8; 32],
-        /// Initial reputation bond in satoshis
-        reputation_bond: u64,
+        /// Reserved for future voter metadata
+        initial_data: [u8; 32],
     },
     /// Update voter reputation after consensus (system transaction)
     UpdateReputation {
@@ -371,10 +369,8 @@ pub struct SubmitVote {
 /// Struct describing voter registration
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RegisterVoter {
-    /// Commitment hash for voter identity
-    pub voter_commitment: [u8; 32],
-    /// Initial reputation bond in satoshis
-    pub reputation_bond: u64,
+    /// Reserved for future voter metadata
+    pub initial_data: [u8; 32],
 }
 
 /// Struct describing a reputation update (system transaction)
@@ -646,11 +642,9 @@ impl FilledTransaction {
     pub fn register_voter(&self) -> Option<RegisterVoter> {
         match &self.transaction.data {
             Some(TransactionData::RegisterVoter {
-                voter_commitment,
-                reputation_bond,
+                initial_data,
             }) => Some(RegisterVoter {
-                voter_commitment: *voter_commitment,
-                reputation_bond: *reputation_bond,
+                initial_data: *initial_data,
             }),
             _ => None,
         }

@@ -661,6 +661,39 @@ impl MatrixUtils {
     }
 }
 
+/// Calculate consensus outcomes for decisions using Bitcoin Hivemind algorithm
+///
+/// This is the main entry point for Phase 3 consensus calculation.
+/// Uses the existing factory() implementation with reputation weighting.
+///
+/// # Arguments
+/// * `vote_matrix` - Sparse vote matrix containing all votes for the period
+/// * `reputation_vector` - Voter reputations (reputation × Votecoin)
+///
+/// # Returns
+/// HashMap mapping SlotId to consensus outcome value
+///
+/// # Bitcoin Hivemind Specification
+/// Implements Section 4.2: Uses old reputation to calculate consensus outcomes.
+/// These outcomes are then used to update reputation in the next period.
+pub fn calculate_consensus(
+    vote_matrix: &SparseVoteMatrix,
+    reputation_vector: &ReputationVector,
+) -> Result<HashMap<SlotId, f64>, VotingMathError> {
+    const MAX_ITERATIONS: usize = 50;
+    const TOLERANCE: f64 = 1e-6;
+
+    let consensus_result =
+        ConsensusEngine::factory(vote_matrix, reputation_vector, MAX_ITERATIONS, TOLERANCE)?;
+
+    let mut outcomes = HashMap::new();
+    for (slot_id, decision_outcome) in consensus_result.outcomes {
+        outcomes.insert(slot_id, decision_outcome.outcome_value);
+    }
+
+    Ok(outcomes)
+}
+
 /// Main Bitcoin Hivemind consensus algorithm implementation
 ///
 /// This is the core factory() function that implements the PCA-based
@@ -703,6 +736,13 @@ impl ConsensusEngine {
         let voters = vote_matrix.get_voters();
         let mut reputation = initial_reputations.to_array(&voters);
 
+        // Build voter lookup map for O(1) access
+        let voter_lookup: HashMap<VoterId, usize> = voters
+            .iter()
+            .enumerate()
+            .map(|(idx, &voter_id)| (voter_id, idx))
+            .collect();
+
         // Initialize outcomes to weighted averages
         let mut outcomes = Array1::zeros(num_decisions);
         let decisions = vote_matrix.get_decisions();
@@ -735,9 +775,7 @@ impl ConsensusEngine {
                 let mut total_weight = 0.0;
 
                 for (&voter_id, &vote) in &decision_votes {
-                    if let Some(voter_idx) =
-                        voters.iter().position(|&v| v == voter_id)
-                    {
+                    if let Some(&voter_idx) = voter_lookup.get(&voter_id) {
                         let weight = reputation[voter_idx];
                         if !vote.is_nan() && weight > 0.0 {
                             weighted_sum += vote * weight;

@@ -1875,27 +1875,6 @@ fn revert_register_voter(
     Ok(())
 }
 
-/// Apply reputation update transaction
-///
-/// This function updates voter reputation based on consensus outcomes.
-/// This is typically a system-generated transaction after consensus resolution.
-///
-/// # Bitcoin Hivemind Specification
-/// Reputation updates follow the incentive mechanism to reward accurate
-/// reporting and penalize dishonest voting. This implementation correctly
-/// compares each voter's votes to the consensus outcomes calculated from
-/// the PREVIOUS reputation, following the get_reward_weights() algorithm
-/// from the Bitcoin Hivemind reference implementation.
-///
-/// # CRITICAL FIX - Issue #2
-/// The original implementation incorrectly compared new vs old reputation values
-/// (circular reasoning). The CORRECT approach is to:
-/// 1. Retrieve consensus outcomes for the period (calculated from old reputation)
-/// 2. Retrieve voter's votes for the period
-/// 3. Compare voter's votes to consensus outcomes
-/// 4. Calculate was_correct based on agreement with consensus
-/// 5. Update reputation accordingly
-///
 /// # Arguments
 /// * `state` - Blockchain state
 /// * `rwtxn` - Database write transaction
@@ -1941,71 +1920,58 @@ fn apply_update_reputation(
 
     let period_id = VotingPeriodId::new(update_data.voting_period);
 
-    // CORRECT IMPLEMENTATION: Compare voter's votes to consensus outcomes
-    // Get all consensus outcomes for this period (calculated from old reputation)
     let consensus_outcomes = state
         .voting()
         .databases()
         .get_consensus_outcomes_for_period(rwtxn, period_id)?;
 
-    // TODO: Phase 3 - Once consensus algorithm is integrated, this will work correctly
-    // For now, we use a temporary placeholder that depends on transaction data
-    // This is documented as TEMPORARY and must be replaced
-    let was_correct = if consensus_outcomes.is_empty() {
-        // TEMPORARY: Phase 3 not yet integrated
-        // Use the new_reputation field as a temporary signal
-        // This will be replaced when consensus algorithm is fully implemented
-        //
-        // TODO(Phase 3): Remove this temporary logic and use actual consensus comparison:
-        // 1. Get voter's votes for this period
-        // 2. Compare each vote to consensus outcome
-        // 3. Calculate was_correct as: (correct_votes / total_votes) > 0.5
-        update_data.new_reputation >= old_reputation.reputation
-    } else {
-        // CORRECT IMPLEMENTATION: Compare votes to consensus
-        let voter_votes = state
-            .voting()
-            .databases()
-            .get_votes_by_voter(rwtxn, voter_id)?;
+    if consensus_outcomes.is_empty() {
+        return Err(Error::InvalidTransaction {
+            reason: format!(
+                "No consensus outcomes found for period {:?}",
+                period_id
+            ),
+        });
+    }
 
-        let mut correct_count = 0;
-        let mut total_count = 0;
+    let voter_votes = state
+        .voting()
+        .databases()
+        .get_votes_by_voter(rwtxn, voter_id)?;
 
-        for (vote_key, vote_entry) in voter_votes {
-            // Only consider votes from this period
-            if vote_key.period_id != period_id {
+    let mut correct_count = 0;
+    let mut total_count = 0;
+
+    for (vote_key, vote_entry) in voter_votes {
+        if vote_key.period_id != period_id {
+            continue;
+        }
+
+        if let Some(consensus_outcome) =
+            consensus_outcomes.get(&vote_key.decision_id)
+        {
+            total_count += 1;
+
+            let voter_value = vote_entry.to_f64();
+
+            if voter_value.is_nan() {
                 continue;
             }
 
-            // Check if we have consensus outcome for this decision
-            if let Some(consensus_outcome) =
-                consensus_outcomes.get(&vote_key.decision_id)
-            {
-                total_count += 1;
+            let matches = (voter_value - consensus_outcome).abs() < 0.01;
 
-                // Compare voter's vote to consensus outcome
-                let voter_value = vote_entry.to_f64();
-
-                // Skip abstentions
-                if voter_value.is_nan() {
-                    continue;
-                }
-
-                // Check if voter's vote matches consensus (within tolerance)
-                let matches = (voter_value - consensus_outcome).abs() < 0.01;
-
-                if matches {
-                    correct_count += 1;
-                }
+            if matches {
+                correct_count += 1;
             }
         }
+    }
 
-        // Voter is correct if majority of their votes matched consensus
-        if total_count > 0 {
-            (correct_count as f64 / total_count as f64) > 0.5
-        } else {
-            false
-        }
+    let was_correct = if total_count > 0 {
+        (correct_count as f64 / total_count as f64) > 0.5
+    } else {
+        return Err(Error::InvalidTransaction {
+            reason: "Voter has no votes in this period".to_string(),
+        });
     };
 
     // Update reputation with correct logic
@@ -2024,20 +1990,6 @@ fn apply_update_reputation(
     Ok(())
 }
 
-/// Revert reputation update transaction
-///
-/// This function reverts a reputation update to support blockchain
-/// reorganization. Uses the reputation_history field to safely rollback
-/// to the previous state.
-///
-/// # CRITICAL FIX - Issue #3
-/// The original implementation was a NO-OP. The CORRECT approach is to:
-/// 1. Retrieve the voter's current reputation
-/// 2. Pop the last entry from reputation_history
-/// 3. Restore reputation to the previous value
-/// 4. Update counters accordingly
-/// 5. Store the reverted reputation
-///
 /// # Arguments
 /// * `state` - Blockchain state
 /// * `rwtxn` - Database write transaction

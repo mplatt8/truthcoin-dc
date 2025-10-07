@@ -215,12 +215,15 @@ impl VotingSystem {
     /// # Bitcoin Hivemind Compliance
     /// Periods automatically transition to Closed status when current time
     /// reaches their end_timestamp, preventing further vote acceptance.
+    /// Calculates and stores consensus outcomes using old reputations per Section 4.2.
     pub fn close_voting_period(
         &self,
         rwtxn: &mut RwTxn,
         period_id: VotingPeriodId,
         current_timestamp: u64,
     ) -> Result<(), Error> {
+        use crate::math::voting::{calculate_consensus, ReputationVector, SparseVoteMatrix};
+
         let period = self
             .databases
             .get_voting_period(rwtxn, period_id)?
@@ -228,7 +231,6 @@ impl VotingSystem {
                 reason: format!("Voting period {:?} not found", period_id),
             })?;
 
-        // Validate timing
         if current_timestamp < period.end_timestamp {
             return Err(Error::InvalidTransaction {
                 reason: "Cannot close period before end time".to_string(),
@@ -239,6 +241,62 @@ impl VotingSystem {
             return Err(Error::InvalidTransaction {
                 reason: format!("Period {:?} is not active", period_id),
             });
+        }
+
+        let all_votes = self.databases.get_votes_for_period(rwtxn, period_id)?;
+
+        if !all_votes.is_empty() {
+            let mut voters_set = std::collections::HashSet::new();
+            let mut decisions_set = std::collections::HashSet::new();
+            let mut voter_reputations = std::collections::HashMap::new();
+
+            for vote_key in all_votes.keys() {
+                if voters_set.insert(vote_key.voter_id) {
+                    if let Some(rep) = self.databases.get_voter_reputation(rwtxn, vote_key.voter_id)? {
+                        voter_reputations.insert(vote_key.voter_id, rep);
+                    }
+                }
+                decisions_set.insert(vote_key.decision_id);
+            }
+
+            if voter_reputations.is_empty() {
+                self.databases.update_period_status(
+                    rwtxn,
+                    period_id,
+                    VotingPeriodStatus::Closed,
+                )?;
+                return Ok(());
+            }
+
+            let voters: Vec<_> = voters_set.into_iter().collect();
+            let decisions: Vec<_> = decisions_set.into_iter().collect();
+
+            let mut vote_matrix = SparseVoteMatrix::new(voters, decisions);
+
+            for (vote_key, vote_entry) in &all_votes {
+                if let Err(e) = vote_matrix.set_vote(
+                    vote_key.voter_id,
+                    vote_key.decision_id,
+                    vote_entry.to_f64(),
+                ) {
+                    return Err(Error::InvalidTransaction {
+                        reason: format!("Failed to set vote in matrix: {:?}", e),
+                    });
+                }
+            }
+
+            let reputation_vector = ReputationVector::from_voter_reputations(&voter_reputations);
+
+            if let Ok(consensus_outcomes) = calculate_consensus(&vote_matrix, &reputation_vector) {
+                for (decision_id, outcome_value) in consensus_outcomes {
+                    self.databases.store_consensus_outcome(
+                        rwtxn,
+                        period_id,
+                        decision_id,
+                        outcome_value,
+                    )?;
+                }
+            }
         }
 
         self.databases.update_period_status(

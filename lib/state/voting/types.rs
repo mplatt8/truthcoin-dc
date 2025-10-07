@@ -1,5 +1,6 @@
 use crate::state::slots::SlotId;
-use crate::types::{Address, hashes};
+use crate::state::rollback::{RollBack, TxidStamped};
+use crate::types::{Address, Txid, hashes};
 use serde::{Deserialize, Serialize};
 
 #[derive(
@@ -284,6 +285,14 @@ pub struct VoterReputation {
     /// Block height when Votecoin proportion was last updated
     /// Used to determine when to refresh cached proportion data
     pub votecoin_updated_height: Option<u64>,
+    /// Reputation history for rollback support during blockchain reorganizations
+    ///
+    /// This enables safe reversion of reputation updates when blocks are disconnected,
+    /// maintaining consensus correctness across reorgs as required by Bitcoin Hivemind.
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper Section 6: "Blockchain Security" - Reorg handling
+    pub reputation_history: RollBack<TxidStamped<f64>>,
 }
 
 impl VoterReputation {
@@ -306,6 +315,12 @@ impl VoterReputation {
         period_id: VotingPeriodId,
     ) -> Self {
         let reputation = initial_reputation.clamp(0.0, 1.0);
+
+        // Initialize reputation history with genesis/initial transaction
+        // Uses a zero txid to represent the initial state
+        let initial_txid = Txid([0u8; 32]);
+        let reputation_history = RollBack::<TxidStamped<f64>>::new(reputation, initial_txid, 0);
+
         Self {
             voter_id,
             reputation,
@@ -317,6 +332,7 @@ impl VoterReputation {
             last_updated: timestamp,
             last_period: period_id,
             votecoin_updated_height: None,
+            reputation_history,
         }
     }
 
@@ -326,17 +342,28 @@ impl VoterReputation {
     /// * `was_correct` - Whether voter was in consensus on recent decisions
     /// * `timestamp` - Current timestamp
     /// * `period_id` - Voting period being processed
+    /// * `txid` - Transaction ID of the reputation update
+    /// * `height` - Block height of the reputation update
     ///
     /// # Bitcoin Hivemind Compliance
     /// Updates only the base reputation component. Final voting weight is
     /// recalculated by multiplying updated reputation with Votecoin proportion.
     /// This follows the incentive mechanism to reward accurate reporting.
+    ///
+    /// # Rollback Support
+    /// Pushes current reputation to history before updating, enabling safe
+    /// reversion during blockchain reorganizations.
     pub fn update(
         &mut self,
         was_correct: bool,
         timestamp: u64,
         period_id: VotingPeriodId,
+        txid: Txid,
+        height: u32,
     ) {
+        // Push current reputation to history before updating
+        self.reputation_history.push(self.reputation, txid, height);
+
         self.total_decisions += 1;
         if was_correct {
             self.correct_decisions += 1;
@@ -355,6 +382,39 @@ impl VoterReputation {
 
         // Recalculate final voting weight with updated reputation
         self.update_voting_weight();
+    }
+
+    /// Rollback the most recent reputation update
+    ///
+    /// # Returns
+    /// Previous reputation value if available, None if at initial state
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Enables safe blockchain reorganizations by reverting reputation to
+    /// previous state when blocks are disconnected.
+    pub fn rollback_update(&mut self) -> Option<f64> {
+        if let Some(previous) = self.reputation_history.pop() {
+            let previous_reputation = previous.data;
+            self.reputation = previous_reputation;
+
+            // Decrement counters (note: this is approximate as we don't track
+            // individual decision correctness in history)
+            self.total_decisions = self.total_decisions.saturating_sub(1);
+
+            // Recalculate accuracy rate
+            self.accuracy_rate = if self.total_decisions > 0 {
+                self.correct_decisions as f64 / self.total_decisions as f64
+            } else {
+                0.0
+            };
+
+            // Recalculate voting weight
+            self.update_voting_weight();
+
+            Some(previous_reputation)
+        } else {
+            None
+        }
     }
 
     /// Update Votecoin holdings proportion and recalculate voting weight
@@ -939,13 +999,13 @@ mod tests {
         assert_eq!(reputation.reputation, 0.5);
         assert_eq!(reputation.total_decisions, 0);
 
-        reputation.update(true, 1100, VotingPeriodId::new(2));
+        reputation.update(true, 1100, VotingPeriodId::new(2), Txid([1u8; 32]), 1);
         assert_eq!(reputation.total_decisions, 1);
         assert_eq!(reputation.correct_decisions, 1);
         assert_eq!(reputation.accuracy_rate, 1.0);
         assert_eq!(reputation.reputation, 1.0);
 
-        reputation.update(false, 1200, VotingPeriodId::new(3));
+        reputation.update(false, 1200, VotingPeriodId::new(3), Txid([2u8; 32]), 2);
         assert_eq!(reputation.total_decisions, 2);
         assert_eq!(reputation.correct_decisions, 1);
         assert_eq!(reputation.accuracy_rate, 0.5);

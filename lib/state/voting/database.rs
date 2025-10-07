@@ -69,11 +69,19 @@ pub struct VotingDatabases {
         SerdeBincode<VotingPeriodId>,
         SerdeBincode<VotingPeriodStats>,
     >,
+
+    /// Consensus outcomes for reputation calculation
+    /// Key: (VotingPeriodId, SlotId), Value: f64 (consensus outcome)
+    /// This is used to compare voter votes against consensus for reputation updates
+    consensus_outcomes: DatabaseUnique<
+        SerdeBincode<(VotingPeriodId, crate::state::slots::SlotId)>,
+        SerdeBincode<f64>,
+    >,
 }
 
 impl VotingDatabases {
     /// Number of database tables managed by this struct
-    pub const NUM_DBS: u32 = 6;
+    pub const NUM_DBS: u32 = 7;
 
     /// Create new voting databases
     ///
@@ -106,6 +114,11 @@ impl VotingDatabases {
                 "decision_outcomes",
             )?,
             period_stats: DatabaseUnique::create(env, rwtxn, "period_stats")?,
+            consensus_outcomes: DatabaseUnique::create(
+                env,
+                rwtxn,
+                "consensus_outcomes",
+            )?,
         })
     }
 
@@ -808,7 +821,80 @@ impl VotingDatabases {
         self.voter_reputation.clear(rwtxn)?;
         self.decision_outcomes.clear(rwtxn)?;
         self.period_stats.clear(rwtxn)?;
+        self.consensus_outcomes.clear(rwtxn)?;
         Ok(())
+    }
+
+    // ================================================================================
+    // Consensus Outcome Operations (for Reputation Updates)
+    // ================================================================================
+
+    /// Store consensus outcome for a decision
+    ///
+    /// # Arguments
+    /// * `rwtxn` - Read-write transaction
+    /// * `period_id` - Voting period
+    /// * `decision_id` - Decision that was resolved
+    /// * `outcome` - Consensus outcome value
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// This stores the consensus outcome calculated by the consensus algorithm
+    /// (Phase 3) for use in reputation updates. Voters are rewarded/penalized
+    /// based on agreement with these consensus values.
+    pub fn store_consensus_outcome(
+        &self,
+        rwtxn: &mut RwTxn,
+        period_id: VotingPeriodId,
+        decision_id: crate::state::slots::SlotId,
+        outcome: f64,
+    ) -> Result<(), Error> {
+        let key = (period_id, decision_id);
+        self.consensus_outcomes.put(rwtxn, &key, &outcome)?;
+        Ok(())
+    }
+
+    /// Retrieve consensus outcome for a decision
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only transaction
+    /// * `period_id` - Voting period
+    /// * `decision_id` - Decision to query
+    ///
+    /// # Returns
+    /// Some(outcome) if consensus has been calculated, None otherwise
+    pub fn get_consensus_outcome(
+        &self,
+        rotxn: &RoTxn,
+        period_id: VotingPeriodId,
+        decision_id: crate::state::slots::SlotId,
+    ) -> Result<Option<f64>, Error> {
+        let key = (period_id, decision_id);
+        Ok(self.consensus_outcomes.try_get(rotxn, &key)?)
+    }
+
+    /// Get all consensus outcomes for a period
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only transaction
+    /// * `period_id` - Voting period to query
+    ///
+    /// # Returns
+    /// HashMap mapping SlotId to consensus outcome
+    pub fn get_consensus_outcomes_for_period(
+        &self,
+        rotxn: &RoTxn,
+        period_id: VotingPeriodId,
+    ) -> Result<HashMap<crate::state::slots::SlotId, f64>, Error> {
+        let mut outcomes = HashMap::new();
+        let mut iter = self.consensus_outcomes.iter(rotxn)?;
+
+        while let Some(((p_id, decision_id), outcome)) = iter.next()? {
+            if p_id == period_id {
+                outcomes.insert(decision_id, outcome);
+            }
+        }
+
+        Ok(outcomes)
     }
 }
 

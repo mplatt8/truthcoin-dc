@@ -557,6 +557,8 @@ impl VotingSystem {
     /// * `was_correct` - Whether voter was in consensus on recent decisions
     /// * `timestamp` - Current timestamp
     /// * `period_id` - Period being processed
+    /// * `txid` - Transaction ID for rollback support
+    /// * `height` - Block height for rollback support
     ///
     /// # Bitcoin Hivemind Compliance
     /// Reputation updates follow the incentive mechanism to reward accurate
@@ -568,6 +570,8 @@ impl VotingSystem {
         was_correct: bool,
         timestamp: u64,
         period_id: VotingPeriodId,
+        txid: crate::types::Txid,
+        height: u32,
     ) -> Result<(), Error> {
         let mut reputation = self
             .databases
@@ -576,7 +580,7 @@ impl VotingSystem {
                 VoterReputation::new(voter_id, 0.5, timestamp, period_id)
             });
 
-        reputation.update(was_correct, timestamp, period_id);
+        reputation.update(was_correct, timestamp, period_id, txid, height);
         self.databases.put_voter_reputation(rwtxn, &reputation)?;
 
         Ok(())

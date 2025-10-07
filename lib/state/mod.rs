@@ -997,6 +997,8 @@ impl State {
         tx: &FilledTransaction,
         override_height: Option<u32>,
     ) -> Result<bitcoin::Amount, Error> {
+        use crate::validation::VoteValidator;
+
         let () = self.validate_votecoin(rotxn, tx)?;
 
         // Validate decision slot claims
@@ -1017,6 +1019,42 @@ impl State {
             .map_or(false, |data| data.is_buy_shares())
         {
             self.validate_buy_shares(rotxn, tx, override_height)?;
+        }
+
+        // Validate vote submissions
+        if tx.is_submit_vote() {
+            VoteValidator::validate_vote_submission(self, rotxn, tx, override_height)?;
+        }
+
+        // Validate batch vote submissions
+        if tx.is_submit_vote_batch() {
+            VoteValidator::validate_vote_batch(self, rotxn, tx, override_height)?;
+        }
+
+        // Validate voter registration
+        if tx.is_register_voter() {
+            // Registration validation is minimal - just check for Votecoin balance
+            // The actual registration happens during block application
+            let voter_address = tx
+                .spent_utxos
+                .first()
+                .ok_or_else(|| Error::InvalidTransaction {
+                    reason: "Voter registration transaction must have inputs".to_string(),
+                })?
+                .address;
+
+            let votecoin_balance = self.get_votecoin_balance(rotxn, &voter_address)?;
+            if votecoin_balance == 0 {
+                return Err(Error::InvalidTransaction {
+                    reason: "Voter registration requires Votecoin balance".to_string(),
+                });
+            }
+        }
+
+        // Validate reputation updates (system transactions only - minimal validation)
+        if tx.is_update_reputation() {
+            // Reputation updates are typically system-generated after consensus
+            // Validation is minimal here, actual logic in block application
         }
 
         tx.bitcoin_fee()?.ok_or(Error::NotEnoughValueIn)

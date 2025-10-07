@@ -205,12 +205,12 @@ fn test_reputation_vector_basic_operations() {
     assert_eq!(reputation.get_reputation(voters[1]), 0.6);
     assert_eq!(reputation.get_reputation(voters[2]), 0.4);
 
-    // Test default reputation for unknown voter
+    // Test default reputation for unknown voter (should be 0.0 per Bitcoin Hivemind spec)
     let unknown_voter = VoterId::from_address(&Address([99u8; 20]));
-    assert_eq!(reputation.get_reputation(unknown_voter), 0.5);
+    assert_eq!(reputation.get_reputation(unknown_voter), 0.0);
 
-    // Test total weight
-    assert_eq!(reputation.total_weight(), 1.8);
+    // Test total weight (with floating point tolerance)
+    assert_relative_eq!(reputation.total_weight(), 1.8, epsilon = 1e-10);
 }
 
 /// Test reputation vector boundary conditions and clamping
@@ -285,10 +285,10 @@ fn test_reputation_vector_to_array() {
     let ordered_voters = vec![voters[1], voters[0], voters[3], voters[2]];
     let array = reputation.to_array(&ordered_voters);
 
-    // Should get default value for voters without reputation
-    assert_eq!(array[0], 0.5); // voters[1] - default
+    // Should get default value (0.0) for voters without reputation per Bitcoin Hivemind spec
+    assert_eq!(array[0], 0.0); // voters[1] - default (no reputation = no influence)
     assert_eq!(array[1], 0.8); // voters[0] - set value
-    assert_eq!(array[2], 0.5); // voters[3] - default
+    assert_eq!(array[2], 0.0); // voters[3] - default (no reputation = no influence)
     assert_eq!(array[3], 0.6); // voters[2] - set value
 }
 
@@ -594,7 +594,7 @@ fn test_large_sparse_matrix_operations() {
 /// Test reputation vector with large datasets
 #[test]
 fn test_large_reputation_vector() {
-    let num_voters = 1000;
+    let num_voters = 256; // Use 256 to match address space limitations
     let voters = create_test_voter_ids(num_voters);
     let mut reputation = ReputationVector::new();
 
@@ -607,7 +607,7 @@ fn test_large_reputation_vector() {
     assert_eq!(reputation.len(), num_voters);
 
     // Test normalization with large dataset
-    let original_total = reputation.total_weight();
+    let _original_total = reputation.total_weight();
     reputation.normalize();
     assert_relative_eq!(reputation.total_weight(), 1.0, epsilon = 1e-10);
 

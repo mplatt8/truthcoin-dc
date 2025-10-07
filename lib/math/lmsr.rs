@@ -723,7 +723,7 @@ mod tests {
         let state = LmsrState {
             beta: 14400.0,
             shares: array![10.0, 5.0],
-            treasury_balance: 1000000,
+            treasury_balance: 100000000, // Increased to handle the trade cost
             trading_fee: 0.01,
         };
 

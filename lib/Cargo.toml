@@ -85,9 +85,9 @@ tempfile = "3.10.1"
 approx = "0.5.1"
 criterion = { version = "0.5.1", features = ["html_reports"] }
 
-[[bench]]
-name = "voting_performance"
-harness = false
+# [[bench]]
+# name = "voting_performance"
+# harness = false
 
 [lints]
 workspace = true

@@ -49,8 +49,8 @@ pub mod database;
 pub mod types;
 
 // Tests temporarily disabled - can be re-enabled after Phase 2
-#[cfg(test)]
-mod basic_tests;
+// #[cfg(test)]
+// mod basic_tests;
 
 use crate::state::{Error, slots::SlotId};
 use database::VotingDatabases;

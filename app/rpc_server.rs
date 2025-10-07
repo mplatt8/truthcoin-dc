@@ -1306,126 +1306,508 @@ impl RpcServer for RpcServerImpl {
 
     async fn register_voter(
         &self,
-        _request: RegisterVoterRequest,
+        request: RegisterVoterRequest,
     ) -> RpcResult<String> {
-        Err(ErrorObject::owned(
-            -32601,
-            "Not implemented",
-            Some("Voting system not yet implemented"),
-        ))
+        use truthcoin_dc::types::TransactionData;
+
+        // Create RegisterVoter transaction
+        let tx_data = TransactionData::RegisterVoter {
+            initial_data: [0u8; 32], // Reserved for future metadata
+        };
+
+        // Build transaction with single output containing RegisterVoter data
+        let mut tx = Transaction::default();
+        let fee = bitcoin::Amount::from_sat(request.fee_sats);
+
+        // Add inputs and create RegisterVoter output
+        self.app
+            .wallet
+            .fund_transaction(&mut tx, fee, Some(vec![tx_data]))
+            .map_err(custom_err)?;
+
+        let txid = tx.txid();
+
+        // Sign and send the transaction
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+
+        Ok(format!("{}", txid))
     }
 
     async fn submit_vote(
         &self,
-        _request: SubmitVoteRequest,
+        request: SubmitVoteRequest,
     ) -> RpcResult<String> {
-        Err(ErrorObject::owned(
-            -32601,
-            "Not implemented",
-            Some("Voting system not yet implemented"),
-        ))
+        use truthcoin_dc::types::TransactionData;
+        use truthcoin_dc::validation::SlotValidator;
+
+        // Parse decision ID from hex string
+        let decision_id = SlotValidator::parse_slot_id_from_hex(&request.decision_id)
+            .map_err(|e| custom_err_msg(format!("Invalid decision ID: {}", e)))?;
+
+        // Create SubmitVote transaction
+        let tx_data = TransactionData::SubmitVote {
+            voting_period: request.period_id,
+            slot_id_bytes: decision_id.as_bytes(),
+            vote_value: request.vote_value,
+        };
+
+        // Build transaction
+        let mut tx = Transaction::default();
+        let fee = bitcoin::Amount::from_sat(request.fee_sats);
+
+        self.app
+            .wallet
+            .fund_transaction(&mut tx, fee, Some(vec![tx_data]))
+            .map_err(custom_err)?;
+
+        let txid = tx.txid();
+
+        // Sign and send
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+
+        Ok(format!("{}", txid))
     }
 
     async fn submit_vote_batch(
         &self,
-        _request: SubmitVoteBatchRequest,
+        request: SubmitVoteBatchRequest,
     ) -> RpcResult<String> {
-        Err(ErrorObject::owned(
-            -32601,
-            "Not implemented",
-            Some("Voting system not yet implemented"),
-        ))
+        use truthcoin_dc::types::{TransactionData, VoteBatchItem};
+        use truthcoin_dc::validation::SlotValidator;
+
+        if request.votes.is_empty() {
+            return Err(custom_err_msg("Batch cannot be empty"));
+        }
+
+        // Parse and convert all vote items
+        let mut batch_items = Vec::new();
+        for vote in request.votes {
+            let decision_id = SlotValidator::parse_slot_id_from_hex(&vote.decision_id)
+                .map_err(|e| custom_err_msg(format!("Invalid decision ID: {}", e)))?;
+
+            batch_items.push(VoteBatchItem {
+                slot_id_bytes: decision_id.as_bytes(),
+                vote_value: vote.vote_value,
+            });
+        }
+
+        // Create SubmitVoteBatch transaction
+        let tx_data = TransactionData::SubmitVoteBatch {
+            voting_period: request.period_id,
+            votes: batch_items,
+        };
+
+        // Build transaction
+        let mut tx = Transaction::default();
+        let fee = bitcoin::Amount::from_sat(request.fee_sats);
+
+        self.app
+            .wallet
+            .fund_transaction(&mut tx, fee, Some(vec![tx_data]))
+            .map_err(custom_err)?;
+
+        let txid = tx.txid();
+
+        // Sign and send
+        self.app.sign_and_send(tx).map_err(custom_err)?;
+
+        Ok(format!("{}", txid))
     }
 
     async fn get_voter_info(
         &self,
-        _address: Address,
+        address: Address,
     ) -> RpcResult<Option<VoterInfo>> {
-        Err(ErrorObject::owned(
-            -32601,
-            "Not implemented",
-            Some("Voting system not yet implemented"),
-        ))
+        use truthcoin_dc::state::voting::types::VoterId;
+
+        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let voter_id = VoterId::from_address(&address);
+
+        // Get reputation
+        let reputation_opt = self
+            .app
+            .node
+            .voting_state()
+            .databases()
+            .get_voter_reputation(&rotxn, voter_id)
+            .map_err(custom_err)?;
+
+        let Some(reputation) = reputation_opt else {
+            return Ok(None);
+        };
+
+        // Get vote count
+        let votes = self
+            .app
+            .node
+            .voting_state()
+            .databases()
+            .get_votes_by_voter(&rotxn, voter_id)
+            .map_err(custom_err)?;
+
+        Ok(Some(VoterInfo {
+            address: address.to_string(),
+            reputation: reputation.reputation,
+            total_votes: votes.len() as u64,
+            periods_active: reputation.total_decisions as u32,
+            accuracy_score: reputation.accuracy_rate,
+            registered_at_height: 0, // TODO: Track registration height in future enhancement
+            is_active: reputation.total_decisions > 0,
+        }))
     }
 
     async fn get_voting_period_details(
         &self,
-        _period_id: u32,
+        period_id: u32,
     ) -> RpcResult<Option<VotingPeriodDetails>> {
-        Err(ErrorObject::owned(
-            -32601,
-            "Not implemented",
-            Some("Voting system not yet implemented"),
-        ))
+        use truthcoin_dc::state::voting::types::VotingPeriodId;
+
+        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+
+        let voting_period_id = VotingPeriodId::new(period_id);
+
+        // Get voting period
+        let period_opt = self
+            .app
+            .node
+            .voting_state()
+            .databases()
+            .get_voting_period(&rotxn, voting_period_id)
+            .map_err(custom_err)?;
+
+        let Some(period) = period_opt else {
+            return Ok(None);
+        };
+
+        // Get participation stats
+        let (total_voters, total_votes, _) = self
+            .app
+            .node
+            .voting_state()
+            .get_participation_stats(&rotxn, voting_period_id)
+            .map_err(custom_err)?;
+
+        // Convert decision slots to hex strings
+        let decision_slots: Vec<String> = period
+            .decision_slots
+            .iter()
+            .map(|slot_id| slot_id.to_hex())
+            .collect();
+
+        // Count active voters (voters who cast at least one vote)
+        let votes = self
+            .app
+            .node
+            .voting_state()
+            .databases()
+            .get_votes_for_period(&rotxn, voting_period_id)
+            .map_err(custom_err)?;
+
+        let active_voters: std::collections::HashSet<_> = votes
+            .keys()
+            .map(|k| k.voter_id)
+            .collect();
+
+        // Check if consensus has been reached
+        let consensus_reached = period.status == truthcoin_dc::state::voting::types::VotingPeriodStatus::Resolved
+            || period.status == truthcoin_dc::state::voting::types::VotingPeriodStatus::Closed;
+
+        Ok(Some(VotingPeriodDetails {
+            period_id,
+            start_time: period.start_timestamp,
+            end_time: period.end_timestamp,
+            status: format!("{:?}", period.status),
+            decision_slots,
+            created_at_height: period.created_at_height,
+            total_voters,
+            active_voters: active_voters.len() as u64,
+            total_votes,
+            consensus_reached,
+        }))
     }
 
     async fn get_voter_votes(
         &self,
-        _address: Address,
-        _period_id: Option<u32>,
+        address: Address,
+        period_id: Option<u32>,
     ) -> RpcResult<Vec<VoteInfo>> {
-        Err(ErrorObject::owned(
-            -32601,
-            "Not implemented",
-            Some("Voting system not yet implemented"),
-        ))
+        use truthcoin_dc::state::voting::types::{VoterId, VotingPeriodId};
+
+        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let voter_id = VoterId::from_address(&address);
+
+        // Get all votes by this voter
+        let all_votes = self
+            .app
+            .node
+            .voting_state()
+            .databases()
+            .get_votes_by_voter(&rotxn, voter_id)
+            .map_err(custom_err)?;
+
+        let mut vote_infos = Vec::new();
+
+        for (vote_key, vote_entry) in all_votes {
+            // Filter by period if specified
+            if let Some(pid) = period_id {
+                if vote_key.period_id != VotingPeriodId::new(pid) {
+                    continue;
+                }
+            }
+
+            vote_infos.push(VoteInfo {
+                voter_address: address.to_string(),
+                decision_id: vote_key.decision_id.to_hex(),
+                vote_value: vote_entry.to_f64(),
+                period_id: vote_key.period_id.as_u32(),
+                block_height: vote_entry.block_height,
+                txid: hex::encode(vote_entry.tx_hash),
+                is_batch_vote: false, // TODO: Track batch votes in future
+            });
+        }
+
+        Ok(vote_infos)
     }
 
     async fn get_decision_votes(
         &self,
-        _decision_id: String,
+        decision_id: String,
     ) -> RpcResult<Vec<VoteInfo>> {
-        Err(ErrorObject::owned(
-            -32601,
-            "Not implemented",
-            Some("Voting system not yet implemented"),
-        ))
+        use truthcoin_dc::validation::SlotValidator;
+
+        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+
+        // Parse decision ID
+        let slot_id = SlotValidator::parse_slot_id_from_hex(&decision_id)
+            .map_err(|e| custom_err_msg(format!("Invalid decision ID: {}", e)))?;
+
+        // Get all votes for this decision
+        let votes = self
+            .app
+            .node
+            .voting_state()
+            .databases()
+            .get_votes_for_decision(&rotxn, slot_id)
+            .map_err(custom_err)?;
+
+        let mut vote_infos = Vec::new();
+
+        for (vote_key, vote_entry) in votes {
+            let voter_address = vote_key.voter_id.to_address();
+
+            vote_infos.push(VoteInfo {
+                voter_address: voter_address.to_string(),
+                decision_id: decision_id.clone(),
+                vote_value: vote_entry.to_f64(),
+                period_id: vote_key.period_id.as_u32(),
+                block_height: vote_entry.block_height,
+                txid: hex::encode(vote_entry.tx_hash),
+                is_batch_vote: false,
+            });
+        }
+
+        Ok(vote_infos)
     }
 
     async fn get_voter_participation(
         &self,
-        _address: Address,
-        _period_id: u32,
+        address: Address,
+        period_id: u32,
     ) -> RpcResult<Option<VoterParticipation>> {
-        Err(ErrorObject::owned(
-            -32601,
-            "Not implemented",
-            Some("Voting system not yet implemented"),
-        ))
+        use truthcoin_dc::state::voting::types::{VoterId, VotingPeriodId};
+
+        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let voter_id = VoterId::from_address(&address);
+        let voting_period_id = VotingPeriodId::new(period_id);
+
+        // Get voting period
+        let period_opt = self
+            .app
+            .node
+            .voting_state()
+            .databases()
+            .get_voting_period(&rotxn, voting_period_id)
+            .map_err(custom_err)?;
+
+        let Some(period) = period_opt else {
+            return Ok(None);
+        };
+
+        // Get votes by this voter in this period
+        let all_votes = self
+            .app
+            .node
+            .voting_state()
+            .databases()
+            .get_votes_by_voter(&rotxn, voter_id)
+            .map_err(custom_err)?;
+
+        let period_votes: Vec<_> = all_votes
+            .into_iter()
+            .filter(|(key, _)| key.period_id == voting_period_id)
+            .collect();
+
+        let votes_cast = period_votes.len() as u32;
+        let decisions_available = period.decision_slots.len() as u32;
+
+        let participation_rate = if decisions_available > 0 {
+            votes_cast as f64 / decisions_available as f64
+        } else {
+            0.0
+        };
+
+        // Check if voter participated in consensus (has reputation for this period)
+        let reputation_opt = self
+            .app
+            .node
+            .voting_state()
+            .databases()
+            .get_voter_reputation(&rotxn, voter_id)
+            .map_err(custom_err)?;
+
+        let participated_in_consensus = reputation_opt
+            .map(|rep| rep.last_period == voting_period_id)
+            .unwrap_or(false);
+
+        Ok(Some(VoterParticipation {
+            address: address.to_string(),
+            period_id,
+            votes_cast,
+            decisions_available,
+            participation_rate,
+            participated_in_consensus,
+        }))
     }
 
     async fn list_voters(&self) -> RpcResult<Vec<VoterInfo>> {
-        Err(ErrorObject::owned(
-            -32601,
-            "Not implemented",
-            Some("Voting system not yet implemented"),
-        ))
+        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+
+        // Get all voters
+        let all_voters = self
+            .app
+            .node
+            .voting_state()
+            .databases()
+            .get_all_voters(&rotxn)
+            .map_err(custom_err)?;
+
+        let mut voter_infos = Vec::new();
+
+        for voter_id in all_voters {
+            // Get reputation
+            let reputation_opt = self
+                .app
+                .node
+                .state
+                .voting()
+                .databases()
+                .get_voter_reputation(&rotxn, voter_id)
+                .map_err(custom_err)?;
+
+            let Some(reputation) = reputation_opt else {
+                continue;
+            };
+
+            // Get vote count
+            let votes = self
+                .app
+                .node
+                .state
+                .voting()
+                .databases()
+                .get_votes_by_voter(&rotxn, voter_id)
+                .map_err(custom_err)?;
+
+            let address = voter_id.to_address();
+
+            voter_infos.push(VoterInfo {
+                address: address.to_string(),
+                reputation: reputation.reputation,
+                total_votes: votes.len() as u64,
+                periods_active: reputation.total_decisions as u32,
+                accuracy_score: reputation.accuracy_rate,
+                registered_at_height: 0,
+                is_active: reputation.total_decisions > 0,
+            });
+        }
+
+        Ok(voter_infos)
     }
 
-    async fn is_registered_voter(&self, _address: Address) -> RpcResult<bool> {
-        Err(ErrorObject::owned(
-            -32601,
-            "Not implemented",
-            Some("Voting system not yet implemented"),
-        ))
+    async fn is_registered_voter(&self, address: Address) -> RpcResult<bool> {
+        use truthcoin_dc::state::voting::types::VoterId;
+
+        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let voter_id = VoterId::from_address(&address);
+
+        // Check if voter has reputation (indicates registration)
+        let reputation_opt = self
+            .app
+            .node
+            .voting_state()
+            .databases()
+            .get_voter_reputation(&rotxn, voter_id)
+            .map_err(custom_err)?;
+
+        Ok(reputation_opt.is_some())
     }
 
-    async fn get_voting_power(&self, _address: Address) -> RpcResult<u32> {
-        Err(ErrorObject::owned(
-            -32601,
-            "Not implemented",
-            Some("Voting system not yet implemented"),
-        ))
+    async fn get_voting_power(&self, address: Address) -> RpcResult<u32> {
+        use truthcoin_dc::state::voting::types::VoterId;
+
+        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let voter_id = VoterId::from_address(&address);
+
+        // Get reputation (includes Votecoin proportion and final voting weight)
+        let reputation_opt = self
+            .app
+            .node
+            .voting_state()
+            .databases()
+            .get_voter_reputation(&rotxn, voter_id)
+            .map_err(custom_err)?;
+
+        let Some(reputation) = reputation_opt else {
+            return Ok(0);
+        };
+
+        // Get Votecoin balance using accessor method
+        let votecoin_balance = self
+            .app
+            .node
+            .get_votecoin_balance_for(&rotxn, &address)
+            .map_err(custom_err)?;
+
+        Ok(votecoin_balance)
     }
 
     async fn get_current_voting_stats(
         &self,
     ) -> RpcResult<Option<VotingPeriodDetails>> {
-        Err(ErrorObject::owned(
-            -32601,
-            "Not implemented",
-            Some("Voting system not yet implemented"),
-        ))
+        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+
+        // Get current timestamp
+        let current_timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| custom_err_msg(format!("System time error: {}", e)))?
+            .as_secs();
+
+        // Get active period
+        let active_period_opt = self
+            .app
+            .node
+            .voting_state()
+            .get_active_period(&rotxn, current_timestamp)
+            .map_err(custom_err)?;
+
+        let Some(period) = active_period_opt else {
+            return Ok(None);
+        };
+
+        let period_id = period.id.as_u32();
+
+        // Delegate to get_voting_period_details for full stats
+        self.get_voting_period_details(period_id).await
     }
 }
 

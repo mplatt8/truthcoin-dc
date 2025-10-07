@@ -1220,6 +1220,54 @@ where
             .markets()
             .get_market_user_positions(&rotxn, address, market_id)?)
     }
+
+    // ================================================================================
+    // Voting RPC Accessor Methods
+    // ================================================================================
+
+    /// Create read transaction for RPC queries
+    ///
+    /// # Returns
+    /// Read-only transaction for database access
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Provides safe read-only access to voting state for RPC endpoints
+    pub fn read_txn(&self) -> Result<sneed::RoTxn, Error> {
+        self.env.read_txn().map_err(Into::into)
+    }
+
+    /// Access voting system for RPC queries
+    ///
+    /// # Returns
+    /// Reference to voting system for querying voting state
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Exposes voting system interface for vote submission and consensus queries
+    pub fn voting_state(&self) -> &crate::state::voting::VotingSystem {
+        self.state.voting()
+    }
+
+    /// Get Votecoin balance for address
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only transaction
+    /// * `address` - Address to query balance for
+    ///
+    /// # Returns
+    /// Votecoin balance (u32)
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Votecoin balance represents voting power in the consensus mechanism
+    /// per whitepaper section 5 on economic incentives
+    pub fn get_votecoin_balance_for(
+        &self,
+        rotxn: &sneed::RoTxn,
+        address: &crate::types::Address,
+    ) -> Result<u32, Error> {
+        self.state
+            .get_votecoin_balance(rotxn, address)
+            .map_err(Into::into)
+    }
 }
 
 /// Convert timestamp to quarter index (utility function)

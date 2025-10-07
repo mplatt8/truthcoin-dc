@@ -842,6 +842,29 @@ impl State {
         MarketValidator::validate_buy_shares(self, rotxn, tx, override_height)
     }
 
+    /// Validate share redemption transaction
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Implements redemption validation per whitepaper section 4:
+    /// - Market must be in Resolved state
+    /// - User must hold sufficient shares
+    /// - Payout calculated from final_prices array
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only transaction
+    /// * `tx` - Filled transaction to validate
+    ///
+    /// # Returns
+    /// Ok(()) if redemption is valid, Error otherwise
+    pub fn validate_share_redemption(
+        &self,
+        rotxn: &RoTxn,
+        tx: &FilledTransaction,
+    ) -> Result<(), Error> {
+        // Delegate to centralized validation logic in validation module
+        MarketValidator::validate_share_redemption(self, rotxn, tx)
+    }
+
     /// Validates a filled transaction, and returns the fee
     pub fn validate_filled_transaction(
         &self,
@@ -907,6 +930,16 @@ impl State {
         if tx.is_update_reputation() {
             // Reputation updates are typically system-generated after consensus
             // Validation is minimal here, actual logic in block application
+        }
+
+        // Validate share redemption
+        if tx
+            .transaction
+            .data
+            .as_ref()
+            .map_or(false, |data| data.is_redeem_shares())
+        {
+            self.validate_share_redemption(rotxn, tx)?;
         }
 
         tx.bitcoin_fee()?.ok_or(Error::NotEnoughValueIn)

@@ -2760,6 +2760,146 @@ impl MarketsDatabase {
         Ok(newly_voting)
     }
 
+    /// Resolve markets based on consensus outcomes from voting
+    ///
+    /// # Bitcoin Hivemind Whitepaper Compliance
+    /// Implements automatic market resolution per whitepaper section 4:
+    /// - Transitions Voting → Resolved when consensus is reached
+    /// - Populates final_prices array from decision outcomes
+    /// - Enables share redemption according to market resolution formulas
+    ///
+    /// # Arguments
+    /// * `txn` - Read-write transaction
+    /// * `voting_system` - Reference to voting system for consensus data
+    /// * `transaction_id` - Optional transaction ID for audit trail
+    /// * `height` - Current block height
+    ///
+    /// # Returns
+    /// Vector of resolved market IDs
+    ///
+    /// # Algorithm
+    /// 1. Query all markets in Voting state
+    /// 2. For each market, check if all decision slots have consensus outcomes
+    /// 3. If consensus complete, calculate final_prices from outcomes
+    /// 4. Transition market to Resolved state with populated final_prices
+    pub fn resolve_markets_from_consensus(
+        &self,
+        txn: &mut RwTxn,
+        voting_system: &crate::state::voting::VotingSystem,
+        transaction_id: Option<[u8; 32]>,
+        height: u64,
+    ) -> Result<Vec<MarketId>, Error> {
+        use crate::state::voting::types::VotingPeriodStatus;
+
+        // Only check markets in Voting state, as only they can transition to Resolved
+        let voting_markets = self.get_markets_by_state(txn, MarketState::Voting)?;
+        let mut newly_resolved = Vec::new();
+
+        for mut market in voting_markets {
+            // Find the voting period ID for this market's decision slots
+            // We need to determine which voting period contains these slots
+            // For now, we'll check all Resolved periods and see if consensus exists
+
+            // Get all resolved voting periods
+            let resolved_periods = voting_system.databases()
+                .get_periods_by_status(txn, VotingPeriodStatus::Resolved)?;
+
+            let mut consensus_complete = false;
+            let mut final_prices = ndarray::Array1::zeros(market.share_vector_length);
+
+            // Check each resolved period for our decision slots
+            for period in resolved_periods {
+                // Check if this period contains all our decision slots
+                let period_contains_all_slots = market.decision_slots.iter()
+                    .all(|slot| period.decision_slots.contains(slot));
+
+                if !period_contains_all_slots {
+                    continue;
+                }
+
+                // Get consensus outcomes for this period
+                let consensus_outcomes = voting_system.databases()
+                    .get_consensus_outcomes_for_period(txn, period.id)?;
+
+                // Check if we have consensus for all decision slots
+                let all_slots_have_consensus = market.decision_slots.iter()
+                    .all(|slot| consensus_outcomes.contains_key(slot));
+
+                if !all_slots_have_consensus {
+                    continue;
+                }
+
+                // Calculate final prices from decision outcomes
+                // Bitcoin Hivemind: Price for state = Product of probabilities of constituent decisions
+                for (state_idx, combo) in market.state_combos.iter().enumerate() {
+                    let mut state_probability = 1.0;
+
+                    for (decision_idx, &decision_value) in combo.iter().enumerate() {
+                        if decision_idx >= market.decision_slots.len() {
+                            break;
+                        }
+
+                        let slot_id = market.decision_slots[decision_idx];
+                        if let Some(&consensus_value) = consensus_outcomes.get(&slot_id) {
+                            // Binary decision: consensus_value is probability of "Yes" (value 1)
+                            // If decision_value == 1 (Yes), use consensus_value
+                            // If decision_value == 0 (No), use (1 - consensus_value)
+                            let decision_probability = if decision_value == 1 {
+                                consensus_value
+                            } else if decision_value == 0 {
+                                1.0 - consensus_value
+                            } else {
+                                // Invalid outcome - assign zero probability
+                                0.0
+                            };
+
+                            state_probability *= decision_probability;
+                        } else {
+                            // Missing consensus - cannot resolve this market
+                            state_probability = 0.0;
+                            break;
+                        }
+                    }
+
+                    final_prices[state_idx] = state_probability;
+                }
+
+                // Normalize final prices to sum to 1.0
+                let total: f64 = final_prices.iter().sum();
+                if total > 0.0 {
+                    final_prices.mapv_inplace(|p| p / total);
+                    consensus_complete = true;
+                    break; // Found the period with consensus
+                }
+            }
+
+            if consensus_complete {
+                // Transition market to Resolved state with final_prices
+                market.create_new_state_version(
+                    transaction_id,
+                    height,
+                    Some(MarketState::Resolved),
+                    None, // keep same b
+                    None, // keep same trading_fee
+                    None, // keep same shares
+                    Some(final_prices), // populate final_prices
+                    None, // keep same treasury
+                )?;
+
+                self.update_market(txn, &market)?;
+                newly_resolved.push(market.id.clone());
+
+                tracing::info!(
+                    "Resolved market {} with consensus outcomes at height {}",
+                    market.id,
+                    height
+                );
+            }
+        }
+
+        Ok(newly_resolved)
+    }
+
     /// Get markets by decision slot using efficient O(1) index lookup
     ///
     /// Replaces O(n) linear scan with indexed access for slot-based market queries.

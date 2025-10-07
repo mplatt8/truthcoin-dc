@@ -3223,6 +3223,7 @@ impl MarketsDatabase {
     /// # Arguments
     /// * `txn` - Database transaction
     /// * `batched_trades` - Vector of validated market trades to process
+    /// * `state` - State reference for centralized validation
     ///
     /// # Returns
     /// * `Ok(Vec<f64>)` - Trade costs for each processed trade
@@ -3233,115 +3234,39 @@ impl MarketsDatabase {
     /// - Failed operations automatically rollback the entire batch
     /// - Market state consistency is guaranteed across all trades
     /// - Share account updates are atomic with market updates
+    ///
+    /// # Validation Architecture
+    /// Uses centralized validation from validation.rs following the single-source-of-truth
+    /// pattern established for slots and voting validation.
     pub fn process_market_trades_batch(
         &self,
         txn: &mut RwTxn,
         batched_trades: Vec<BatchedMarketTrade>,
+        state: &crate::state::State,
     ) -> Result<Vec<f64>, Error> {
         if batched_trades.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut trade_costs = Vec::with_capacity(batched_trades.len());
         let mut market_updates: HashMap<MarketId, Array<f64, Ix1>> =
             HashMap::new();
 
-        // Phase 1: Pre-validation - validate all trades before making any changes
+        // Phase 1: Pre-validation using centralized validation logic
         // This prevents partial application of trades if any validation fails
         tracing::debug!(
-            "Validating {} batched market trades",
+            "Validating {} batched market trades using centralized validation",
             batched_trades.len()
         );
 
-        for (trade_index, trade) in batched_trades.iter().enumerate() {
-            // Validate market exists and is in trading state (market_id is now standardized MarketId type)
-            let market = self
-                .get_market(txn, &trade.market_id)
-                .map_err(|e| {
-                    tracing::error!(
-                        "Database error accessing market {} for trade {}: {}",
-                        hex::encode(&trade.market_id.0),
-                        trade_index,
-                        e
-                    );
-                    Error::DatabaseError(format!("Market access failed: {}", e))
-                })?
-                .ok_or_else(|| {
-                    tracing::error!(
-                        "Market {} not found for trade {}",
-                        hex::encode(&trade.market_id.0),
-                        trade_index
-                    );
-                    Error::Market(MarketError::MarketNotFound {
-                        id: trade.market_id.clone(),
-                    })
-                })?;
+        // Delegate to centralized validation in validation.rs (single source of truth)
+        let trade_costs = crate::validation::MarketValidator::validate_batched_trades(
+            state,
+            txn,
+            &batched_trades,
+        )?;
 
-            // Validate market state allows trading
-            if market.state() != MarketState::Trading {
-                tracing::error!(
-                    "Market {} is not in trading state for trade {}: {:?}",
-                    hex::encode(&trade.market_id),
-                    trade_index,
-                    market.state()
-                );
-                return Err(Error::InvalidTransaction {
-                    reason: format!(
-                        "Market {} is not in trading state",
-                        hex::encode(&trade.market_id)
-                    ),
-                });
-            }
-
-            // Validate outcome index is valid for market
-            if trade.outcome_index as usize >= market.shares().len() {
-                tracing::error!(
-                    "Invalid outcome index {} for market {} with {} outcomes",
-                    trade.outcome_index,
-                    hex::encode(&trade.market_id),
-                    market.shares().len()
-                );
-                return Err(Error::InvalidTransaction {
-                    reason: format!(
-                        "Invalid outcome index {} for market",
-                        trade.outcome_index
-                    ),
-                });
-            }
-
-            // Calculate and validate trade cost using market snapshot
-            let cost = trade.calculate_trade_cost().map_err(|e| {
-                tracing::error!(
-                    "Trade cost calculation failed for trade {}: {}",
-                    trade_index,
-                    e
-                );
-                Error::InvalidTransaction {
-                    reason: format!("Trade cost calculation failed: {}", e),
-                }
-            })?;
-
-            // Validate cost against trader's maximum
-            if cost > trade.max_cost as f64 {
-                tracing::error!(
-                    "Trade {} cost {:.4} exceeds maximum {}",
-                    trade_index,
-                    cost,
-                    trade.max_cost
-                );
-                return Err(Error::InvalidTransaction {
-                    reason: format!(
-                        "Trade cost {:.4} exceeds maximum {}",
-                        cost, trade.max_cost
-                    ),
-                });
-            }
-
-            // Validate trader has no negative positions after trade
-            // (Note: This would require checking existing account balances)
-
-            trade_costs.push(cost);
-
+        // Build market updates from validated trades
+        for trade in &batched_trades {
             // Accumulate share changes for each market
             let shares_update =
                 market_updates.entry(trade.market_id.clone()).or_insert_with(|| {

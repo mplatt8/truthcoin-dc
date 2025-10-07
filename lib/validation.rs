@@ -120,9 +120,28 @@ impl SlotValidator {
     }
 }
 
+/// Market validation utilities for Bitcoin Hivemind prediction markets.
+///
+/// Provides centralized validation for all market operations following the
+/// single-source-of-truth pattern established for slots and voting validation.
 pub struct MarketValidator;
 
 impl MarketValidator {
+    /// Validate market maker/trader authorization from transaction inputs.
+    ///
+    /// Extracts and validates the address of the market participant (maker or trader)
+    /// from the first UTXO in the transaction, following Bitcoin's standard pattern
+    /// of using the first input to identify the transaction originator.
+    ///
+    /// # Arguments
+    /// * `tx` - Filled transaction containing spent UTXOs
+    ///
+    /// # Returns
+    /// * `Ok(Address)` - Validated market participant address
+    /// * `Err(Error)` - Invalid transaction structure
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper section on market participant identification
     pub fn validate_market_maker_authorization(
         tx: &FilledTransaction,
     ) -> Result<Address, Error> {
@@ -143,6 +162,406 @@ impl MarketValidator {
         let market_maker_address = first_utxo.address;
 
         Ok(market_maker_address)
+    }
+
+    /// Validate complete market creation transaction.
+    ///
+    /// Ensures all Bitcoin Hivemind requirements are met for market creation:
+    /// 1. Valid market type (independent or categorical)
+    /// 2. At least one decision slot referenced
+    /// 3. All decision slots exist and have decisions
+    /// 4. Categorical markets use only binary decisions
+    /// 5. LMSR parameters are valid (beta > 0, 0 <= fee <= 1)
+    /// 6. Market maker is properly authorized
+    ///
+    /// # Arguments
+    /// * `state` - Blockchain state for validation queries
+    /// * `rotxn` - Read-only transaction
+    /// * `tx` - Filled transaction to validate
+    /// * `_override_height` - Optional height override for validation context
+    ///
+    /// # Returns
+    /// * `Ok(())` - Valid market creation
+    /// * `Err(Error)` - Invalid market with detailed reason
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper sections on market creation and LMSR parameters
+    pub fn validate_market_creation(
+        state: &crate::state::State,
+        rotxn: &RoTxn,
+        tx: &FilledTransaction,
+        _override_height: Option<u32>,
+    ) -> Result<(), Error> {
+        let market_data = tx.create_market().ok_or_else(|| {
+            Error::InvalidTransaction {
+                reason: "Not a market creation transaction".to_string(),
+            }
+        })?;
+
+        // Validate market type per whitepaper specifications
+        if market_data.market_type != "independent"
+            && market_data.market_type != "categorical"
+        {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "Invalid market type '{}': must be 'independent' or 'categorical'",
+                    market_data.market_type
+                ),
+            });
+        }
+
+        // Validate decision slots are provided
+        if market_data.decision_slots.is_empty() {
+            return Err(Error::InvalidTransaction {
+                reason: "Market must reference at least one decision slot"
+                    .to_string(),
+            });
+        }
+
+        // Validate slot IDs and ensure they exist with decisions
+        let mut slot_ids = Vec::new();
+        for slot_hex in &market_data.decision_slots {
+            // Use common validation utility for slot ID parsing
+            let slot_id = SlotValidator::parse_slot_id_from_hex(slot_hex)?;
+
+            // Verify slot exists
+            let slot = state
+                .slots()
+                .get_slot(rotxn, slot_id)?
+                .ok_or_else(|| Error::InvalidTransaction {
+                    reason: format!(
+                        "Referenced decision slot {} does not exist",
+                        slot_hex
+                    ),
+                })?;
+
+            // Verify slot has a decision
+            if slot.decision.is_none() {
+                return Err(Error::InvalidTransaction {
+                    reason: format!(
+                        "Referenced slot {} has no decision claimed",
+                        slot_hex
+                    ),
+                });
+            }
+
+            slot_ids.push(slot_id);
+        }
+
+        // Validate categorical market constraints per whitepaper
+        if market_data.market_type == "categorical" {
+            // All decisions must be binary for categorical markets
+            for slot_id in &slot_ids {
+                let slot = state.slots().get_slot(rotxn, *slot_id)?.unwrap();
+                let decision = slot.decision.unwrap();
+                if decision.is_scaled {
+                    return Err(Error::InvalidTransaction {
+                        reason:
+                            "Categorical markets can only use binary decisions"
+                                .to_string(),
+                    });
+                }
+            }
+        }
+
+        // Validate LMSR beta parameter (liquidity sensitivity)
+        let beta = market_data.b;
+        if beta <= 0.0 {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "LMSR beta parameter must be positive, got {}",
+                    beta
+                ),
+            });
+        }
+
+        // Validate trading fee if specified
+        if let Some(fee) = market_data.trading_fee {
+            if fee < 0.0 || fee > 1.0 {
+                return Err(Error::InvalidTransaction {
+                    reason: format!(
+                        "Trading fee must be between 0.0 and 1.0, got {}",
+                        fee
+                    ),
+                });
+            }
+        }
+
+        // Validate market maker authorization
+        let _market_maker_address =
+            Self::validate_market_maker_authorization(tx)?;
+
+        Ok(())
+    }
+
+    /// Validate share purchase transaction (buy_shares).
+    ///
+    /// Ensures all Bitcoin Hivemind requirements are met for buying shares:
+    /// 1. Market exists
+    /// 2. Market is in Trading state
+    /// 3. Outcome index is valid for market
+    /// 4. Shares to buy amount is positive
+    /// 5. Max cost is positive
+    /// 6. LMSR trade cost doesn't exceed max cost
+    /// 7. Trader is properly authorized
+    ///
+    /// # Arguments
+    /// * `state` - Blockchain state for validation queries
+    /// * `rotxn` - Read-only transaction
+    /// * `tx` - Filled transaction to validate
+    /// * `_override_height` - Optional height override for validation context
+    ///
+    /// # Returns
+    /// * `Ok(())` - Valid share purchase
+    /// * `Err(Error)` - Invalid trade with detailed reason
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper sections on LMSR trading and market operations
+    pub fn validate_buy_shares(
+        state: &crate::state::State,
+        rotxn: &RoTxn,
+        tx: &FilledTransaction,
+        _override_height: Option<u32>,
+    ) -> Result<(), Error> {
+        use crate::math::lmsr::Lmsr;
+        use crate::state::markets::MarketState;
+
+        let buy_data = tx.buy_shares().ok_or_else(|| {
+            Error::InvalidTransaction {
+                reason: "Not a buy shares transaction".to_string(),
+            }
+        })?;
+
+        // Validate market exists
+        let market = state
+            .markets()
+            .get_market(rotxn, &buy_data.market_id)?
+            .ok_or_else(|| Error::InvalidTransaction {
+                reason: format!(
+                    "Market {:?} does not exist",
+                    buy_data.market_id
+                ),
+            })?;
+
+        // Validate market is in trading state
+        if market.state() != MarketState::Trading {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "Market not in trading state (current: {:?})",
+                    market.state()
+                ),
+            });
+        }
+
+        // Validate outcome index
+        if buy_data.outcome_index as usize >= market.shares().len() {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "Outcome index {} out of range (market has {} outcomes)",
+                    buy_data.outcome_index,
+                    market.shares().len()
+                ),
+            });
+        }
+
+        // Validate shares amount is positive
+        if buy_data.shares_to_buy <= 0.0 {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "Shares to buy must be positive, got {}",
+                    buy_data.shares_to_buy
+                ),
+            });
+        }
+
+        // Validate max cost is positive
+        if buy_data.max_cost <= 0 {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "Max cost must be positive, got {}",
+                    buy_data.max_cost
+                ),
+            });
+        }
+
+        // Calculate new share quantities after the trade
+        let mut new_shares = market.shares().clone();
+        new_shares[buy_data.outcome_index as usize] += buy_data.shares_to_buy;
+
+        // Validate LMSR constraints
+        let lmsr = Lmsr::new(market.shares().len());
+        let current_cost = lmsr
+            .cost_function(market.b(), &market.shares().view())
+            .map_err(|e| Error::InvalidTransaction {
+                reason: format!(
+                    "LMSR current cost calculation failed: {:?}",
+                    e
+                ),
+            })?;
+        let new_cost = lmsr
+            .cost_function(market.b(), &new_shares.view())
+            .map_err(|e| Error::InvalidTransaction {
+                reason: format!("LMSR new cost calculation failed: {:?}", e),
+            })?;
+
+        let trade_cost = new_cost - current_cost;
+
+        // Validate trade cost doesn't exceed max cost
+        if trade_cost > buy_data.max_cost as f64 {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "Trade cost {:.4} exceeds max cost {}",
+                    trade_cost, buy_data.max_cost
+                ),
+            });
+        }
+
+        // Validate trader authorization
+        let _trader_address = Self::validate_market_maker_authorization(tx)?;
+
+        Ok(())
+    }
+
+    /// Validate batched market trades for atomic processing.
+    ///
+    /// Performs validation for a batch of market trades that will be applied atomically.
+    /// This is used during block application to ensure all trades in a block are valid
+    /// before applying any changes.
+    ///
+    /// # Arguments
+    /// * `state` - Blockchain state for validation queries
+    /// * `rotxn` - Read-only transaction
+    /// * `batched_trades` - Vector of batched market trades to validate
+    ///
+    /// # Returns
+    /// * `Ok(Vec<f64>)` - Vector of validated trade costs
+    /// * `Err(Error)` - Invalid batch with detailed reason
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper sections on atomic market operations
+    pub fn validate_batched_trades(
+        state: &crate::state::State,
+        rotxn: &RoTxn,
+        batched_trades: &[crate::state::markets::BatchedMarketTrade],
+    ) -> Result<Vec<f64>, Error> {
+        use crate::state::markets::{MarketError, MarketState};
+
+        let mut trade_costs = Vec::with_capacity(batched_trades.len());
+
+        for (trade_index, trade) in batched_trades.iter().enumerate() {
+            // Validate market exists
+            let market = state
+                .markets()
+                .get_market(rotxn, &trade.market_id)
+                .map_err(|e| Error::DatabaseError(format!("Market access failed: {}", e)))?
+                .ok_or_else(|| {
+                    Error::Market(MarketError::MarketNotFound {
+                        id: trade.market_id.clone(),
+                    })
+                })?;
+
+            // Validate market state allows trading
+            if market.state() != MarketState::Trading {
+                return Err(Error::InvalidTransaction {
+                    reason: format!(
+                        "Batch trade {}: Market {:?} not in trading state (current: {:?})",
+                        trade_index,
+                        trade.market_id,
+                        market.state()
+                    ),
+                });
+            }
+
+            // Validate outcome index is valid for market
+            if trade.outcome_index as usize >= market.shares().len() {
+                return Err(Error::InvalidTransaction {
+                    reason: format!(
+                        "Batch trade {}: Outcome index {} out of range (market has {} outcomes)",
+                        trade_index,
+                        trade.outcome_index,
+                        market.shares().len()
+                    ),
+                });
+            }
+
+            // Calculate and validate trade cost using market snapshot
+            let cost = trade.calculate_trade_cost().map_err(|e| {
+                Error::InvalidTransaction {
+                    reason: format!(
+                        "Batch trade {}: Trade cost calculation failed: {}",
+                        trade_index, e
+                    ),
+                }
+            })?;
+
+            // Validate cost against trader's maximum
+            if cost > trade.max_cost as f64 {
+                return Err(Error::InvalidTransaction {
+                    reason: format!(
+                        "Batch trade {}: Trade cost {:.4} exceeds max cost {}",
+                        trade_index, cost, trade.max_cost
+                    ),
+                });
+            }
+
+            trade_costs.push(cost);
+        }
+
+        Ok(trade_costs)
+    }
+
+    /// Validate LMSR parameters for market integrity.
+    ///
+    /// Ensures LMSR parameters (beta and share quantities) are valid and within
+    /// acceptable ranges to prevent numerical instability or overflow.
+    ///
+    /// # Arguments
+    /// * `beta` - LMSR beta parameter (liquidity sensitivity)
+    /// * `shares` - Current share quantities for all outcomes
+    ///
+    /// # Returns
+    /// * `Ok(())` - Valid LMSR parameters
+    /// * `Err(Error)` - Invalid parameters with detailed reason
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper section on LMSR market maker algorithm
+    pub fn validate_lmsr_parameters(
+        beta: f64,
+        shares: &ndarray::Array1<f64>,
+    ) -> Result<(), Error> {
+        // Validate beta is positive
+        if beta <= 0.0 || !beta.is_finite() {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "LMSR beta must be positive and finite, got {}",
+                    beta
+                ),
+            });
+        }
+
+        // Validate share quantities are non-negative and finite
+        for (idx, &share_qty) in shares.iter().enumerate() {
+            if share_qty < 0.0 || !share_qty.is_finite() {
+                return Err(Error::InvalidTransaction {
+                    reason: format!(
+                        "Share quantity at index {} must be non-negative and finite, got {}",
+                        idx, share_qty
+                    ),
+                });
+            }
+        }
+
+        // Validate we have at least 2 outcomes for a meaningful market
+        if shares.len() < 2 {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "Market must have at least 2 outcomes, got {}",
+                    shares.len()
+                ),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -723,6 +1142,149 @@ impl VoteValidator {
             }
         }
 
+        Ok(())
+    }
+}
+
+/// Voter registration and reputation validation
+pub struct VoterValidator;
+
+impl VoterValidator {
+    pub fn validate_voter_not_registered(
+        state: &crate::state::State,
+        rotxn: &RoTxn,
+        voter_id: crate::state::voting::types::VoterId,
+    ) -> Result<(), Error> {
+        if state
+            .voting()
+            .databases()
+            .get_voter_reputation(rotxn, voter_id)?
+            .is_some()
+        {
+            return Err(Error::InvalidTransaction {
+                reason: "Voter already registered".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn validate_voter_exists(
+        state: &crate::state::State,
+        rotxn: &RoTxn,
+        voter_id: crate::state::voting::types::VoterId,
+    ) -> Result<(), Error> {
+        if state
+            .voting()
+            .databases()
+            .get_voter_reputation(rotxn, voter_id)?
+            .is_none()
+        {
+            return Err(Error::InvalidTransaction {
+                reason: "Voter not found".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn validate_reputation_update(
+        state: &crate::state::State,
+        rotxn: &RoTxn,
+        voter_id: crate::state::voting::types::VoterId,
+        period_id: crate::state::voting::types::VotingPeriodId,
+    ) -> Result<(), Error> {
+        Self::validate_voter_exists(state, rotxn, voter_id)?;
+
+        let consensus_outcomes = state
+            .voting()
+            .databases()
+            .get_consensus_outcomes_for_period(rotxn, period_id)?;
+
+        if consensus_outcomes.is_empty() {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "No consensus outcomes found for period {:?}",
+                    period_id
+                ),
+            });
+        }
+
+        let voter_votes = state
+            .voting()
+            .databases()
+            .get_votes_by_voter(rotxn, voter_id)?;
+
+        let has_votes_in_period = voter_votes
+            .iter()
+            .any(|(key, _)| key.period_id == period_id);
+
+        if !has_votes_in_period {
+            return Err(Error::InvalidTransaction {
+                reason: "Voter has no votes in this period".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Voting period lifecycle validation
+pub struct PeriodValidator;
+
+impl PeriodValidator {
+    pub fn validate_period_can_close(
+        period: &crate::state::voting::types::VotingPeriod,
+        current_timestamp: u64,
+    ) -> Result<(), Error> {
+        use crate::state::voting::types::VotingPeriodStatus;
+
+        if current_timestamp < period.end_timestamp {
+            return Err(Error::InvalidTransaction {
+                reason: "Cannot close period before end time".to_string(),
+            });
+        }
+
+        if period.status != VotingPeriodStatus::Active {
+            return Err(Error::InvalidTransaction {
+                reason: format!("Period {:?} is not active", period.id),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_period_is_active(
+        period: &crate::state::voting::types::VotingPeriod,
+        timestamp: u64,
+    ) -> Result<(), Error> {
+        use crate::state::voting::types::VotingPeriodStatus;
+
+        if period.status != VotingPeriodStatus::Active {
+            return Err(Error::InvalidTransaction {
+                reason: format!("Period {:?} is not active for voting", period.id),
+            });
+        }
+
+        if !period.is_active(timestamp) {
+            return Err(Error::InvalidTransaction {
+                reason: "Timestamp is outside period window".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_decision_in_period(
+        period: &crate::state::voting::types::VotingPeriod,
+        decision_id: SlotId,
+    ) -> Result<(), Error> {
+        if !period.decision_slots.contains(&decision_id) {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "Decision {:?} not available in period {:?}",
+                    decision_id, period.id
+                ),
+            });
+        }
         Ok(())
     }
 }

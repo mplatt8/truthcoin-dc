@@ -231,17 +231,7 @@ impl VotingSystem {
                 reason: format!("Voting period {:?} not found", period_id),
             })?;
 
-        if current_timestamp < period.end_timestamp {
-            return Err(Error::InvalidTransaction {
-                reason: "Cannot close period before end time".to_string(),
-            });
-        }
-
-        if period.status != VotingPeriodStatus::Active {
-            return Err(Error::InvalidTransaction {
-                reason: format!("Period {:?} is not active", period_id),
-            });
-        }
+        crate::validation::PeriodValidator::validate_period_can_close(&period, current_timestamp)?;
 
         let all_votes = self.databases.get_votes_for_period(rwtxn, period_id)?;
 
@@ -410,7 +400,6 @@ impl VotingSystem {
         block_height: u64,
         tx_hash: [u8; 32],
     ) -> Result<(), Error> {
-        // Validate voting period is active
         let period = self
             .databases
             .get_voting_period(rwtxn, period_id)?
@@ -418,44 +407,8 @@ impl VotingSystem {
                 reason: format!("Voting period {:?} not found", period_id),
             })?;
 
-        if period.status != VotingPeriodStatus::Active {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Period {:?} is not active for voting",
-                    period_id
-                ),
-            });
-        }
-
-        if !period.is_active(timestamp) {
-            return Err(Error::InvalidTransaction {
-                reason: "Vote timestamp is outside period window".to_string(),
-            });
-        }
-
-        // Check if decision is in this period
-        if !period.decision_slots.contains(&decision_id) {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Decision {:?} not available in period {:?}",
-                    decision_id, period_id
-                ),
-            });
-        }
-
-        // Check for duplicate vote
-        if self
-            .databases
-            .get_vote(rwtxn, period_id, voter_id, decision_id)?
-            .is_some()
-        {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Voter {:?} already voted on decision {:?} in period {:?}",
-                    voter_id, decision_id, period_id
-                ),
-            });
-        }
+        crate::validation::PeriodValidator::validate_period_is_active(&period, timestamp)?;
+        crate::validation::PeriodValidator::validate_decision_in_period(&period, decision_id)?;
 
         // Create and store the vote
         let vote = Vote::new(

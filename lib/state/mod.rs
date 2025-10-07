@@ -790,204 +790,56 @@ impl State {
         )
     }
 
+    /// Validate market creation transaction.
+    ///
+    /// Delegates to centralized validation logic in validation module for
+    /// single source of truth following the pattern established for slots and voting.
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only database transaction
+    /// * `tx` - Filled transaction containing market creation data
+    /// * `override_height` - Optional height override for validation context
+    ///
+    /// # Returns
+    /// * `Ok(())` - Valid market creation meeting all Hivemind requirements
+    /// * `Err(Error)` - Invalid creation with detailed error information
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper sections on market creation
     pub fn validate_market_creation(
         &self,
         rotxn: &RoTxn,
         tx: &FilledTransaction,
-        _override_height: Option<u32>,
+        override_height: Option<u32>,
     ) -> Result<(), Error> {
-        let market_data =
-            tx.create_market().ok_or_else(|| Error::InvalidSlotId {
-                reason: "Not a market creation transaction".to_string(),
-            })?;
-
-        // Validate market type
-        if market_data.market_type != "independent"
-            && market_data.market_type != "categorical"
-        {
-            return Err(Error::InvalidSlotId {
-                reason: format!(
-                    "Invalid market type: {}",
-                    market_data.market_type
-                ),
-            });
-        }
-
-        // Validate decision slots exist and are properly formatted
-        if market_data.decision_slots.is_empty() {
-            return Err(Error::InvalidSlotId {
-                reason: "Market must have at least one decision slot"
-                    .to_string(),
-            });
-        }
-
-        // Validate slot IDs and ensure they exist
-        let mut slot_ids = Vec::new();
-        for slot_hex in &market_data.decision_slots {
-            // Use common validation utility for slot ID parsing
-            let slot_id = SlotValidator::parse_slot_id_from_hex(slot_hex)?;
-
-            // Verify slot exists and has a decision
-            let slot =
-                self.slots.get_slot(rotxn, slot_id)?.ok_or_else(|| {
-                    Error::InvalidSlotId {
-                        reason: format!("Slot {} does not exist", slot_hex),
-                    }
-                })?;
-
-            if slot.decision.is_none() {
-                return Err(Error::InvalidSlotId {
-                    reason: format!("Slot {} has no decision", slot_hex),
-                });
-            }
-
-            slot_ids.push(slot_id);
-        }
-
-        // Validate categorical market constraints
-        if market_data.market_type == "categorical" {
-            // All decisions must be binary for categorical markets
-            for slot_id in &slot_ids {
-                let slot = self.slots.get_slot(rotxn, *slot_id)?.unwrap();
-                let decision = slot.decision.unwrap();
-                if decision.is_scaled {
-                    return Err(Error::InvalidSlotId {
-                        reason:
-                            "Categorical markets can only use binary decisions"
-                                .to_string(),
-                    });
-                }
-            }
-        }
-
-        // Validate LMSR parameters
-        let beta = market_data.b;
-        if beta <= 0.0 {
-            return Err(Error::InvalidSlotId {
-                reason: format!("Invalid beta parameter: {}", beta),
-            });
-        }
-
-        if let Some(fee) = market_data.trading_fee {
-            if fee < 0.0 || fee > 1.0 {
-                return Err(Error::InvalidSlotId {
-                    reason: format!(
-                        "Trading fee must be between 0 and 1: {}",
-                        fee
-                    ),
-                });
-            }
-        }
-
-        // Use common validation utility for market maker authorization
-        let _market_maker_address =
-            MarketValidator::validate_market_maker_authorization(tx)?;
-
-        Ok(())
+        // Delegate to centralized validation logic in validation module
+        MarketValidator::validate_market_creation(self, rotxn, tx, override_height)
     }
 
+    /// Validate share purchase transaction.
+    ///
+    /// Delegates to centralized validation logic in validation module for
+    /// single source of truth following the pattern established for slots and voting.
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only database transaction
+    /// * `tx` - Filled transaction containing buy shares data
+    /// * `override_height` - Optional height override for validation context
+    ///
+    /// # Returns
+    /// * `Ok(())` - Valid share purchase meeting all Hivemind requirements
+    /// * `Err(Error)` - Invalid trade with detailed error information
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper sections on LMSR trading
     pub fn validate_buy_shares(
         &self,
         rotxn: &RoTxn,
         tx: &FilledTransaction,
-        _override_height: Option<u32>,
+        override_height: Option<u32>,
     ) -> Result<(), Error> {
-        use crate::math::lmsr::Lmsr;
-        use crate::state::markets::{MarketId, MarketState};
-
-        let buy_data = tx.buy_shares().ok_or_else(|| Error::InvalidSlotId {
-            reason: "Not a buy shares transaction".to_string(),
-        })?;
-
-        // Validate market exists (market_id is now standardized MarketId type)
-        let market =
-            self.markets()
-                .get_market(rotxn, &buy_data.market_id)?
-                .ok_or_else(|| Error::InvalidSlotId {
-                    reason: format!(
-                        "Market {:?} does not exist",
-                        buy_data.market_id
-                    ),
-                })?;
-
-        // Validate market is in trading state
-        if market.state() != MarketState::Trading {
-            return Err(Error::InvalidSlotId {
-                reason: format!(
-                    "Market is not in trading state (current state: {:?})",
-                    market.state()
-                ),
-            });
-        }
-
-        // Validate outcome index
-        if buy_data.outcome_index as usize >= market.shares().len() {
-            return Err(Error::InvalidSlotId {
-                reason: format!(
-                    "Outcome index {} exceeds market outcomes {}",
-                    buy_data.outcome_index,
-                    market.shares().len()
-                ),
-            });
-        }
-
-        // Validate shares amount is positive
-        if buy_data.shares_to_buy <= 0.0 {
-            return Err(Error::InvalidSlotId {
-                reason: format!(
-                    "Shares to buy must be positive: {}",
-                    buy_data.shares_to_buy
-                ),
-            });
-        }
-
-        // Validate max cost is positive
-        if buy_data.max_cost <= 0 {
-            return Err(Error::InvalidSlotId {
-                reason: format!(
-                    "Max cost must be positive: {}",
-                    buy_data.max_cost
-                ),
-            });
-        }
-
-        // Calculate new share quantities after the trade
-        let mut new_shares = market.shares().clone();
-        new_shares[buy_data.outcome_index as usize] += buy_data.shares_to_buy;
-
-        // Validate LMSR constraints
-        let lmsr = Lmsr::new(market.shares().len());
-        let current_cost = lmsr
-            .cost_function(market.b(), &market.shares().view())
-            .map_err(|e| Error::InvalidSlotId {
-                reason: format!(
-                    "Failed to calculate current market cost: {:?}",
-                    e
-                ),
-            })?;
-        let new_cost = lmsr
-            .cost_function(market.b(), &new_shares.view())
-            .map_err(|e| Error::InvalidSlotId {
-                reason: format!("Failed to calculate new market cost: {:?}", e),
-            })?;
-
-        let trade_cost = new_cost - current_cost;
-
-        // Validate trade cost doesn't exceed max cost
-        if trade_cost > buy_data.max_cost as f64 {
-            return Err(Error::InvalidSlotId {
-                reason: format!(
-                    "Trade cost {} exceeds max cost {}",
-                    trade_cost, buy_data.max_cost
-                ),
-            });
-        }
-
-        // Use common validation utility for trader authorization
-        let _trader_address =
-            MarketValidator::validate_market_maker_authorization(tx)?;
-
-        Ok(())
+        // Delegate to centralized validation logic in validation module
+        MarketValidator::validate_buy_shares(self, rotxn, tx, override_height)
     }
 
     /// Validates a filled transaction, and returns the fee

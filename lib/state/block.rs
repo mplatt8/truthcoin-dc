@@ -157,11 +157,8 @@ impl StateUpdate {
         for update in &self.market_updates {
             if let Some(ref shares) = update.new_shares {
                 if let Some(beta) = update.new_beta {
-                    LmsrService::validate_lmsr_parameters(beta, shares).map_err(|e| {
-                        Error::InvalidSlotId {
-                            reason: format!("LMSR validation failed: {:?}", e),
-                        }
-                    })?;
+                    // Use centralized validation from validation.rs
+                    crate::validation::MarketValidator::validate_lmsr_parameters(beta, shares)?;
                 }
             }
 
@@ -196,17 +193,12 @@ impl StateUpdate {
                 });
             }
 
-            // Validate LMSR parameters for new market using centralized service
-            LmsrService::validate_lmsr_parameters(
+            // Validate LMSR parameters using centralized validation
+            // Follows single-source-of-truth pattern from validation.rs
+            crate::validation::MarketValidator::validate_lmsr_parameters(
                 creation.market.b(),
                 &creation.market.shares(),
-            )
-            .map_err(|e| Error::InvalidSlotId {
-                reason: format!(
-                    "Market creation LMSR validation failed: {:?}",
-                    e
-                ),
-            })?;
+            )?;
         }
 
         // Validate slot changes
@@ -1821,17 +1813,7 @@ fn apply_register_voter(
 
     let voter_id = VoterId::from_address(&voter_address);
 
-    // Check if voter already registered
-    if state
-        .voting()
-        .databases()
-        .get_voter_reputation(rwtxn, voter_id)?
-        .is_some()
-    {
-        return Err(Error::InvalidTransaction {
-            reason: "Voter already registered".to_string(),
-        });
-    }
+    crate::validation::VoterValidator::validate_voter_not_registered(state, rwtxn, voter_id)?;
 
     // Get current timestamp
     let timestamp = state
@@ -1902,37 +1884,26 @@ fn apply_update_reputation(
         },
     )?);
 
-    // Get existing reputation (this is the OLD reputation)
+    let period_id = VotingPeriodId::new(update_data.voting_period);
+
+    crate::validation::VoterValidator::validate_reputation_update(state, rwtxn, voter_id, period_id)?;
+
     let old_reputation = state
         .voting()
         .databases()
         .get_voter_reputation(rwtxn, voter_id)?
-        .ok_or_else(|| Error::InvalidTransaction {
-            reason: "Voter not found".to_string(),
-        })?;
+        .expect("Voter exists after validation");
 
-    // Get current timestamp
     let timestamp = state
         .try_get_mainchain_timestamp(rwtxn)?
         .ok_or_else(|| Error::InvalidTransaction {
             reason: "No mainchain timestamp available".to_string(),
         })?;
 
-    let period_id = VotingPeriodId::new(update_data.voting_period);
-
     let consensus_outcomes = state
         .voting()
         .databases()
         .get_consensus_outcomes_for_period(rwtxn, period_id)?;
-
-    if consensus_outcomes.is_empty() {
-        return Err(Error::InvalidTransaction {
-            reason: format!(
-                "No consensus outcomes found for period {:?}",
-                period_id
-            ),
-        });
-    }
 
     let voter_votes = state
         .voting()
@@ -1966,13 +1937,7 @@ fn apply_update_reputation(
         }
     }
 
-    let was_correct = if total_count > 0 {
-        (correct_count as f64 / total_count as f64) > 0.5
-    } else {
-        return Err(Error::InvalidTransaction {
-            reason: "Voter has no votes in this period".to_string(),
-        });
-    };
+    let was_correct = (correct_count as f64 / total_count as f64) > 0.5;
 
     // Update reputation with correct logic
     let mut updated_reputation = old_reputation.clone();

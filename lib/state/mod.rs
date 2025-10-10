@@ -710,6 +710,7 @@ impl State {
         &self,
         rotxn: &RoTxn,
         tx: &FilledTransaction,
+        override_height: Option<u32>,
     ) -> Result<(), Error> {
         // Get total Votecoin in inputs and outputs
         let votecoin_inputs: u32 = tx
@@ -729,9 +730,14 @@ impl State {
             })
             .sum();
 
-        // Check if we're in the genesis block (height 0)
-        let current_height = self.try_get_height(rotxn)?.unwrap_or(0);
-        let is_genesis = current_height == 0;
+        // Use override height if provided, otherwise get the node's current height
+        // This is critical for proper validation during Initial Block Download (IBD)
+        // when the node is syncing from peers and validating historical blocks
+        let block_height = match override_height {
+            Some(height) => height,
+            None => self.try_get_height(rotxn)?.unwrap_or(0),
+        };
+        let is_genesis = block_height == 0;
 
         if is_genesis {
             // In genesis block, allow Votecoin creation (inputs can be 0, outputs > 0)
@@ -874,7 +880,7 @@ impl State {
     ) -> Result<bitcoin::Amount, Error> {
         use crate::validation::VoteValidator;
 
-        let () = self.validate_votecoin(rotxn, tx)?;
+        let () = self.validate_votecoin(rotxn, tx, override_height)?;
 
         // Validate decision slot claims
         if tx.is_claim_decision_slot() {

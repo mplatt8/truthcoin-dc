@@ -1727,26 +1727,10 @@ impl RpcServer for RpcServerImpl {
         Ok(reputation_opt.is_some())
     }
 
-    async fn get_voting_power(&self, address: Address) -> RpcResult<u32> {
-        use truthcoin_dc::state::voting::types::VoterId;
-
+    async fn get_votecoin_balance(&self, address: Address) -> RpcResult<u32> {
         let rotxn = self.app.node.read_txn().map_err(custom_err)?;
-        let voter_id = VoterId::from_address(&address);
 
-        // Get reputation (includes Votecoin proportion and final voting weight)
-        let reputation_opt = self
-            .app
-            .node
-            .voting_state()
-            .databases()
-            .get_voter_reputation(&rotxn, voter_id)
-            .map_err(custom_err)?;
-
-        let Some(reputation) = reputation_opt else {
-            return Ok(0);
-        };
-
-        // Get Votecoin balance using accessor method
+        // Get Votecoin balance directly
         let votecoin_balance = self
             .app
             .node

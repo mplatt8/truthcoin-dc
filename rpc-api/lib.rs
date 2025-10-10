@@ -771,11 +771,11 @@ pub trait Rpc {
     #[method(name = "is_registered_voter")]
     async fn is_registered_voter(&self, address: Address) -> RpcResult<bool>;
 
-    /// Get the current voting power (Votecoin balance) for an address
-    /// Voting power determines weight in consensus calculations
+    /// Get the Votecoin balance for an address
+    /// Votecoin balance determines voting power in consensus calculations
     #[open_api_method(output_schema(ToSchema = "u32"))]
-    #[method(name = "get_voting_power")]
-    async fn get_voting_power(&self, address: Address) -> RpcResult<u32>; // Returns Votecoin balance
+    #[method(name = "get_votecoin_balance")]
+    async fn get_votecoin_balance(&self, address: Address) -> RpcResult<u32>;
 
     /// Get voting statistics for the current active voting period
     /// Returns aggregated data about participation and vote counts

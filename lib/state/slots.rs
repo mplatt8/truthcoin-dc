@@ -242,7 +242,7 @@ impl Default for SlotConfig {
     fn default() -> Self {
         Self {
             testing_mode: true,
-            testing_blocks_per_period: 1,
+            testing_blocks_per_period: 10,
         }
     }
 }

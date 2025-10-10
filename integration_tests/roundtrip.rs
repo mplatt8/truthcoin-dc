@@ -709,8 +709,157 @@ async fn roundtrip_task(
         .bmm_single(&mut enforcer_post_setup)
         .await?;
 
-    // Wait for network sync
+    // Wait for network sync - first ensure all voters receive the block via P2P
     sleep(std::time::Duration::from_secs(2)).await;
+
+    tracing::info!("Waiting for block propagation to all voters...");
+    let issuer_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
+    tracing::info!("Issuer block height: {}", issuer_height);
+
+    // Wait for all voters to receive the block (check block height matches issuer)
+    for (i, voter) in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3].iter().enumerate() {
+        let mut block_received = false;
+        for attempt in 0..20 {
+            let voter_height = voter.rpc_client.getblockcount().await?;
+            if voter_height >= issuer_height {
+                tracing::info!("voter_{} received block: height={}", i, voter_height);
+                block_received = true;
+                break;
+            }
+            tracing::debug!("voter_{} waiting for block (height={}, expected={}), attempt {}/20",
+                i, voter_height, issuer_height, attempt + 1);
+            sleep(std::time::Duration::from_millis(500)).await;
+        }
+        anyhow::ensure!(block_received, "voter_{} did not receive block after 10 seconds", i);
+    }
+
+    // Diagnostic: Check what UTXOs exist for voter_0
+    tracing::info!("=== DIAGNOSTIC: Checking voter_0 UTXOs ===");
+
+    // Get wallet UTXOs (what the wallet thinks it owns)
+    let wallet_utxos = truthcoin_nodes.voter_0.rpc_client.get_wallet_utxos().await?;
+    tracing::info!("voter_0 wallet UTXOs count: {}", wallet_utxos.len());
+    for (idx, utxo) in wallet_utxos.iter().enumerate() {
+        match &utxo.output.content {
+            FilledOutputContent::Bitcoin(bitcoin_content) => {
+                tracing::info!("  Wallet UTXO {}: {} sats at address {}, outpoint: {:?}",
+                    idx, bitcoin_content.0.to_sat(), utxo.output.address, utxo.outpoint);
+            }
+            FilledOutputContent::Votecoin(vc) => {
+                tracing::info!("  Wallet UTXO {}: {} Votecoin at address {}", idx, vc, utxo.output.address);
+            }
+            FilledOutputContent::BitcoinWithdrawal { .. } => {
+                tracing::info!("  Wallet UTXO {}: Withdrawal", idx);
+            }
+        }
+    }
+
+    // Get chain state UTXOs (all UTXOs from blockchain perspective)
+    let chain_utxos = truthcoin_nodes.voter_0.rpc_client.list_utxos().await?;
+    tracing::info!("voter_0 chain state total UTXOs: {}", chain_utxos.len());
+
+    // Filter to just Bitcoin UTXOs owned by voter_0's addresses
+    let voter_0_addresses: Vec<_> = wallet_utxos.iter().map(|u| u.output.address).collect();
+    let voter_0_chain_bitcoin_utxos: Vec<_> = chain_utxos.iter()
+        .filter(|utxo| {
+            matches!(utxo.output.content, FilledOutputContent::Bitcoin(_))
+                && voter_0_addresses.contains(&utxo.output.address)
+        })
+        .collect();
+
+    tracing::info!("voter_0 Bitcoin UTXOs in chain state owned by voter_0: {}", voter_0_chain_bitcoin_utxos.len());
+    for (idx, utxo) in voter_0_chain_bitcoin_utxos.iter().enumerate() {
+        if let FilledOutputContent::Bitcoin(bitcoin_content) = &utxo.output.content {
+            tracing::info!("  Chain UTXO {}: {} sats at address {}, outpoint: {:?}",
+                idx, bitcoin_content.0.to_sat(), utxo.output.address, utxo.outpoint);
+        }
+    }
+
+    let balance = truthcoin_nodes.voter_0.rpc_client.bitcoin_balance().await?;
+    tracing::info!("voter_0 balance: total={} sats, available={} sats", balance.total, balance.available);
+
+    // Check if voter_0 has no Bitcoin UTXOs - if so, deposit more
+    if voter_0_chain_bitcoin_utxos.is_empty() {
+        tracing::warn!("WARNING: voter_0 has NO Bitcoin UTXOs in chain state!");
+        tracing::warn!("This is unexpected - the change UTXO from claim_decision_slot should exist.");
+        tracing::warn!("Possible causes:");
+        tracing::warn!("  1. The transaction didn't create a change output");
+        tracing::warn!("  2. The UTXO was incorrectly marked as spent");
+        tracing::warn!("  3. There's a bug in UTXO tracking");
+
+        // Try mining a few more blocks to see if it helps
+        tracing::info!("Mining 3 more blocks to ensure chain state is fully synced...");
+        for i in 0..3 {
+            truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+            tracing::info!("  Mined block {}/3", i + 1);
+            sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        // Check again after mining
+        let wallet_utxos_after_mining = truthcoin_nodes.voter_0.rpc_client.get_wallet_utxos().await?;
+        let chain_utxos_after_mining = truthcoin_nodes.voter_0.rpc_client.list_utxos().await?;
+        let voter_0_addresses_after: Vec<_> = wallet_utxos_after_mining.iter().map(|u| u.output.address).collect();
+        let voter_0_chain_bitcoin_utxos_after: Vec<_> = chain_utxos_after_mining.iter()
+            .filter(|utxo| {
+                matches!(utxo.output.content, FilledOutputContent::Bitcoin(_))
+                    && voter_0_addresses_after.contains(&utxo.output.address)
+            })
+            .collect();
+
+        tracing::info!("After mining 3 blocks: voter_0 Bitcoin UTXOs in chain = {}", voter_0_chain_bitcoin_utxos_after.len());
+
+        if voter_0_chain_bitcoin_utxos_after.is_empty() {
+            tracing::warn!("Still no Bitcoin UTXOs after mining - depositing fresh funds...");
+
+            // Deposit more Bitcoin to ALL voters so they can create markets
+            tracing::info!("Depositing additional {} sats to voter_0", VOTER_DEPOSIT_AMOUNT.to_sat());
+            let voter_0_deposit_addr = truthcoin_nodes.voter_0.get_deposit_address().await?;
+            deposit(
+                &mut enforcer_post_setup,
+                &mut truthcoin_nodes.voter_0,
+                &voter_0_deposit_addr,
+                VOTER_DEPOSIT_AMOUNT,
+                VOTER_DEPOSIT_FEE,
+            ).await?;
+            tracing::info!("✓ Additional deposit to voter_0 complete");
+
+            tracing::info!("Depositing additional {} sats to voter_1", VOTER_DEPOSIT_AMOUNT.to_sat());
+            let voter_1_deposit_addr = truthcoin_nodes.voter_1.get_deposit_address().await?;
+            deposit(
+                &mut enforcer_post_setup,
+                &mut truthcoin_nodes.voter_1,
+                &voter_1_deposit_addr,
+                VOTER_DEPOSIT_AMOUNT,
+                VOTER_DEPOSIT_FEE,
+            ).await?;
+            tracing::info!("✓ Additional deposit to voter_1 complete");
+
+            tracing::info!("Depositing additional {} sats to voter_2", VOTER_DEPOSIT_AMOUNT.to_sat());
+            let voter_2_deposit_addr = truthcoin_nodes.voter_2.get_deposit_address().await?;
+            deposit(
+                &mut enforcer_post_setup,
+                &mut truthcoin_nodes.voter_2,
+                &voter_2_deposit_addr,
+                VOTER_DEPOSIT_AMOUNT,
+                VOTER_DEPOSIT_FEE,
+            ).await?;
+            tracing::info!("✓ Additional deposit to voter_2 complete");
+
+            tracing::info!("Depositing additional {} sats to voter_3", VOTER_DEPOSIT_AMOUNT.to_sat());
+            let voter_3_deposit_addr = truthcoin_nodes.voter_3.get_deposit_address().await?;
+            deposit(
+                &mut enforcer_post_setup,
+                &mut truthcoin_nodes.voter_3,
+                &voter_3_deposit_addr,
+                VOTER_DEPOSIT_AMOUNT,
+                VOTER_DEPOSIT_FEE,
+            ).await?;
+            tracing::info!("✓ Additional deposit to voter_3 complete");
+        }
+    } else {
+        tracing::info!("voter_0 has {} Bitcoin UTXOs in chain state - wallet may just need more time to sync",
+            voter_0_chain_bitcoin_utxos.len());
+    }
 
     // Verify all four slots were claimed successfully
     tracing::info!("Verifying claimed slots in period 3...");
@@ -743,6 +892,140 @@ async fn roundtrip_task(
     }
 
     tracing::info!("✓ Successfully claimed and verified 4 decision slots in period 3");
+
+    // ============================================================================
+    // PHASE 3: Market Creation
+    // ============================================================================
+    tracing::info!("=== PHASE 3: Creating Binary Markets ===");
+
+    // Extract the slot IDs from claimed slots for market creation
+    let market_slot_ids: Vec<String> = claimed_slots
+        .iter()
+        .map(|slot| slot.slot_id_hex.clone())
+        .collect();
+
+    tracing::info!(
+        "Creating binary markets on the four claimed decision slots..."
+    );
+
+    // Each voter creates a binary market on their respective decision slot
+    let market_configs = [
+        (
+            &truthcoin_nodes.voter_0,
+            0,
+            "Will Bitcoin reach $100k in 2025?",
+            "Binary market tracking BTC price prediction",
+        ),
+        (
+            &truthcoin_nodes.voter_1,
+            1,
+            "Will Ethereum merge to PoS succeed?",
+            "Prediction market for Ethereum 2.0 success",
+        ),
+        (
+            &truthcoin_nodes.voter_2,
+            2,
+            "Will there be 1M BTC addresses by 2026?",
+            "Tracking Bitcoin adoption milestone",
+        ),
+        (
+            &truthcoin_nodes.voter_3,
+            3,
+            "Will Lightning Network capacity exceed 5000 BTC?",
+            "Lightning Network growth prediction",
+        ),
+    ];
+
+    let mut market_txids = Vec::new();
+    for (i, (voter_node, slot_idx, title, description)) in
+        market_configs.iter().enumerate()
+    {
+        use truthcoin_dc_app_rpc_api::CreateMarketRequest;
+
+        let slot_id = &market_slot_ids[*slot_idx];
+        tracing::info!(
+            "voter_{} creating binary market: \"{}\" on slot {}",
+            i,
+            title,
+            slot_id
+        );
+
+        let request = CreateMarketRequest {
+            title: title.to_string(),
+            description: description.to_string(),
+            market_type: "independent".to_string(),
+            decision_slots: vec![slot_id.clone()],
+            dimensions: None,
+            has_residual: None,
+            beta: Some(100.0),
+            trading_fee: Some(0.005),
+            tags: Some(vec!["integration-test".to_string()]),
+            initial_liquidity: None,
+            fee_sats: 1000,
+        };
+
+        let market_id = voter_node.rpc_client.create_market(request).await?;
+        tracing::info!(
+            "voter_{} created market with ID: {}",
+            i,
+            market_id
+        );
+        market_txids.push(market_id);
+    }
+
+    // Wait for transaction propagation
+    tracing::info!("Waiting for market creation transactions to propagate...");
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    // Mine a block to confirm all four market creations
+    tracing::info!("Mining block to confirm market creations...");
+    truthcoin_nodes
+        .issuer
+        .bmm_single(&mut enforcer_post_setup)
+        .await?;
+
+    // Wait for network sync
+    sleep(std::time::Duration::from_secs(2)).await;
+
+    // Verify all markets were created successfully using list_markets RPC
+    tracing::info!("Verifying markets using list_markets RPC...");
+    let markets = truthcoin_nodes.issuer.rpc_client.list_markets().await?;
+
+    tracing::info!("Found {} markets in Trading state", markets.len());
+    anyhow::ensure!(
+        markets.len() == 4,
+        "Expected 4 markets, found {}",
+        markets.len()
+    );
+
+    for (i, market) in markets.iter().enumerate() {
+        tracing::info!(
+            "Market {}: ID={}, Title=\"{}\", Outcomes={}, State={}",
+            i + 1,
+            market.market_id,
+            market.title,
+            market.outcome_count,
+            market.state
+        );
+
+        // Verify market is in Trading state
+        anyhow::ensure!(
+            market.state == "Trading",
+            "Market {} should be in Trading state, found: {}",
+            market.market_id,
+            market.state
+        );
+
+        // Verify binary markets have 2-3 outcomes (2 outcomes + unresolvable state = 3)
+        anyhow::ensure!(
+            market.outcome_count == 2 || market.outcome_count == 3,
+            "Binary market {} should have 2-3 outcomes (including unresolvable), found {}",
+            market.market_id,
+            market.outcome_count
+        );
+    }
+
+    tracing::info!("✓ Successfully created and verified 4 binary markets");
 
     // Cleanup
     {

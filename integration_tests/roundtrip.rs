@@ -76,69 +76,10 @@ impl TruthcoinNodes {
             voter_5: setup_single("voter_5").await?,
             voter_6: setup_single("voter_6").await?,
         };
-        tracing::debug!(
-            issuer_addr = %res.issuer.net_addr(),
-            voter_0_addr = %res.voter_0.net_addr(),
-            "Connecting issuer to voter 0");
-        let () = res
-            .issuer
-            .rpc_client
-            .connect_peer(res.voter_0.net_addr().into())
-            .await?;
-        tracing::debug!(
-            issuer_addr = %res.issuer.net_addr(),
-            voter_1_addr = %res.voter_1.net_addr(),
-            "Connecting issuer to voter 1");
-        let () = res
-            .issuer
-            .rpc_client
-            .connect_peer(res.voter_1.net_addr().into())
-            .await?;
-        tracing::debug!(
-            issuer_addr = %res.issuer.net_addr(),
-            voter_2_addr = %res.voter_2.net_addr(),
-            "Connecting issuer to voter 2");
-        let () = res
-            .issuer
-            .rpc_client
-            .connect_peer(res.voter_2.net_addr().into())
-            .await?;
-        tracing::debug!(
-            issuer_addr = %res.issuer.net_addr(),
-            voter_3_addr = %res.voter_3.net_addr(),
-            "Connecting issuer to voter 3");
-        let () = res
-            .issuer
-            .rpc_client
-            .connect_peer(res.voter_3.net_addr().into())
-            .await?;
-        tracing::debug!(
-            issuer_addr = %res.issuer.net_addr(),
-            voter_4_addr = %res.voter_4.net_addr(),
-            "Connecting issuer to voter 4");
-        let () = res
-            .issuer
-            .rpc_client
-            .connect_peer(res.voter_4.net_addr().into())
-            .await?;
-        tracing::debug!(
-            issuer_addr = %res.issuer.net_addr(),
-            voter_5_addr = %res.voter_5.net_addr(),
-            "Connecting issuer to voter 5");
-        let () = res
-            .issuer
-            .rpc_client
-            .connect_peer(res.voter_5.net_addr().into())
-            .await?;
-        tracing::debug!(
-            issuer_addr = %res.issuer.net_addr(),
-            voter_6_addr = %res.voter_6.net_addr(),
-            "Connecting issuer to voter 6");
-        let () = res
-            .issuer
-            .rpc_client
-            .connect_peer(res.voter_6.net_addr().into())
-            .await?;
+        for voter in [&res.voter_0, &res.voter_1, &res.voter_2, &res.voter_3, &res.voter_4, &res.voter_5, &res.voter_6] {
+            res.issuer.rpc_client.connect_peer(voter.net_addr().into()).await?;
+        }
+        tracing::debug!("Connected 8 nodes in P2P network");
         Ok(res)
     }
 }
@@ -194,30 +135,20 @@ async fn roundtrip_task(
     let (mut enforcer_post_setup, mut truthcoin_nodes) =
         setup(&bin_paths, res_tx.clone()).await?;
 
-    tracing::info!("Generating issuer verifying key");
     let issuer_vk = truthcoin_nodes
         .issuer
         .rpc_client
         .get_new_verifying_key()
         .await?;
 
-    tracing::info!(
-        "Creating genesis block with initial Votecoin supply of {} units",
-        INITIAL_VOTECOIN_SUPPLY
-    );
-    // Mine a genesis block that will create the initial Votecoin supply
-    // This block should contain a coinbase output with all Votecoin supply to the issuer
     let _issuer_addr =
         truthcoin_nodes.issuer.rpc_client.get_new_address().await?;
 
-    // Mine the genesis block - this should automatically create the Votecoin supply
-    // The node should be configured to mint the initial supply in the first block
     truthcoin_nodes
         .issuer
         .bmm_single(&mut enforcer_post_setup)
         .await?;
 
-    // Verify the initial supply was created correctly
     let utxos = truthcoin_nodes.issuer.rpc_client.get_wallet_utxos().await?;
     let total_votecoin: u32 = utxos
         .iter()
@@ -229,12 +160,6 @@ async fn roundtrip_task(
         INITIAL_VOTECOIN_SUPPLY,
         total_votecoin
     );
-    tracing::info!(
-        "Verified initial Votecoin supply: {} units",
-        total_votecoin
-    );
-
-    tracing::info!("Setting up voter addresses");
     let voters = [
         &truthcoin_nodes.voter_0,
         &truthcoin_nodes.voter_1,
@@ -252,119 +177,29 @@ async fn roundtrip_task(
     let [voter_addr_0, voter_addr_1, voter_addr_2, voter_addr_3, voter_addr_4, voter_addr_5, voter_addr_6]: [Address; 7] =
         voter_addrs.try_into().unwrap();
 
-    tracing::info!("Distributing Votecoin to voters");
-
-    // Detailed debug for first transfer only
     let voter_addresses = [voter_addr_0, voter_addr_1, voter_addr_2, voter_addr_3, voter_addr_4, voter_addr_5, voter_addr_6];
 
-    for (i, &voter_addr) in voter_addresses.iter().enumerate() {
-        tracing::info!("=== DEBUG: Transfer {} - Sending {} Votecoin to voter_{} ({}) ===",
-            i + 1, VOTER_ALLOCATION, i, voter_addr);
+    for &voter_addr in &voter_addresses {
+        truthcoin_nodes
+            .issuer
+            .rpc_client
+            .transfer_votecoin(voter_addr, VOTER_ALLOCATION, 0, None)
+            .await?;
 
-        // Only do detailed debugging for the first transfer
-        if i == 0 {
-            // Check issuer's UTXOs before transfer
-            let utxos_before = truthcoin_nodes.issuer.rpc_client.get_wallet_utxos().await?;
-            let votecoin_before: u32 = utxos_before
-                .iter()
-                .filter_map(|utxo| utxo.output.content.votecoin())
-                .sum();
-            tracing::info!("DEBUG: Issuer has {} Votecoin before transfer", votecoin_before);
+        truthcoin_nodes
+            .issuer
+            .bmm_single(&mut enforcer_post_setup)
+            .await?;
 
-            // Create the transfer transaction
-            let txid: Txid = truthcoin_nodes
-                .issuer
-                .rpc_client
-                .transfer_votecoin(voter_addr, VOTER_ALLOCATION, 0, None)
-                .await?;
-            tracing::info!("DEBUG: Created transaction {}", txid);
-
-            // Check if transaction is in mempool
-            let tx_in_mempool = truthcoin_nodes.issuer.rpc_client.get_transaction(txid).await?;
-            tracing::info!("DEBUG: Transaction in mempool: {:?}", tx_in_mempool.is_some());
-            if let Some(tx) = &tx_in_mempool {
-                tracing::info!("DEBUG: Transaction has {} outputs", tx.outputs.len());
-                for (j, output) in tx.outputs.iter().enumerate() {
-                    match &output.content {
-                        OutputContent::Bitcoin(v) => tracing::info!("  Output {}: {} sats to {}", j, v.0.to_sat(), output.address),
-                        OutputContent::Votecoin(vc) => tracing::info!("  Output {}: {} Votecoin to {}", j, vc, output.address),
-                        OutputContent::Withdrawal(w) => tracing::info!("  Output {}: Withdrawal {} sats to {}", j, w.value.to_sat(), output.address),
-                    }
-                }
-            }
-
-            // Mine the transaction into a block
-            tracing::info!("DEBUG: Mining block to include transaction...");
-            let height_before = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
-            truthcoin_nodes
-                .issuer
-                .bmm_single(&mut enforcer_post_setup)
-                .await?;
-            let height_after = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
-            tracing::info!("DEBUG: Mined block, height {} -> {}", height_before, height_after);
-
-            // Check if transaction is now confirmed
-            let tx_info = truthcoin_nodes.issuer.rpc_client.get_transaction_info(txid).await?;
-            tracing::info!("DEBUG: Transaction info: {:?}", tx_info);
-
-            // Check issuer's UTXOs after mining
-            let utxos_after = truthcoin_nodes.issuer.rpc_client.get_wallet_utxos().await?;
-            let votecoin_after: u32 = utxos_after
-                .iter()
-                .filter_map(|utxo| utxo.output.content.votecoin())
-                .sum();
-            tracing::info!("DEBUG: Issuer has {} Votecoin after mining (expected: {})",
-                votecoin_after, votecoin_before.saturating_sub(VOTER_ALLOCATION));
-
-            // Check ALL UTXOs on the blockchain state (not just wallet)
-            tracing::info!("DEBUG: Checking blockchain state for all votecoin UTXOs...");
-            let all_utxos_issuer = truthcoin_nodes.issuer.rpc_client.list_utxos().await?;
-            let mut votecoin_by_address: HashMap<Address, u32> = HashMap::new();
-            for utxo in &all_utxos_issuer {
-                if let Some(vc) = utxo.output.content.votecoin() {
-                    *votecoin_by_address.entry(utxo.output.address).or_default() += vc;
-                }
-            }
-            tracing::info!("DEBUG: Blockchain state (from issuer view) has {} addresses with votecoin:", votecoin_by_address.len());
-            for (addr, vc) in &votecoin_by_address {
-                tracing::info!("  {}: {} Votecoin", addr, vc);
-            }
-
-            // Check voter_0's wallet
-            let voter_0_utxos = truthcoin_nodes.voter_0.rpc_client.get_wallet_utxos().await?;
-            let voter_0_votecoin: u32 = voter_0_utxos
-                .iter()
-                .filter_map(|utxo| utxo.output.content.votecoin())
-                .sum();
-            tracing::info!("DEBUG: voter_0 wallet has {} Votecoin (expected: {})", voter_0_votecoin, VOTER_ALLOCATION);
-        } else {
-            // For other transfers, just create transaction and mine the block
-            let txid: Txid = truthcoin_nodes
-                .issuer
-                .rpc_client
-                .transfer_votecoin(voter_addr, VOTER_ALLOCATION, 0, None)
-                .await?;
-            tracing::info!("DEBUG: Created transaction {}", txid);
-
-            truthcoin_nodes
-                .issuer
-                .bmm_single(&mut enforcer_post_setup)
-                .await?;
-        }
-
-        // Wait for network sync
-        tracing::info!("DEBUG: Waiting 2s for network sync...");
         sleep(std::time::Duration::from_secs(2)).await;
     }
 
-    tracing::info!("Signing vote call message");
     let vote_call_msg_sig: Signature = truthcoin_nodes
         .issuer
         .rpc_client
         .sign_arbitrary_msg(issuer_vk, VOTE_CALL_MSG.to_owned())
         .await?;
 
-    tracing::info!("Verifying vote call message signature");
     for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3, &truthcoin_nodes.voter_4, &truthcoin_nodes.voter_5, &truthcoin_nodes.voter_6] {
         anyhow::ensure!(
             voter
@@ -379,110 +214,29 @@ async fn roundtrip_task(
         )
     }
 
-    tracing::info!("Taking snapshot of Votecoin holders");
-
-    // First, verify votecoin balances using RPC from each voter's perspective
-    tracing::info!("=== Verifying Votecoin Distribution via RPCs ===");
-
     for (i, (&voter_addr, voter)) in voter_addresses.iter().zip(&voters).enumerate() {
-        // Check voter's balance from their own perspective
-        let balance_rpc = voter
-            .rpc_client
-            .get_votecoin_balance(voter_addr)
-            .await?;
-        tracing::info!("voter_{} RPC balance (from voter_{}): {} Votecoin", i, i, balance_rpc);
-
-        // Check voter's balance from issuer's perspective
-        let balance_issuer = truthcoin_nodes
-            .issuer
-            .rpc_client
-            .get_votecoin_balance(voter_addr)
-            .await?;
-        tracing::info!("voter_{} RPC balance (from issuer): {} Votecoin", i, balance_issuer);
-
-        // Verify both perspectives agree
+        let balance = voter.rpc_client.get_votecoin_balance(voter_addr).await?;
         anyhow::ensure!(
-            balance_rpc == VOTER_ALLOCATION,
-            "voter_{} self-reported balance {} != expected {}",
+            balance == VOTER_ALLOCATION,
+            "voter_{} balance {} != expected {}",
             i,
-            balance_rpc,
-            VOTER_ALLOCATION
-        );
-        anyhow::ensure!(
-            balance_issuer == VOTER_ALLOCATION,
-            "voter_{} issuer-view balance {} != expected {}",
-            i,
-            balance_issuer,
+            balance,
             VOTER_ALLOCATION
         );
     }
 
-    // Check all UTXOs across all nodes to see where Votecoin actually is
-    tracing::info!("=== Dumping all UTXOs across all nodes ===");
-
-    // Helper function to get and log UTXOs for a node
-    let get_utxo_info = |name: &str, utxos: &[PointedOutput<FilledOutputContent>]| -> u32 {
-        let total_votecoin: u32 = utxos
-            .iter()
-            .filter_map(|utxo| utxo.output.content.votecoin())
-            .sum();
-        tracing::info!("{}: {} UTXOs, {} total Votecoin", name, utxos.len(), total_votecoin);
-        for utxo in utxos {
-            if let Some(votecoin_amount) = utxo.output.content.votecoin() {
-                tracing::info!("  UTXO: address={}, votecoin={}", utxo.output.address, votecoin_amount);
-            }
-        }
-        total_votecoin
-    };
-
-    // Issuer UTXOs
-    let issuer_utxos = truthcoin_nodes.issuer.rpc_client.get_wallet_utxos().await?;
-    let issuer_total_votecoin = get_utxo_info("issuer", &issuer_utxos);
-
-    // Voter UTXOs
-    let voter_totals: Vec<u32> = {
-        let mut totals = Vec::new();
-        for (i, voter) in voters.iter().enumerate() {
-            let utxos = voter.rpc_client.get_wallet_utxos().await?;
-            totals.push(get_utxo_info(&format!("voter_{}", i), &utxos));
-        }
-        totals
-    };
-
-    tracing::info!("✓ Votecoin transfers working correctly!");
-    let expected = std::iter::repeat(VOTER_ALLOCATION).take(7)
-        .map(|v| v.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    tracing::info!("Expected: {}, issuer remainder", expected);
-
-    let actual = voter_totals.iter()
-        .map(|v| v.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    tracing::info!("Actual: {}, issuer={}", actual, issuer_total_votecoin);
-
-    // Now build the snapshot using list_utxos from issuer
     let vote_weights: HashMap<Address, u32> = {
         let mut weights = HashMap::new();
         let utxos = truthcoin_nodes.issuer.rpc_client.list_utxos().await?;
-        tracing::info!("Building snapshot from issuer's UTXO set ({} UTXOs)", utxos.len());
         for utxo in utxos {
             if let Some(votecoin_amount) = utxo.output.content.votecoin() {
-                tracing::debug!("  UTXO: address={}, votecoin={}", utxo.output.address, votecoin_amount);
-                *weights.entry(utxo.output.address).or_default() +=
-                    votecoin_amount;
+                *weights.entry(utxo.output.address).or_default() += votecoin_amount;
             }
-        }
-        tracing::info!("Snapshot contains {} addresses with votecoin", weights.len());
-        for (addr, weight) in &weights {
-            tracing::info!("  {}: {} Votecoin", addr, weight);
         }
         weights
     };
     anyhow::ensure!(vote_weights.len() >= 7, "Expected at least 7 voters in snapshot, found {}", vote_weights.len());
 
-    tracing::info!("Signing votes");
     let vote_auth_0 = truthcoin_nodes
         .voter_0
         .rpc_client
@@ -493,8 +247,6 @@ async fn roundtrip_task(
         .rpc_client
         .sign_arbitrary_msg_as_addr(voter_addr_1, VOTE_NO_MSG.to_owned())
         .await?;
-
-    tracing::info!("Verifying votes");
     let (total_yes, total_no) = {
         let (mut total_yes, mut total_no) = (0, 0);
         let mut vote_weights = vote_weights;
@@ -535,23 +287,9 @@ async fn roundtrip_task(
     anyhow::ensure!(total_yes == VOTER_ALLOCATION);
     anyhow::ensure!(total_no == VOTER_ALLOCATION);
 
-    tracing::info!(
-        "Vote test completed successfully - Votecoin voting system working"
-    );
-
-    // Verify all nodes are at the same block height
-    tracing::info!("=== Verifying Block Height Synchronization ===");
     let issuer_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
-
-    let mut voter_heights = Vec::new();
     for (i, voter) in voters.iter().enumerate() {
         let height = voter.rpc_client.getblockcount().await?;
-        voter_heights.push(height);
-        tracing::info!("  - voter_{}: {}", i, height);
-    }
-
-    // Check if all voter heights match the issuer height
-    for (i, &height) in voter_heights.iter().enumerate() {
         anyhow::ensure!(
             issuer_height == height,
             "Block height mismatch: issuer={}, voter_{}={}",
@@ -559,20 +297,11 @@ async fn roundtrip_task(
         );
     }
 
-    tracing::info!("✓ All nodes synchronized at block height: {}", issuer_height);
-    tracing::info!("  - issuer: {}", issuer_height);
+    tracing::info!("✓ Phase 1: Votecoin distribution and voting verified");
 
-    // ============================================================================
-    // PHASE 1.5: Fund Voters with Bitcoin for Transaction Fees
-    // ============================================================================
-    tracing::info!("=== PHASE 1.5: Depositing Bitcoin to Voters ===");
+    const VOTER_DEPOSIT_AMOUNT: bitcoin::Amount = bitcoin::Amount::from_sat(5_000_000);
+    const VOTER_DEPOSIT_FEE: bitcoin::Amount = bitcoin::Amount::from_sat(500_000);
 
-    // Define smaller deposit amounts for voters (they just need to pay fees)
-    const VOTER_DEPOSIT_AMOUNT: bitcoin::Amount = bitcoin::Amount::from_sat(5_000_000); // 5M sats = 0.05 BTC
-    const VOTER_DEPOSIT_FEE: bitcoin::Amount = bitcoin::Amount::from_sat(500_000); // 0.5M sats
-
-    // Deposit to voter_0
-    tracing::info!("Depositing {} sats to voter_0", VOTER_DEPOSIT_AMOUNT.to_sat());
     let voter_0_deposit_address = truthcoin_nodes.voter_0.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
@@ -581,11 +310,8 @@ async fn roundtrip_task(
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
     ).await?;
-    tracing::info!("✓ Deposited to voter_0");
     sleep(std::time::Duration::from_secs(1)).await;
 
-    // Deposit to voter_1
-    tracing::info!("Depositing {} sats to voter_1", VOTER_DEPOSIT_AMOUNT.to_sat());
     let voter_1_deposit_address = truthcoin_nodes.voter_1.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
@@ -594,11 +320,8 @@ async fn roundtrip_task(
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
     ).await?;
-    tracing::info!("✓ Deposited to voter_1");
     sleep(std::time::Duration::from_secs(1)).await;
 
-    // Deposit to voter_2
-    tracing::info!("Depositing {} sats to voter_2", VOTER_DEPOSIT_AMOUNT.to_sat());
     let voter_2_deposit_address = truthcoin_nodes.voter_2.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
@@ -607,11 +330,8 @@ async fn roundtrip_task(
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
     ).await?;
-    tracing::info!("✓ Deposited to voter_2");
     sleep(std::time::Duration::from_secs(1)).await;
 
-    // Deposit to voter_3
-    tracing::info!("Depositing {} sats to voter_3", VOTER_DEPOSIT_AMOUNT.to_sat());
     let voter_3_deposit_address = truthcoin_nodes.voter_3.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
@@ -620,46 +340,15 @@ async fn roundtrip_task(
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
     ).await?;
-    tracing::info!("✓ Deposited to voter_3");
     sleep(std::time::Duration::from_secs(1)).await;
 
-    // Verify deposits were received
-    let voter_0_balance = truthcoin_nodes.voter_0.rpc_client.bitcoin_balance().await?;
-    tracing::info!("voter_0 balance: {} sats", voter_0_balance.total);
-    anyhow::ensure!(voter_0_balance.total > bitcoin::Amount::ZERO, "voter_0 should have positive balance after deposit");
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+        let balance = voter.rpc_client.bitcoin_balance().await?;
+        anyhow::ensure!(balance.total > bitcoin::Amount::ZERO, "voter should have positive balance after deposit");
+    }
 
-    let voter_1_balance = truthcoin_nodes.voter_1.rpc_client.bitcoin_balance().await?;
-    tracing::info!("voter_1 balance: {} sats", voter_1_balance.total);
-    anyhow::ensure!(voter_1_balance.total > bitcoin::Amount::ZERO, "voter_1 should have positive balance after deposit");
-
-    let voter_2_balance = truthcoin_nodes.voter_2.rpc_client.bitcoin_balance().await?;
-    tracing::info!("voter_2 balance: {} sats", voter_2_balance.total);
-    anyhow::ensure!(voter_2_balance.total > bitcoin::Amount::ZERO, "voter_2 should have positive balance after deposit");
-
-    let voter_3_balance = truthcoin_nodes.voter_3.rpc_client.bitcoin_balance().await?;
-    tracing::info!("voter_3 balance: {} sats", voter_3_balance.total);
-    anyhow::ensure!(voter_3_balance.total > bitcoin::Amount::ZERO, "voter_3 should have positive balance after deposit");
-
-    tracing::info!("✓ All voters funded with Bitcoin for transaction fees");
-
-    // ============================================================================
-    // PHASE 2: Decision Slot Creation
-    // ============================================================================
-    tracing::info!("=== PHASE 2: Decision Slot Claiming ===");
-
-    // Check current block height
-    let current_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
-    tracing::info!("Current block height: {}", current_height);
-
-    // In testing mode with 10 blocks per period:
-    // - Period 0: blocks 0-9
-    // - Period 1: blocks 10-19
-    // - Period 2: blocks 20-29
-    // - Period 3: blocks 30-39 (target for claiming)
-    // Slots in period 3 are claimable now (from the current period)
-
-    // Four different voters claim four different decision slots in period 3
-    tracing::info!("Having four voters claim decision slots in period 3...");
+    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    sleep(std::time::Duration::from_secs(1)).await;
 
     let slot_claims = [
         (voter_addr_0, 0, "Decision 1: Will Bitcoin reach $100k in 2025?"),
@@ -668,10 +357,7 @@ async fn roundtrip_task(
         (voter_addr_3, 3, "Decision 4: Will Lightning Network capacity exceed 5000 BTC?"),
     ];
 
-    let mut claim_txids = Vec::new();
-    for (i, (voter_addr, slot_index, question)) in slot_claims.iter().enumerate() {
-        tracing::info!("voter_{} claiming slot {} in period 3: \"{}\"", i, slot_index, question);
-
+    for (i, (_voter_addr, slot_index, question)) in slot_claims.iter().enumerate() {
         let voter_node = match i {
             0 => &truthcoin_nodes.voter_0,
             1 => &truthcoin_nodes.voter_1,
@@ -680,85 +366,52 @@ async fn roundtrip_task(
             _ => unreachable!(),
         };
 
-        let txid = voter_node
+        voter_node
             .rpc_client
             .claim_decision_slot(
-                3, // period_index
-                *slot_index, // slot_index
-                true, // is_standard
-                false, // is_scaled (binary decision)
+                3,
+                *slot_index,
+                true,
+                false,
                 question.to_string(),
-                None, // min (not scaled)
-                None, // max (not scaled)
-                1000, // fee_sats
+                None,
+                None,
+                1000,
             )
             .await?;
-
-        tracing::info!("voter_{} claim transaction: {}", i, txid);
-        claim_txids.push(txid);
     }
 
-    // Wait for transaction propagation to issuer's mempool
-    tracing::info!("Waiting for transaction propagation...");
     sleep(std::time::Duration::from_millis(500)).await;
 
-    // Mine a block to confirm all four slot claims
-    tracing::info!("Mining block to confirm all four slot claims...");
     truthcoin_nodes
         .issuer
         .bmm_single(&mut enforcer_post_setup)
         .await?;
 
-    // Wait for network sync - first ensure all voters receive the block via P2P
     sleep(std::time::Duration::from_secs(2)).await;
 
-    tracing::info!("Waiting for block propagation to all voters...");
     let issuer_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
-    tracing::info!("Issuer block height: {}", issuer_height);
-
-    // Wait for all voters to receive the block (check block height matches issuer)
     for (i, voter) in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3].iter().enumerate() {
         let mut block_received = false;
         for attempt in 0..20 {
             let voter_height = voter.rpc_client.getblockcount().await?;
             if voter_height >= issuer_height {
-                tracing::info!("voter_{} received block: height={}", i, voter_height);
                 block_received = true;
                 break;
             }
-            tracing::debug!("voter_{} waiting for block (height={}, expected={}), attempt {}/20",
-                i, voter_height, issuer_height, attempt + 1);
             sleep(std::time::Duration::from_millis(500)).await;
         }
         anyhow::ensure!(block_received, "voter_{} did not receive block after 10 seconds", i);
     }
 
-    // Diagnostic: Check what UTXOs exist for voter_0
-    tracing::info!("=== DIAGNOSTIC: Checking voter_0 UTXOs ===");
-
-    // Get wallet UTXOs (what the wallet thinks it owns)
-    let wallet_utxos = truthcoin_nodes.voter_0.rpc_client.get_wallet_utxos().await?;
-    tracing::info!("voter_0 wallet UTXOs count: {}", wallet_utxos.len());
-    for (idx, utxo) in wallet_utxos.iter().enumerate() {
-        match &utxo.output.content {
-            FilledOutputContent::Bitcoin(bitcoin_content) => {
-                tracing::info!("  Wallet UTXO {}: {} sats at address {}, outpoint: {:?}",
-                    idx, bitcoin_content.0.to_sat(), utxo.output.address, utxo.outpoint);
-            }
-            FilledOutputContent::Votecoin(vc) => {
-                tracing::info!("  Wallet UTXO {}: {} Votecoin at address {}", idx, vc, utxo.output.address);
-            }
-            FilledOutputContent::BitcoinWithdrawal { .. } => {
-                tracing::info!("  Wallet UTXO {}: Withdrawal", idx);
-            }
-        }
+    // Manual wallet refresh for multi-node test environment (8 nodes on one machine)
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+        voter.rpc_client.refresh_wallet().await?;
     }
 
-    // Get chain state UTXOs (all UTXOs from blockchain perspective)
+    // Verify voter_0 has Bitcoin UTXOs after wallet refresh
+    let wallet_utxos = truthcoin_nodes.voter_0.rpc_client.get_wallet_utxos().await?;
     let chain_utxos = truthcoin_nodes.voter_0.rpc_client.list_utxos().await?;
-    tracing::info!("voter_0 chain state total UTXOs: {}", chain_utxos.len());
-
-    // Filter to just Bitcoin UTXOs owned by voter_0's addresses
     let voter_0_addresses: Vec<_> = wallet_utxos.iter().map(|u| u.output.address).collect();
     let voter_0_chain_bitcoin_utxos: Vec<_> = chain_utxos.iter()
         .filter(|utxo| {
@@ -767,148 +420,36 @@ async fn roundtrip_task(
         })
         .collect();
 
-    tracing::info!("voter_0 Bitcoin UTXOs in chain state owned by voter_0: {}", voter_0_chain_bitcoin_utxos.len());
-    for (idx, utxo) in voter_0_chain_bitcoin_utxos.iter().enumerate() {
-        if let FilledOutputContent::Bitcoin(bitcoin_content) = &utxo.output.content {
-            tracing::info!("  Chain UTXO {}: {} sats at address {}, outpoint: {:?}",
-                idx, bitcoin_content.0.to_sat(), utxo.output.address, utxo.outpoint);
-        }
-    }
+    anyhow::ensure!(
+        !voter_0_chain_bitcoin_utxos.is_empty(),
+        "voter_0 has no Bitcoin UTXOs after refresh_wallet"
+    );
 
-    let balance = truthcoin_nodes.voter_0.rpc_client.bitcoin_balance().await?;
-    tracing::info!("voter_0 balance: total={} sats, available={} sats", balance.total, balance.available);
-
-    // Check if voter_0 has no Bitcoin UTXOs - if so, deposit more
-    if voter_0_chain_bitcoin_utxos.is_empty() {
-        tracing::warn!("WARNING: voter_0 has NO Bitcoin UTXOs in chain state!");
-        tracing::warn!("This is unexpected - the change UTXO from claim_decision_slot should exist.");
-        tracing::warn!("Possible causes:");
-        tracing::warn!("  1. The transaction didn't create a change output");
-        tracing::warn!("  2. The UTXO was incorrectly marked as spent");
-        tracing::warn!("  3. There's a bug in UTXO tracking");
-
-        // Try mining a few more blocks to see if it helps
-        tracing::info!("Mining 3 more blocks to ensure chain state is fully synced...");
-        for i in 0..3 {
-            truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
-            tracing::info!("  Mined block {}/3", i + 1);
-            sleep(std::time::Duration::from_secs(1)).await;
-        }
-
-        // Check again after mining
-        let wallet_utxos_after_mining = truthcoin_nodes.voter_0.rpc_client.get_wallet_utxos().await?;
-        let chain_utxos_after_mining = truthcoin_nodes.voter_0.rpc_client.list_utxos().await?;
-        let voter_0_addresses_after: Vec<_> = wallet_utxos_after_mining.iter().map(|u| u.output.address).collect();
-        let voter_0_chain_bitcoin_utxos_after: Vec<_> = chain_utxos_after_mining.iter()
-            .filter(|utxo| {
-                matches!(utxo.output.content, FilledOutputContent::Bitcoin(_))
-                    && voter_0_addresses_after.contains(&utxo.output.address)
-            })
-            .collect();
-
-        tracing::info!("After mining 3 blocks: voter_0 Bitcoin UTXOs in chain = {}", voter_0_chain_bitcoin_utxos_after.len());
-
-        if voter_0_chain_bitcoin_utxos_after.is_empty() {
-            tracing::warn!("Still no Bitcoin UTXOs after mining - depositing fresh funds...");
-
-            // Deposit more Bitcoin to ALL voters so they can create markets
-            tracing::info!("Depositing additional {} sats to voter_0", VOTER_DEPOSIT_AMOUNT.to_sat());
-            let voter_0_deposit_addr = truthcoin_nodes.voter_0.get_deposit_address().await?;
-            deposit(
-                &mut enforcer_post_setup,
-                &mut truthcoin_nodes.voter_0,
-                &voter_0_deposit_addr,
-                VOTER_DEPOSIT_AMOUNT,
-                VOTER_DEPOSIT_FEE,
-            ).await?;
-            tracing::info!("✓ Additional deposit to voter_0 complete");
-
-            tracing::info!("Depositing additional {} sats to voter_1", VOTER_DEPOSIT_AMOUNT.to_sat());
-            let voter_1_deposit_addr = truthcoin_nodes.voter_1.get_deposit_address().await?;
-            deposit(
-                &mut enforcer_post_setup,
-                &mut truthcoin_nodes.voter_1,
-                &voter_1_deposit_addr,
-                VOTER_DEPOSIT_AMOUNT,
-                VOTER_DEPOSIT_FEE,
-            ).await?;
-            tracing::info!("✓ Additional deposit to voter_1 complete");
-
-            tracing::info!("Depositing additional {} sats to voter_2", VOTER_DEPOSIT_AMOUNT.to_sat());
-            let voter_2_deposit_addr = truthcoin_nodes.voter_2.get_deposit_address().await?;
-            deposit(
-                &mut enforcer_post_setup,
-                &mut truthcoin_nodes.voter_2,
-                &voter_2_deposit_addr,
-                VOTER_DEPOSIT_AMOUNT,
-                VOTER_DEPOSIT_FEE,
-            ).await?;
-            tracing::info!("✓ Additional deposit to voter_2 complete");
-
-            tracing::info!("Depositing additional {} sats to voter_3", VOTER_DEPOSIT_AMOUNT.to_sat());
-            let voter_3_deposit_addr = truthcoin_nodes.voter_3.get_deposit_address().await?;
-            deposit(
-                &mut enforcer_post_setup,
-                &mut truthcoin_nodes.voter_3,
-                &voter_3_deposit_addr,
-                VOTER_DEPOSIT_AMOUNT,
-                VOTER_DEPOSIT_FEE,
-            ).await?;
-            tracing::info!("✓ Additional deposit to voter_3 complete");
-        }
-    } else {
-        tracing::info!("voter_0 has {} Bitcoin UTXOs in chain state - wallet may just need more time to sync",
-            voter_0_chain_bitcoin_utxos.len());
-    }
-
-    // Verify all four slots were claimed successfully
-    tracing::info!("Verifying claimed slots in period 3...");
     let claimed_slots = truthcoin_nodes
         .issuer
         .rpc_client
         .get_claimed_slots_in_period(3)
         .await?;
 
-    tracing::info!("Found {} claimed slots in period 3", claimed_slots.len());
     anyhow::ensure!(
         claimed_slots.len() == 4,
         "Expected 4 claimed slots in period 3, found {}",
         claimed_slots.len()
     );
 
+    tracing::info!("✓ Phase 2: Claimed 4 decision slots:");
     for (i, slot) in claimed_slots.iter().enumerate() {
-        tracing::info!("Claimed slot {}: {} (Period {}, Index {})",
+        tracing::info!("  {}. {} ({})",
             i + 1,
-            slot.slot_id_hex,
-            slot.period_index,
-            slot.slot_index
-        );
-        tracing::info!("  Question preview: {}", slot.question_preview);
-        tracing::info!("  Market maker: {}", slot.market_maker_pubkey_hash);
-        tracing::info!("  Type: {} | {}",
-            if slot.is_standard { "Standard" } else { "Non-Standard" },
-            if slot.is_scaled { "Scaled" } else { "Binary" }
+            slot.question_preview,
+            if slot.is_scaled { "scaled" } else { "binary" }
         );
     }
 
-    tracing::info!("✓ Successfully claimed and verified 4 decision slots in period 3");
-
-    // ============================================================================
-    // PHASE 3: Market Creation
-    // ============================================================================
-    tracing::info!("=== PHASE 3: Creating Binary Markets ===");
-
-    // Extract the slot IDs from claimed slots for market creation
     let market_slot_ids: Vec<String> = claimed_slots
         .iter()
         .map(|slot| slot.slot_id_hex.clone())
         .collect();
-
-    tracing::info!(
-        "Creating binary markets on the four claimed decision slots..."
-    );
-
-    // Each voter creates a binary market on their respective decision slot
     let market_configs = [
         (
             &truthcoin_nodes.voter_0,
@@ -943,13 +484,6 @@ async fn roundtrip_task(
         use truthcoin_dc_app_rpc_api::CreateMarketRequest;
 
         let slot_id = &market_slot_ids[*slot_idx];
-        tracing::info!(
-            "voter_{} creating binary market: \"{}\" on slot {}",
-            i,
-            title,
-            slot_id
-        );
-
         let request = CreateMarketRequest {
             title: title.to_string(),
             description: description.to_string(),
@@ -965,67 +499,48 @@ async fn roundtrip_task(
         };
 
         let market_id = voter_node.rpc_client.create_market(request).await?;
-        tracing::info!(
-            "voter_{} created market with ID: {}",
-            i,
-            market_id
-        );
         market_txids.push(market_id);
     }
 
-    // Wait for transaction propagation
-    tracing::info!("Waiting for market creation transactions to propagate...");
     sleep(std::time::Duration::from_millis(500)).await;
 
-    // Mine a block to confirm all four market creations
-    tracing::info!("Mining block to confirm market creations...");
     truthcoin_nodes
         .issuer
         .bmm_single(&mut enforcer_post_setup)
         .await?;
 
-    // Wait for network sync
     sleep(std::time::Duration::from_secs(2)).await;
 
-    // Verify all markets were created successfully using list_markets RPC
-    tracing::info!("Verifying markets using list_markets RPC...");
     let markets = truthcoin_nodes.issuer.rpc_client.list_markets().await?;
-
-    tracing::info!("Found {} markets in Trading state", markets.len());
     anyhow::ensure!(
         markets.len() == 4,
         "Expected 4 markets, found {}",
         markets.len()
     );
 
-    for (i, market) in markets.iter().enumerate() {
-        tracing::info!(
-            "Market {}: ID={}, Title=\"{}\", Outcomes={}, State={}",
-            i + 1,
-            market.market_id,
-            market.title,
-            market.outcome_count,
-            market.state
-        );
-
-        // Verify market is in Trading state
+    for market in &markets {
         anyhow::ensure!(
             market.state == "Trading",
             "Market {} should be in Trading state, found: {}",
             market.market_id,
             market.state
         );
-
-        // Verify binary markets have 2-3 outcomes (2 outcomes + unresolvable state = 3)
         anyhow::ensure!(
             market.outcome_count == 2 || market.outcome_count == 3,
-            "Binary market {} should have 2-3 outcomes (including unresolvable), found {}",
+            "Binary market {} should have 2-3 outcomes, found {}",
             market.market_id,
             market.outcome_count
         );
     }
 
-    tracing::info!("✓ Successfully created and verified 4 binary markets");
+    tracing::info!("✓ Phase 3: Created 4 binary markets:");
+    for (i, market) in markets.iter().enumerate() {
+        tracing::info!("  {}. {} ({})",
+            i + 1,
+            market.title,
+            market.state
+        );
+    }
 
     // Cleanup
     {

@@ -784,4 +784,11 @@ pub trait Rpc {
     async fn get_current_voting_stats(
         &self,
     ) -> RpcResult<Option<VotingPeriodDetails>>;
+
+    /// Refresh wallet UTXOs from chain state
+    /// Manually synchronizes wallet database with current chain state
+    /// Useful for test environments to sync wallet after mining
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "refresh_wallet")]
+    async fn refresh_wallet(&self) -> RpcResult<()>;
 }

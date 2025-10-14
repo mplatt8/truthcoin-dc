@@ -843,8 +843,12 @@ impl FilledTransaction {
                         FilledOutputContent::Votecoin(value)
                     }
                     OutputContent::Bitcoin(value) => {
-                        output_bitcoin_max_value =
-                            output_bitcoin_max_value.checked_sub(value.0)?;
+                        let new_max = output_bitcoin_max_value.checked_sub(value.0);
+                        if new_max.is_none() {
+                            return None;
+                        }
+
+                        output_bitcoin_max_value = new_max.unwrap();
                         FilledOutputContent::Bitcoin(value)
                     }
                     OutputContent::Withdrawal(withdrawal) => {
@@ -857,7 +861,9 @@ impl FilledTransaction {
                     memo: output.memo.clone(),
                 })
             })
-            .collect::<Option<Vec<FilledOutput>>>()?;
+            .collect::<Option<Vec<FilledOutput>>>();
+
+        let outputs = outputs?;
 
         // Validate that all LP token iterators are fully consumed.
         // If there are remaining unconsumed elements, the transaction has

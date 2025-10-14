@@ -179,6 +179,9 @@ impl RpcServer for RpcServerImpl {
     async fn get_wallet_utxos(
         &self,
     ) -> RpcResult<Vec<PointedOutput<FilledOutputContent>>> {
+        // Wallet UTXOs are automatically updated via App::task() background process
+        // which watches node.watch_state() for blockchain state changes.
+        // No manual update needed here.
         let utxos = self.app.wallet.get_utxos().map_err(custom_err)?;
         let utxos = utxos
             .into_iter()
@@ -248,6 +251,9 @@ impl RpcServer for RpcServerImpl {
     async fn my_utxos(
         &self,
     ) -> RpcResult<Vec<PointedOutput<FilledOutputContent>>> {
+        // Wallet UTXOs are automatically updated via App::task() background process
+        // which watches node.watch_state() for blockchain state changes.
+        // No manual update needed here.
         let utxos = self
             .app
             .wallet
@@ -519,12 +525,11 @@ impl RpcServer for RpcServerImpl {
         let slot_id =
             SlotId::new(period_index, slot_index).map_err(custom_err)?;
         let slot_id_bytes = slot_id.as_bytes();
-        let mut tx = Transaction::default();
         let fee = Amount::from_sat(fee_sats);
-        self.app
+        let tx = self
+            .app
             .wallet
             .claim_decision_slot(
-                &mut tx,
                 slot_id_bytes,
                 is_standard,
                 is_scaled,
@@ -1221,6 +1226,9 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn bitcoin_balance(&self) -> RpcResult<Balance> {
+        // Wallet balance is automatically updated via App::task() background process
+        // which watches node.watch_state() for blockchain state changes.
+        // No manual update needed here.
         self.app.wallet.get_bitcoin_balance().map_err(custom_err)
     }
 
@@ -1770,6 +1778,10 @@ impl RpcServer for RpcServerImpl {
 
         // Delegate to get_voting_period_details for full stats
         self.get_voting_period_details(period_id).await
+    }
+
+    async fn refresh_wallet(&self) -> RpcResult<()> {
+        self.app.update().map_err(custom_err)
     }
 }
 

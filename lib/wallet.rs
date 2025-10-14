@@ -660,10 +660,10 @@ impl Wallet {
 
     // Select LP tokens with optimized collection and selection
 
-    /// Given a regular transaction, add a decision slot claim.
+    /// Create a transaction to claim a decision slot.
+    /// Returns a new transaction ready to be signed and sent.
     pub fn claim_decision_slot(
         &self,
-        tx: &mut Transaction,
         slot_id_bytes: [u8; 3],
         is_standard: bool,
         is_scaled: bool,
@@ -671,23 +671,27 @@ impl Wallet {
         min: Option<u16>,
         max: Option<u16>,
         fee: bitcoin::Amount,
-    ) -> Result<(), Error> {
-        assert!(tx.is_regular(), "this function only accepts a regular tx");
-
+    ) -> Result<Transaction, Error> {
         // Select minimal bitcoins to pay the fee
         let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(fee)?;
         let change = total_bitcoin - fee;
 
-        // Add the inputs to the transaction
-        tx.inputs.extend(bitcoin_utxos.keys());
+        // Collect inputs
+        let inputs: Vec<_> = bitcoin_utxos.into_keys().collect();
+
+        let mut outputs = Vec::new();
 
         // Add change output if needed
         if change > bitcoin::Amount::ZERO {
-            tx.outputs.push(Output::new(
-                self.get_new_address()?,
+            let change_address = self.get_new_address()?;
+            outputs.push(Output::new(
+                change_address,
                 OutputContent::Bitcoin(BitcoinOutputContent(change)),
             ));
         }
+
+        // Create the transaction
+        let mut tx = Transaction::new(inputs, outputs);
 
         // Set the transaction data
         tx.data = Some(TxData::ClaimDecisionSlot {
@@ -699,7 +703,7 @@ impl Wallet {
             max,
         });
 
-        Ok(())
+        Ok(tx)
     }
 
     /// Estimate storage fee for dimensional market

@@ -1164,6 +1164,7 @@ fn apply_utxo_changes(
             .utxos
             .try_get(rwtxn, input)?
             .ok_or(Error::NoUtxo { outpoint: *input })?;
+
         let spent_output = SpentOutput {
             output: spent_output,
             inpoint: InPoint::Regular {
@@ -1182,11 +1183,13 @@ fn apply_utxo_changes(
         let err = error::FillTxOutputContents(Box::new(filled_tx.clone()));
         return Err(err.into());
     };
+
     for (vout, filled_output) in filled_outputs.iter().enumerate() {
         let outpoint = OutPoint::Regular {
             txid,
             vout: vout as u32,
         };
+
         state.insert_utxo_with_address_index(
             rwtxn,
             &outpoint,

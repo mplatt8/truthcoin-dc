@@ -13,7 +13,7 @@ use truthcoin_dc::{
     node::{self, Node},
     types::{
         self, Address, AmountOverflowError, BitcoinOutputContent, Body,
-        FilledOutput, OutPoint, Output, Transaction,
+        FilledOutput, GetBitcoinValue, OutPoint, Output, Transaction,
         proto::mainchain::{
             self,
             generated::{validator_service_server, wallet_service_server},
@@ -293,7 +293,7 @@ impl App {
     }
 
     /// Update utxos & wallet
-    fn update(&self) -> Result<(), Error> {
+    pub fn update(&self) -> Result<(), Error> {
         update(
             self.node.as_ref(),
             &mut self.utxos.write(),

@@ -54,7 +54,6 @@ impl From<node::Error> for Error {
 }
 
 fn update_wallet(node: &Node, wallet: &Wallet) -> Result<(), Error> {
-    tracing::trace!("starting wallet update");
     let addresses = wallet.get_addresses()?;
     let unconfirmed_utxos =
         node.get_unconfirmed_utxos_by_addresses(&addresses)?;
@@ -75,7 +74,6 @@ fn update_wallet(node: &Node, wallet: &Wallet) -> Result<(), Error> {
     wallet.put_utxos(&utxos)?;
     wallet.put_unconfirmed_utxos(&unconfirmed_utxos)?;
     wallet.spend_utxos(&spent)?;
-    tracing::debug!("finished wallet update");
     Ok(())
 }
 
@@ -86,11 +84,9 @@ fn update(
     unconfirmed_utxos: &mut HashMap<OutPoint, Output>,
     wallet: &Wallet,
 ) -> Result<(), Error> {
-    tracing::trace!("Updating wallet");
     let () = update_wallet(node, wallet)?;
     *utxos = wallet.get_utxos()?;
     *unconfirmed_utxos = wallet.get_unconfirmed_utxos()?;
-    tracing::trace!("Updated wallet");
     Ok(())
 }
 

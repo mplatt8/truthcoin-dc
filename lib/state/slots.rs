@@ -489,6 +489,8 @@ impl Dbs {
         quarter_to_string(quarter_idx, &self.config)
     }
 
+    /// Check if a slot period is ossified (past voting and resolution periods)
+    /// Ossification occurs 4 periods after voting ends (8 periods after claim)
     pub fn is_period_ossified(
         &self,
         slot_period: u32,
@@ -498,9 +500,13 @@ impl Dbs {
         let current_period = self
             .get_current_period(current_ts, current_height)
             .unwrap_or(0);
-        slot_period < current_period.saturating_sub(4)
+        // Ossified when current_period > slot_period + 8
+        current_period > slot_period.saturating_add(8)
     }
 
+    /// Check if a slot period is in the voting window
+    /// Voting occurs starting in the period after the slot's claim period through 4 periods total
+    /// If slot claimed in period N, voting is active in periods N+1, N+2, N+3, N+4
     pub fn is_period_in_voting(
         &self,
         slot_period: u32,
@@ -510,23 +516,23 @@ impl Dbs {
         let current_period = self
             .get_current_period(current_ts, current_height)
             .unwrap_or(0);
-        slot_period < current_period
-            && slot_period >= current_period.saturating_sub(4)
+        // Voting window: periods (slot_period + 1) through (slot_period + 4) inclusive
+        // At the START of period N+1, voting begins (so current_period > slot_period)
+        // Voting ends at the END of period N+4 (so current_period <= slot_period + 4)
+        current_period > slot_period
+            && current_period <= slot_period.saturating_add(4)
     }
 
+    /// Check if a specific slot is ossified
+    /// Delegates to is_period_ossified for single source of truth
     pub fn is_slot_ossified(
         &self,
         slot_id: SlotId,
         current_ts: u64,
         current_height: Option<u32>,
     ) -> bool {
-        // A slot is ossified when its voting period has ended
-        // (more than 4 periods old)
         let period = slot_id.period_index();
-        let current_period = self
-            .get_current_period(current_ts, current_height)
-            .unwrap_or(0);
-        period < current_period.saturating_sub(4)
+        self.is_period_ossified(period, current_ts, current_height)
     }
 
     pub fn is_slot_in_voting(
@@ -542,21 +548,19 @@ impl Dbs {
         )
     }
 
+    /// Get all ossified slots across all periods
+    /// Delegates to is_period_ossified for consistency
     pub fn get_ossified_slots(
         &self,
         rotxn: &sneed::RoTxn,
         current_ts: u64,
         current_height: Option<u32>,
     ) -> Result<Vec<Slot>, Error> {
-        let current_period =
-            self.get_current_period(current_ts, current_height)?;
-        let ossified_cutoff = current_period.saturating_sub(4);
-
         let mut ossified_slots = Vec::new();
 
         let mut iter = self.period_slots.iter(rotxn)?;
         while let Some((period, slots)) = iter.next()? {
-            if period < ossified_cutoff {
+            if self.is_period_ossified(period, current_ts, current_height) {
                 // These slots are ossified (voting has ended)
                 ossified_slots.extend(slots.iter().cloned());
             }
@@ -823,24 +827,25 @@ impl Dbs {
         Ok(claimed_slots.len() as u64)
     }
 
+    /// Get all periods that are currently in voting
+    /// Delegates to is_period_in_voting for consistency
     pub fn get_voting_periods(
         &self,
         rotxn: &sneed::RoTxn,
         current_ts: u64,
         current_height: Option<u32>,
     ) -> Result<Vec<(u32, u64, u64)>, Error> {
-        let current_period =
-            self.get_current_period(current_ts, current_height)?;
         let mut voting_periods = Vec::new();
 
-        let voting_start = current_period.saturating_sub(4);
-        let voting_end = current_period;
-
-        for period in voting_start..voting_end {
-            let count = self.get_claimed_slot_count_in_period(rotxn, period)?;
-            if count > 0 {
-                let total_slots = 500u64;
-                voting_periods.push((period, count, total_slots));
+        // Iterate through all periods and check if they're in voting
+        let mut iter = self.period_slots.iter(rotxn)?;
+        while let Some((period, _)) = iter.next()? {
+            if self.is_period_in_voting(period, current_ts, current_height) {
+                let count = self.get_claimed_slot_count_in_period(rotxn, period)?;
+                if count > 0 {
+                    let total_slots = 500u64;
+                    voting_periods.push((period, count, total_slots));
+                }
             }
         }
 

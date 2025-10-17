@@ -64,6 +64,11 @@ pub struct RpcServerImpl {
     app: App,
 }
 
+impl RpcServerImpl {
+    // NOTE: Removed duplicate get_current_period - use state.slots().get_current_period() instead
+    // This ensures single source of truth for period calculation per Bitcoin Hivemind architecture
+}
+
 #[async_trait]
 impl RpcServer for RpcServerImpl {
     async fn get_block(&self, block_hash: BlockHash) -> RpcResult<Block> {
@@ -191,9 +196,14 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn getblockcount(&self) -> RpcResult<u32> {
+        // Returns Bitcoin-compatible block COUNT (height + 1) per Bitcoin RPC spec
+        // Internal storage remains 0-indexed (height), but RPC returns count for compatibility
+        // Note: period calculations use internal height, not this RPC count value
         let height = self.app.node.try_get_tip_height().map_err(custom_err)?;
-        let block_count = height.map_or(0, |height| height + 1);
-        Ok(block_count)
+        let height = height.unwrap_or(0);
+        // Return count (height + 1) for Bitcoin RPC compatibility
+        // Genesis block at height 0 = count 1, height 1 = count 2, etc.
+        Ok(height + 1)
     }
 
     async fn latest_failed_withdrawal_bundle_height(
@@ -721,16 +731,43 @@ impl RpcServer for RpcServerImpl {
     async fn list_markets(
         &self,
     ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::MarketSummary>> {
+        // Get all markets (not filtered by state) since we'll compute state dynamically
         let markets = self
             .app
             .node
-            .get_markets_by_state(truthcoin_dc::state::MarketState::Trading)
+            .get_all_markets()
             .map_err(custom_err)?;
+
+        // Get current period for dynamic state computation
+        let is_testing_mode = self.app.node.is_slots_testing_mode();
+        let current_period = if is_testing_mode {
+            let tip_height = self
+                .app
+                .node
+                .try_get_tip_height()
+                .map_err(custom_err)?
+                .unwrap_or(0);
+            let testing_blocks_per_period = self.app.node.get_slots_testing_config();
+            PeriodCalculator::block_height_to_testing_period(
+                tip_height,
+                testing_blocks_per_period,
+            )
+        } else {
+            let current_timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| custom_err_msg(format!("System time error: {}", e)))?
+                .as_secs();
+            PeriodCalculator::timestamp_to_period(current_timestamp)
+        };
 
         let market_summaries = markets
             .into_iter()
             .map(|market| {
                 let market_id_hex = hex::encode(market.id.as_bytes());
+                // Compute state dynamically from decision slot periods
+                // Per Bitcoin Hivemind: slots determine voting behavior, not persistent database state
+                let computed_state = market.compute_state(current_period);
+
                 truthcoin_dc_app_rpc_api::MarketSummary {
                     market_id: market_id_hex,
                     title: market.title.clone(),
@@ -740,7 +777,7 @@ impl RpcServer for RpcServerImpl {
                         market.description.clone()
                     },
                     outcome_count: market.get_outcome_count(),
-                    state: format!("{:?}", market.state()),
+                    state: format!("{:?}", computed_state),
                     volume: market.treasury(),
                     created_at_height: market.created_at_height,
                 }
@@ -771,6 +808,28 @@ impl RpcServer for RpcServerImpl {
             .node
             .get_market_decisions(&market)
             .map_err(custom_err)?;
+
+        // Get current period for dynamic state computation
+        let is_testing_mode = self.app.node.is_slots_testing_mode();
+        let current_period = if is_testing_mode {
+            let tip_height = self
+                .app
+                .node
+                .try_get_tip_height()
+                .map_err(custom_err)?
+                .unwrap_or(0);
+            let testing_blocks_per_period = self.app.node.get_slots_testing_config();
+            PeriodCalculator::block_height_to_testing_period(
+                tip_height,
+                testing_blocks_per_period,
+            )
+        } else {
+            let current_timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| custom_err_msg(format!("System time error: {}", e)))?
+                .as_secs();
+            PeriodCalculator::timestamp_to_period(current_timestamp)
+        };
 
         let mut outcomes = Vec::new();
         let valid_state_combos = market.get_valid_state_combos();
@@ -830,12 +889,16 @@ impl RpcServer for RpcServerImpl {
             .map(|slot_id| slot_id.to_hex())
             .collect();
 
+        // Compute state dynamically from decision slot periods
+        // Per Bitcoin Hivemind: slots determine voting behavior, not persistent database state
+        let computed_state = market.compute_state(current_period);
+
         let market_data = truthcoin_dc_app_rpc_api::MarketData {
             market_id,
             title: market.title.clone(),
             description: market.description.clone(),
             outcomes,
-            state: format!("{:?}", market.state()),
+            state: format!("{:?}", computed_state),
             market_maker: market.creator_address.to_string(),
             expires_at: market.expires_at_height,
             beta: market.b(),

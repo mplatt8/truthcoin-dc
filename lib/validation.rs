@@ -323,7 +323,6 @@ impl MarketValidator {
         tx: &FilledTransaction,
         _override_height: Option<u32>,
     ) -> Result<(), Error> {
-        use crate::math::lmsr::Lmsr;
         use crate::state::markets::MarketState;
 
         let buy_data = tx.buy_shares().ok_or_else(|| {
@@ -388,23 +387,18 @@ impl MarketValidator {
         let mut new_shares = market.shares().clone();
         new_shares[buy_data.outcome_index as usize] += buy_data.shares_to_buy;
 
-        // Validate LMSR constraints
-        let lmsr = Lmsr::new(market.shares().len());
-        let current_cost = lmsr
-            .cost_function(market.b(), &market.shares().view())
-            .map_err(|e| Error::InvalidTransaction {
-                reason: format!(
-                    "LMSR current cost calculation failed: {:?}",
-                    e
-                ),
-            })?;
-        let new_cost = lmsr
-            .cost_function(market.b(), &new_shares.view())
-            .map_err(|e| Error::InvalidTransaction {
-                reason: format!("LMSR new cost calculation failed: {:?}", e),
-            })?;
-
-        let trade_cost = new_cost - current_cost;
+        // Validate LMSR constraints using centralized LmsrService
+        // This ensures single source of truth for all LMSR calculations
+        // per Bitcoin Hivemind whitepaper section on market maker algorithm
+        use crate::math::lmsr::LmsrService;
+        let trade_cost = LmsrService::calculate_update_cost(
+            &market.shares(),
+            &new_shares,
+            market.b(),
+        )
+        .map_err(|e| Error::InvalidTransaction {
+            reason: format!("LMSR trade cost calculation failed: {:?}", e),
+        })?;
 
         // Validate trade cost doesn't exceed max cost
         if trade_cost > buy_data.max_cost as f64 {
@@ -1428,6 +1422,15 @@ pub struct PeriodCalculator;
 
 impl PeriodCalculator {
     /// Convert block height to testing period.
+    ///
+    /// # Single Source of Truth
+    /// Block heights are 0-indexed and directly map to periods:
+    /// - Heights 0-9   → Period 1
+    /// - Heights 10-19 → Period 2
+    /// - Heights 20-29 → Period 3
+    /// - Heights 30-39 → Period 4
+    ///
+    /// This ensures consistent period boundaries across all subsystems.
     #[inline(always)]
     pub const fn block_height_to_testing_period(
         block_height: u32,
@@ -1437,7 +1440,8 @@ impl PeriodCalculator {
         if testing_blocks_per_period == 0 {
             0
         } else {
-            block_height / testing_blocks_per_period
+            // Direct division: heights 0-9 = period 1, 10-19 = period 2, etc.
+            (block_height / testing_blocks_per_period) + 1
         }
     }
 

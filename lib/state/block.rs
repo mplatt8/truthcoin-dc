@@ -319,7 +319,8 @@ impl StateUpdate {
             }
         }
 
-        // Apply share account changes
+        // Apply share account changes with proper block height for audit trail
+        // Per Bitcoin Hivemind whitepaper: all state changes must be traceable to specific blocks
         for ((address, market_id), outcome_changes) in
             &self.share_account_changes
         {
@@ -332,7 +333,7 @@ impl StateUpdate {
                             market_id.clone(),
                             outcome_index,
                             share_delta,
-                            0,
+                            height as u64,
                         )?;
                     } else {
                         state.markets().remove_shares_from_account(
@@ -341,7 +342,7 @@ impl StateUpdate {
                             market_id,
                             outcome_index,
                             -share_delta,
-                            0,
+                            height as u64,
                         )?;
                     }
                 }
@@ -613,6 +614,11 @@ pub fn connect(
             .slots()
             .mint_up_to(rwtxn, mainchain_timestamp, height)?;
     }
+
+    // NOTE: Markets no longer have persistent voting state transitions
+    // Markets derive their voting behavior from decision slot states dynamically
+    // Individual slots enter voting periods based on when they were claimed
+    // This ensures multidimensional markets can have some slots voting while others trade
 
     for (vout, output) in body.coinbase.iter().enumerate() {
         let outpoint = OutPoint::Coinbase {
@@ -1209,7 +1215,7 @@ fn apply_market_trade(
     rwtxn: &mut RwTxn,
     filled_tx: &FilledTransaction,
     state_update: &mut StateUpdate,
-    _height: u32,
+    height: u32,
 ) -> Result<(), Error> {
     let buy_data =
         filled_tx.buy_shares().ok_or_else(|| Error::InvalidSlotId {
@@ -1224,10 +1230,24 @@ fn apply_market_trade(
             reason: format!("Market {:?} does not exist", buy_data.market_id),
         })?;
 
-    // Validate market state
-    if market.state() != crate::state::markets::MarketState::Trading {
+    // Validate market trading state using compute_state() as single source of truth
+    // Markets derive voting behavior from individual slot states, not persistent MarketState
+    let mainchain_timestamp = state
+        .try_get_mainchain_timestamp(rwtxn)?
+        .ok_or_else(|| Error::InvalidSlotId {
+            reason: "No mainchain timestamp available".to_string(),
+        })?;
+
+    let current_period = state
+        .slots()
+        .get_current_period(mainchain_timestamp, Some(height))?;
+
+    // Use compute_state() to determine if market is tradeable
+    // This delegates to slots layer for voting period checks
+    let market_state = market.compute_state(current_period);
+    if matches!(market_state, crate::state::MarketState::Voting) {
         return Err(Error::InvalidSlotId {
-            reason: "Market is not in trading state".to_string(),
+            reason: "Cannot trade: market is in voting state".to_string(),
         });
     }
 
@@ -1264,6 +1284,15 @@ fn apply_market_trade(
 
     // Calculate volume in sats (including fees)
     let volume_sats = trade_cost.ceil() as u64;
+
+    // CRITICAL: Bitcoin Economic Conservation per Hivemind Whitepaper
+    // When trader buys shares, Bitcoin flows from trader to market treasury.
+    // This Bitcoin payment is validated by the UTXO system (trader spends Bitcoin UTXOs).
+    // The market treasury is updated in the MarketStateUpdate to reflect the incoming Bitcoin.
+    // The trade_cost represents the Bitcoin amount transferred from trader to treasury.
+    // This ensures: Trader's Bitcoin Out = Market Treasury Bitcoin In = Share Value
+    // The actual UTXO transfer is handled by apply_utxo_changes which processes the transaction's
+    // inputs (trader's Bitcoin) and outputs (change back to trader if any).
 
     // Add to collected changes for atomic application (market_id is now standardized MarketId type)
     state_update.add_market_update(MarketStateUpdate {

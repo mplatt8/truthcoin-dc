@@ -525,38 +525,30 @@ impl BatchedMarketTrade {
     }
 
     /// Calculate the cost of this trade using the snapshot market state
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Uses LmsrService for all LMSR calculations to ensure consistency
+    /// with whitepaper specifications and single source of truth.
     pub fn calculate_trade_cost(&self) -> Result<f64, MarketError> {
-        use crate::math::lmsr::Lmsr;
-        // Use LMSR with actual market size instead of hardcoded default (256)
-        let lmsr = Lmsr::new(self.market_snapshot.shares.len());
-
-        // Calculate current cost
-        let old_cost = lmsr
-            .cost_function(
-                self.market_snapshot.b,
-                &self.market_snapshot.shares.view(),
-            )
-            .map_err(|e| {
-                MarketError::DatabaseError(format!(
-                    "LMSR calculation failed: {:?}",
-                    e
-                ))
-            })?;
+        use crate::math::lmsr::LmsrService;
 
         // Calculate cost with new shares
         let mut new_shares = self.market_snapshot.shares.clone();
         new_shares[self.outcome_index as usize] += self.shares_to_buy;
 
-        let new_cost = lmsr
-            .cost_function(self.market_snapshot.b, &new_shares.view())
-            .map_err(|e| {
-                MarketError::DatabaseError(format!(
-                    "LMSR calculation failed: {:?}",
-                    e
-                ))
-            })?;
+        // Use LmsrService for centralized LMSR calculations
+        let base_cost = LmsrService::calculate_update_cost(
+            &self.market_snapshot.shares,
+            &new_shares,
+            self.market_snapshot.b,
+        )
+        .map_err(|e| {
+            MarketError::DatabaseError(format!(
+                "LMSR calculation failed: {:?}",
+                e
+            ))
+        })?;
 
-        let base_cost = new_cost - old_cost;
         let fee_cost = base_cost * self.market_snapshot.trading_fee;
 
         Ok(base_cost + fee_cost)
@@ -1530,6 +1522,111 @@ impl Market {
         self.get_current_state().market_state
     }
 
+    // REMOVED: is_in_voting() method
+    // This duplicated slot voting logic and violated single source of truth.
+    // Use state.slots().is_slot_in_voting() instead for voting period checks.
+
+    /// Compute market state dynamically from decision slot periods
+    ///
+    /// According to Bitcoin Hivemind whitepaper, market states should be derived
+    /// from decision slot states rather than stored persistently. Decision slots
+    /// are the single source of truth for voting periods.
+    ///
+    /// # Bitcoin Hivemind Specification
+    /// - **Trading**: Slots are claimable and not yet in voting
+    ///   (current_period <= slot_period OR current_period > slot_period + 4)
+    /// - **Voting**: ALL slots are in voting period (4 periods after claim)
+    ///   (all slots have: current_period > slot_period AND current_period <= slot_period + 4)
+    /// - **Resolved**: Voting has concluded and decisions have been made
+    ///   (current_period > slot_period + 4 AND all slots have outcomes)
+    /// - **Ossified**: Final state after resolution period
+    ///
+    /// State determination:
+    /// - If ALL slots are in voting, market state is Voting (prevents trading during consensus)
+    /// - If ALL slots are ossified, market state is Ossified
+    /// - If ALL slots are resolved, market state is Resolved
+    /// - Otherwise market state is Trading or the persistent terminal state (Cancelled, Invalid)
+    ///
+    /// # Arguments
+    /// * `current_period` - Current voting period derived from block height
+    ///
+    /// # Returns
+    /// The computed market state based on decision slot periods
+    pub fn compute_state(&self, current_period: u32) -> MarketState {
+        // Terminal states (Cancelled, Invalid, Ossified) are always persistent
+        // These represent administrative or final outcomes that don't change
+        let persistent_state = self.state();
+        if matches!(
+            persistent_state,
+            MarketState::Cancelled | MarketState::Invalid
+        ) {
+            return persistent_state;
+        }
+
+        // Check if ALL decision slots are in voting period
+        // Voting occurs when: current_period > slot_period AND current_period <= slot_period + 4
+        // This logic matches slots layer's is_period_in_voting() for consistency
+        if !self.decision_slots.is_empty() {
+            let all_slots_voting = self.decision_slots.iter().all(|slot_id| {
+                let slot_period = slot_id.period_index();
+                current_period > slot_period
+                    && current_period <= slot_period.saturating_add(4)
+            });
+
+            if all_slots_voting {
+                return MarketState::Voting;
+            }
+        }
+
+        // Count slot states for resolved/ossified determination
+        let mut slots_resolved = 0;
+        let mut slots_ossified = 0;
+        let total_slots = self.decision_slots.len();
+
+        // Check resolved and ossified states
+        for slot_id in &self.decision_slots {
+            let slot_period = slot_id.period_index();
+
+            // Slot is resolved if past voting period (voting ends at slot_period + 4)
+            if current_period > slot_period.saturating_add(4) {
+                // TODO: Check if slot has decision outcome recorded
+                // For now, consider it resolved if past voting period
+                slots_resolved += 1;
+
+                // Check if enough time has passed for ossification
+                // Ossification occurs after additional 4-period confirmation
+                if current_period > slot_period.saturating_add(8) {
+                    slots_ossified += 1;
+                }
+            }
+        }
+
+        // State determination logic following Bitcoin Hivemind specifications:
+
+        // 1. If ALL slots are ossified, market transitions to Ossified
+        //    This is the final terminal state after full resolution
+        if slots_ossified == total_slots && total_slots > 0 {
+            return MarketState::Ossified;
+        }
+
+        // 2. If ALL slots are resolved (past voting), market is Resolved
+        //    Waiting for ossification period to complete
+        if slots_resolved == total_slots && total_slots > 0 {
+            // If persistent state is already Resolved or Ossified, maintain it
+            if matches!(
+                persistent_state,
+                MarketState::Resolved | MarketState::Ossified
+            ) {
+                return persistent_state;
+            }
+            return MarketState::Resolved;
+        }
+
+        // 3. Default to Trading state
+        //    Slots are either still claimable or in the future
+        MarketState::Trading
+    }
+
     /// Get current LMSR beta parameter
     pub fn b(&self) -> f64 {
         self.get_current_state().b
@@ -1633,16 +1730,15 @@ impl Market {
     }
 
     /// Calculate treasury based on current market state
-    /// Calculate current treasury using LMSR with actual market size
     ///
-    /// Creates an LMSR calculator with the correct market size to ensure
-    /// proper calculation according to Bitcoin Hivemind specifications.
+    /// # Bitcoin Hivemind Compliance
+    /// Uses LmsrService for centralized treasury calculation to ensure
+    /// consistency with whitepaper specifications and single source of truth.
     pub fn calc_treasury(&self) -> f64 {
-        use crate::math::lmsr::Lmsr;
+        use crate::math::lmsr::LmsrService;
         let current_state = self.get_current_state();
-        // Use LMSR with actual market size instead of hardcoded default (256)
-        let lmsr = Lmsr::new(current_state.shares.len());
-        lmsr.cost_function(current_state.b, &current_state.shares.view())
+        // Use LmsrService for centralized LMSR calculations
+        LmsrService::calculate_treasury(&current_state.shares, current_state.b)
             .unwrap_or_else(|_| {
                 current_state.b * (current_state.shares.len() as f64).ln()
             })
@@ -1650,24 +1746,27 @@ impl Market {
 
     /// Calculate treasury with specific shares (for state updates)
     ///
-    /// Creates an LMSR calculator with the actual market size to ensure
-    /// proper calculation according to Bitcoin Hivemind specifications.
+    /// # Bitcoin Hivemind Compliance
+    /// Uses LmsrService for centralized treasury calculation to ensure
+    /// consistency with whitepaper specifications and single source of truth.
     pub fn calc_treasury_with_shares(&self, shares: &Array<f64, Ix1>) -> f64 {
-        use crate::math::lmsr::Lmsr;
+        use crate::math::lmsr::LmsrService;
         let current_state = self.get_current_state();
-        // Use LMSR with actual market size instead of hardcoded default (256)
-        let lmsr = Lmsr::new(shares.len());
-        lmsr.cost_function(current_state.b, &shares.view())
+        // Use LmsrService for centralized LMSR calculations
+        LmsrService::calculate_treasury(shares, current_state.b)
             .unwrap_or_else(|_| current_state.b * (shares.len() as f64).ln())
     }
 
     /// Calculate prices based on current market state
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Uses LmsrService for centralized price calculation to ensure
+    /// consistency with whitepaper specifications and single source of truth.
     pub fn current_prices(&self) -> Array<f64, Ix1> {
-        use crate::math::lmsr::Lmsr;
+        use crate::math::lmsr::LmsrService;
         let current_state = self.get_current_state();
-        // Use LMSR with actual market size instead of hardcoded default (256)
-        let lmsr = Lmsr::new(current_state.shares.len());
-        lmsr.calculate_prices(current_state.b, &current_state.shares.view())
+        // Use LmsrService for centralized LMSR calculations
+        LmsrService::calculate_prices(&current_state.shares, current_state.b)
             .unwrap_or_else(|_| {
                 let n = current_state.shares.len();
                 Array::from_elem(n, 1.0 / n as f64)
@@ -1675,15 +1774,18 @@ impl Market {
     }
 
     /// Calculate prices with specific shares using current beta
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Uses LmsrService for centralized price calculation to ensure
+    /// consistency with whitepaper specifications and single source of truth.
     pub fn calculate_prices(
         &self,
         shares: &Array<f64, Ix1>,
     ) -> Array<f64, Ix1> {
-        use crate::math::lmsr::Lmsr;
+        use crate::math::lmsr::LmsrService;
         let current_state = self.get_current_state();
-        // Use LMSR with actual market size instead of hardcoded default (256)
-        let lmsr = Lmsr::new(shares.len());
-        lmsr.calculate_prices(current_state.b, &shares.view())
+        // Use LmsrService for centralized LMSR calculations
+        LmsrService::calculate_prices(shares, current_state.b)
             .unwrap_or_else(|_| {
                 let n = shares.len();
                 Array::from_elem(n, 1.0 / n as f64)
@@ -1850,7 +1952,24 @@ impl Market {
         let has_voting_slot = self
             .decision_slots
             .iter()
-            .any(|slot_id| slots_in_voting.contains(slot_id));
+            .any(|slot_id| {
+                let in_voting = slots_in_voting.contains(slot_id);
+                tracing::debug!(
+                    "Checking slot {} for market {}: in_voting={}",
+                    slot_id.to_hex(),
+                    self.id,
+                    in_voting
+                );
+                in_voting
+            });
+
+        tracing::debug!(
+            "Market {} has_voting_slot={} (checked {} slots against {} voting slots)",
+            self.id,
+            has_voting_slot,
+            self.decision_slots.len(),
+            slots_in_voting.len()
+        );
 
         if has_voting_slot {
             self.create_new_state_version(
@@ -2743,15 +2862,35 @@ impl MarketsDatabase {
         &self,
         txn: &mut RwTxn,
         slots_in_voting: &HashSet<SlotId>,
+        transaction_id: Option<[u8; 32]>,
+        height: u64,
     ) -> Result<Vec<MarketId>, Error> {
         // Only check markets in Trading state, as only they can transition to Voting
         let trading_markets =
             self.get_markets_by_state(txn, MarketState::Trading)?;
+
+        tracing::debug!(
+            "Checking {} trading markets for voting period transition (height {})",
+            trading_markets.len(),
+            height
+        );
+
         let mut newly_voting = Vec::new();
 
         for mut market in trading_markets {
-            if market.check_voting_period(slots_in_voting, None, 0)? {
-                // TODO: Add transaction_id and height
+            tracing::debug!(
+                "Market {} has {} decision slots: {:?}",
+                market.id,
+                market.decision_slots.len(),
+                market.decision_slots.iter().map(|s| s.to_hex()).collect::<Vec<_>>()
+            );
+
+            if market.check_voting_period(slots_in_voting, transaction_id, height)? {
+                tracing::info!(
+                    "Market {} transitioning to Voting state at height {}",
+                    market.id,
+                    height
+                );
                 self.update_market(txn, &market)?;
                 newly_voting.push(market.id.clone());
             }

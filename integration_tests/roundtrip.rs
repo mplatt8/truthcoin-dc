@@ -19,7 +19,7 @@ use tokio::time::sleep;
 use tracing::Instrument as _;
 use truthcoin_dc::{
     authorization::{Dst, Signature},
-    types::{Address, FilledOutputContent, OutputContent, PointedOutput, GetAddress as _, Txid},
+    types::{Address, FilledOutputContent, GetAddress as _},
 };
 use truthcoin_dc_app_rpc_api::RpcClient as _;
 
@@ -541,6 +541,441 @@ async fn roundtrip_task(
             market.state
         );
     }
+
+    // Phase 4: Trading across 7 blocks
+    tracing::info!("Starting Phase 4: Buy shares trading (5 blocks)");
+
+    let market_ids: Vec<String> = markets.iter().map(|m| m.market_id.clone()).collect();
+
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+        voter.rpc_client.refresh_wallet().await?;
+    }
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    tracing::info!("Block 1: Small initial trades on all markets");
+    for (i, market_id) in market_ids.iter().enumerate() {
+        let voter = match i {
+            0 => &truthcoin_nodes.voter_0,
+            1 => &truthcoin_nodes.voter_1,
+            2 => &truthcoin_nodes.voter_2,
+            3 => &truthcoin_nodes.voter_3,
+            _ => unreachable!(),
+        };
+
+        let cost = voter.rpc_client.calculate_share_cost(
+            market_id.clone(),
+            0,
+            5.0,
+        ).await?;
+
+        voter.rpc_client.buy_shares(
+            market_id.clone(),
+            0,
+            5.0,
+            cost + 10000,
+            1000,
+        ).await?;
+    }
+    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+        voter.rpc_client.refresh_wallet().await?;
+    }
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    tracing::info!("Block 2: Balanced trading on market 0");
+    truthcoin_nodes.voter_1.rpc_client.refresh_wallet().await?;
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    let cost = truthcoin_nodes.voter_1.rpc_client.calculate_share_cost(
+        market_ids[0].clone(),
+        1,
+        5.0,
+    ).await?;
+    truthcoin_nodes.voter_1.rpc_client.buy_shares(
+        market_ids[0].clone(),
+        1,
+        5.0,
+        cost + 10000,
+        1000,
+    ).await?;
+    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+        voter.rpc_client.refresh_wallet().await?;
+    }
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    tracing::info!("Block 3: Large trade creating skewed market 1");
+    truthcoin_nodes.voter_2.rpc_client.refresh_wallet().await?;
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    let cost = truthcoin_nodes.voter_2.rpc_client.calculate_share_cost(
+        market_ids[1].clone(),
+        0,
+        50.0,
+    ).await?;
+    truthcoin_nodes.voter_2.rpc_client.buy_shares(
+        market_ids[1].clone(),
+        0,
+        50.0,
+        cost + 50000,
+        1000,
+    ).await?;
+    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+        voter.rpc_client.refresh_wallet().await?;
+    }
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    tracing::info!("Replenishing voter_2 and voter_3 funds early");
+    let voter_2_deposit_address = truthcoin_nodes.voter_2.get_deposit_address().await?;
+    deposit(
+        &mut enforcer_post_setup,
+        &mut truthcoin_nodes.voter_2,
+        &voter_2_deposit_address,
+        VOTER_DEPOSIT_AMOUNT,
+        VOTER_DEPOSIT_FEE,
+    ).await?;
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    let voter_3_deposit_address = truthcoin_nodes.voter_3.get_deposit_address().await?;
+    deposit(
+        &mut enforcer_post_setup,
+        &mut truthcoin_nodes.voter_3,
+        &voter_3_deposit_address,
+        VOTER_DEPOSIT_AMOUNT,
+        VOTER_DEPOSIT_FEE,
+    ).await?;
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    tracing::info!("Block 4: Multiple small trades on market 2");
+    truthcoin_nodes.voter_3.rpc_client.refresh_wallet().await?;
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    for outcome in [0, 1] {
+        let cost = truthcoin_nodes.voter_3.rpc_client.calculate_share_cost(
+            market_ids[2].clone(),
+            outcome,
+            2.0,
+        ).await?;
+        truthcoin_nodes.voter_3.rpc_client.buy_shares(
+            market_ids[2].clone(),
+            outcome,
+            2.0,
+            cost + 5000,
+            1000,
+        ).await?;
+    }
+    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+        voter.rpc_client.refresh_wallet().await?;
+    }
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    tracing::info!("Replenishing voter_0 funds");
+    let voter_0_deposit_address = truthcoin_nodes.voter_0.get_deposit_address().await?;
+    deposit(
+        &mut enforcer_post_setup,
+        &mut truthcoin_nodes.voter_0,
+        &voter_0_deposit_address,
+        VOTER_DEPOSIT_AMOUNT,
+        VOTER_DEPOSIT_FEE,
+    ).await?;
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    tracing::info!("Block 5: Additional YES position on market 1");
+    truthcoin_nodes.voter_3.rpc_client.refresh_wallet().await?;
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    let cost = truthcoin_nodes.voter_3.rpc_client.calculate_share_cost(
+        market_ids[1].clone(),
+        0,
+        20.0,
+    ).await?;
+    truthcoin_nodes.voter_3.rpc_client.buy_shares(
+        market_ids[1].clone(),
+        0,
+        20.0,
+        cost + 30000,
+        1000,
+    ).await?;
+    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+        voter.rpc_client.refresh_wallet().await?;
+    }
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    tracing::info!("Block 6: Contrarian NO position on heavily skewed market 1");
+    truthcoin_nodes.voter_0.rpc_client.refresh_wallet().await?;
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    let cost = truthcoin_nodes.voter_0.rpc_client.calculate_share_cost(
+        market_ids[1].clone(),
+        1,
+        15.0,
+    ).await?;
+    truthcoin_nodes.voter_0.rpc_client.buy_shares(
+        market_ids[1].clone(),
+        1,
+        15.0,
+        cost + 20000,
+        1000,
+    ).await?;
+    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+        voter.rpc_client.refresh_wallet().await?;
+    }
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    tracing::info!("Block 7: Initial trading on market 3");
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1] {
+        voter.rpc_client.refresh_wallet().await?;
+    }
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    for outcome in [0, 1] {
+        let voter = if outcome == 0 { &truthcoin_nodes.voter_0 } else { &truthcoin_nodes.voter_1 };
+        let cost = voter.rpc_client.calculate_share_cost(
+            market_ids[3].clone(),
+            outcome,
+            10.0,
+        ).await?;
+        voter.rpc_client.buy_shares(
+            market_ids[3].clone(),
+            outcome,
+            10.0,
+            cost + 15000,
+            1000,
+        ).await?;
+    }
+    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+        voter.rpc_client.refresh_wallet().await?;
+    }
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    let final_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+        let voter_height = voter.rpc_client.getblockcount().await?;
+        anyhow::ensure!(
+            voter_height == final_height,
+            "Node out of sync: expected {}, got {}",
+            final_height,
+            voter_height
+        );
+    }
+
+    let final_markets = truthcoin_nodes.issuer.rpc_client.list_markets().await?;
+    anyhow::ensure!(
+        final_markets.len() == 4,
+        "Expected 4 markets after trading, found {}",
+        final_markets.len()
+    );
+
+    tracing::info!("✓ Phase 4: Completed 7 blocks of trading");
+    tracing::info!("Final market states:");
+    for (i, market) in final_markets.iter().enumerate() {
+        tracing::info!("  Market {}: volume = {:.2}, state: {}",
+            i + 1,
+            market.volume,
+            market.state
+        );
+    }
+
+    tracing::info!("Verifying share ownership persistence:");
+    for (voter_idx, voter_addr) in [voter_addr_0, voter_addr_1, voter_addr_2, voter_addr_3].iter().enumerate() {
+        let holdings = truthcoin_nodes.issuer.rpc_client.get_user_share_positions(*voter_addr).await?;
+        if holdings.active_markets > 0 {
+            tracing::info!("  Voter {} has {} active positions across {} markets",
+                voter_idx,
+                holdings.positions.len(),
+                holdings.active_markets
+            );
+        }
+    }
+
+    for market in &final_markets {
+        let market_detail = truthcoin_nodes.issuer.rpc_client.view_market(market.market_id.clone()).await?;
+        if let Some(market_data) = market_detail {
+            anyhow::ensure!(
+                market_data.treasury > 0.0,
+                "Market {} treasury should be positive after trades, found {}",
+                market.market_id,
+                market_data.treasury
+            );
+            tracing::info!("  Market {}: treasury = {:.2} sats",
+                market.market_id,
+                market_data.treasury
+            );
+        } else {
+            anyhow::bail!("Market {} not found", market.market_id);
+        }
+    }
+
+    tracing::info!("✓ All market states persisted correctly across 7 blocks of trading");
+
+    // Phase 5: Mine to voting period and verify state transitions
+    tracing::info!("Starting Phase 5: Mining to voting period");
+
+    let current_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
+    tracing::info!("Current block height: {}", current_height);
+
+    // Period boundaries: heights 20-29 = period 3 (trading), heights 30-39 = period 4 (voting)
+    let voting_period_start_height = 31u32;
+    let blocks_to_mine = if current_height < voting_period_start_height {
+        voting_period_start_height - current_height
+    } else {
+        0
+    };
+
+    tracing::info!(
+        "Need to mine {} blocks to reach height {} (period 4 voting starts)",
+        blocks_to_mine,
+        voting_period_start_height
+    );
+
+    for i in 0..blocks_to_mine {
+        tracing::info!("Mining block {} of {}", i + 1, blocks_to_mine);
+        truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+        sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    sleep(std::time::Duration::from_secs(2)).await;
+
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+        voter.rpc_client.refresh_wallet().await?;
+    }
+    sleep(std::time::Duration::from_secs(3)).await;
+
+    let final_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
+    anyhow::ensure!(
+        final_height >= voting_period_start_height,
+        "Failed to reach voting period: at height {}, expected >= {}",
+        final_height,
+        voting_period_start_height
+    );
+    tracing::info!("✓ Reached voting period at height {} (period 4)", final_height);
+
+    for (i, voter) in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3].iter().enumerate() {
+        let voter_height = voter.rpc_client.getblockcount().await?;
+        anyhow::ensure!(
+            voter_height == final_height,
+            "Voter {} out of sync: expected {}, got {}",
+            i,
+            final_height,
+            voter_height
+        );
+    }
+
+    tracing::info!("Checking decision slot states (period 3):");
+    let slots_at_voting = truthcoin_nodes.issuer.rpc_client.get_claimed_slots_in_period(3).await?;
+    anyhow::ensure!(
+        slots_at_voting.len() == 4,
+        "Expected 4 decision slots from period 3, found {}",
+        slots_at_voting.len()
+    );
+
+    for (i, slot) in slots_at_voting.iter().enumerate() {
+        tracing::info!(
+            "  Slot {}: {} (period=3, slot_index={})",
+            i + 1,
+            slot.question_preview,
+            slot.slot_index
+        );
+    }
+
+    for slot in &slots_at_voting {
+        let is_voting = truthcoin_nodes.issuer.rpc_client.is_slot_in_voting(slot.slot_id_hex.clone()).await?;
+        tracing::info!(
+            "  Slot {} in voting: {}",
+            slot.slot_id_hex,
+            is_voting
+        );
+        anyhow::ensure!(
+            is_voting,
+            "Slot {} (period 3) should be in voting at height {} (period 4), but is_slot_in_voting returned false",
+            slot.slot_id_hex,
+            final_height
+        );
+    }
+
+    tracing::info!("✓ All 4 decision slots from period 3 are confirmed in voting period");
+
+    let markets_at_voting = truthcoin_nodes.issuer.rpc_client.list_markets().await?;
+    anyhow::ensure!(
+        markets_at_voting.len() == 4,
+        "Expected 4 markets to exist at voting period, found {}",
+        markets_at_voting.len()
+    );
+
+    tracing::info!("✓ Market states at voting period (height {}, period 4):", final_height);
+    for (i, market) in markets_at_voting.iter().enumerate() {
+        let market_detail = truthcoin_nodes.issuer.rpc_client.view_market(market.market_id.clone()).await?;
+
+        if let Some(detail) = market_detail {
+            tracing::info!(
+                "  Market {}: {} - State: {}, Decision slots: {:?}",
+                i + 1,
+                market.title,
+                market.state,
+                detail.decision_slots
+            );
+        } else {
+            tracing::info!(
+                "  Market {}: {} - State: {} (no detail available)",
+                i + 1,
+                market.title,
+                market.state
+            );
+        }
+
+        anyhow::ensure!(
+            market.state == "Voting",
+            "Market {} should be in Voting state, found: {}",
+            market.market_id,
+            market.state
+        );
+    }
+
+    tracing::info!("✓ Phase 5: All markets correctly transitioned to Voting state");
+
+    for market in &markets_at_voting {
+        let market_detail = truthcoin_nodes.issuer.rpc_client.view_market(market.market_id.clone()).await?;
+        anyhow::ensure!(
+            market_detail.is_some(),
+            "Market {} details should be accessible in voting period",
+            market.market_id
+        );
+
+        if let Some(detail) = market_detail {
+            tracing::info!(
+                "  Market {}: treasury={:.2} sats, volume={:.2}",
+                market.market_id,
+                detail.treasury,
+                market.volume
+            );
+        }
+    }
+
+    tracing::info!("✓ All 5 phases completed successfully:");
+    tracing::info!("  Phase 1: Votecoin distribution and voting");
+    tracing::info!("  Phase 2: Decision slot claims");
+    tracing::info!("  Phase 3: Market creation");
+    tracing::info!("  Phase 4: 7 blocks of trading");
+    tracing::info!("  Phase 5: Transition to voting period");
 
     // Cleanup
     {

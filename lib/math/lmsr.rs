@@ -608,6 +608,30 @@ impl LmsrService {
         lmsr.validate_state(&state)
     }
 
+    /// Calculate market prices using LMSR with actual market size
+    ///
+    /// This function creates an LMSR calculator with the exact number of outcomes
+    /// to ensure proper price calculation per Bitcoin Hivemind specifications.
+    ///
+    /// # Arguments
+    /// * `shares` - Current share quantities for all market outcomes
+    /// * `beta` - LMSR beta parameter for liquidity
+    ///
+    /// # Returns
+    /// * `Ok(prices)` - Calculated price array normalized to sum to 1.0
+    /// * `Err(LmsrError)` - LMSR calculation error
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper section on LMSR price calculations
+    pub fn calculate_prices(
+        shares: &Array1<f64>,
+        beta: f64,
+    ) -> Result<Array1<f64>, LmsrError> {
+        // Create LMSR with actual market size instead of hardcoded values
+        let lmsr = Lmsr::new(shares.len());
+        lmsr.calculate_prices(beta, &shares.view())
+    }
+
     /// Calculate the cost difference between two share states
     ///
     /// This function calculates the cost of updating from current shares to new shares

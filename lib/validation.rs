@@ -996,6 +996,236 @@ impl MarketStateValidator {
 pub struct VoteValidator;
 
 impl VoteValidator {
+    /// Convert f64 vote value to VoteValue enum.
+    ///
+    /// Per Bitcoin Hivemind whitepaper section 3.3, vote values are represented as:
+    /// - NaN: Abstain (voter chooses not to vote)
+    /// - 0.0 or 1.0: Binary (false/true for binary decisions)
+    /// - Other values in [0.0, 1.0]: Scalar (continuous values for scalar decisions)
+    ///
+    /// This serves as the single source of truth for vote value conversion,
+    /// eliminating duplication between vote submission and batch processing.
+    ///
+    /// # Arguments
+    /// * `vote_value` - Raw f64 vote value from transaction
+    ///
+    /// # Returns
+    /// * `VoteValue` - Typed vote value for storage
+    pub fn convert_vote_value(vote_value: f64) -> crate::state::voting::types::VoteValue {
+        use crate::state::voting::types::VoteValue;
+
+        if vote_value.is_nan() {
+            VoteValue::Abstain
+        } else if vote_value == 0.0 || vote_value == 1.0 {
+            VoteValue::Binary(vote_value == 1.0)
+        } else {
+            VoteValue::Scalar(vote_value)
+        }
+    }
+
+    /// Validate voter eligibility and Votecoin balance.
+    ///
+    /// Ensures the voter has voting rights according to Bitcoin Hivemind whitepaper
+    /// section 3.2: voters must hold Votecoin to participate.
+    ///
+    /// # Arguments
+    /// * `state` - Blockchain state for balance queries
+    /// * `rotxn` - Read-only transaction
+    /// * `voter_address` - Address to validate
+    ///
+    /// # Returns
+    /// * `Ok(u32)` - Votecoin balance if voter is eligible
+    /// * `Err(Error)` - Voter has no voting rights
+    fn validate_voter_eligibility(
+        state: &crate::state::State,
+        rotxn: &RoTxn,
+        voter_address: &crate::types::Address,
+    ) -> Result<u32, Error> {
+        let votecoin_balance = state.get_votecoin_balance(rotxn, voter_address)?;
+        if votecoin_balance == 0 {
+            return Err(Error::InvalidTransaction {
+                reason: "Voter has no Votecoin balance (voting rights)".to_string(),
+            });
+        }
+        Ok(votecoin_balance)
+    }
+
+    /// Validate decision slot exists and has a decision.
+    ///
+    /// Per Bitcoin Hivemind whitepaper section 3.1, decisions must be claimed
+    /// before they can receive votes.
+    ///
+    /// # Arguments
+    /// * `state` - Blockchain state for slot queries
+    /// * `rotxn` - Read-only transaction
+    /// * `decision_id` - Slot ID to validate
+    ///
+    /// # Returns
+    /// * `Ok(Decision)` - Valid decision for the slot
+    /// * `Err(Error)` - Slot doesn't exist or has no decision
+    fn validate_decision_slot(
+        state: &crate::state::State,
+        rotxn: &RoTxn,
+        decision_id: crate::state::slots::SlotId,
+    ) -> Result<crate::state::slots::Decision, Error> {
+        let slot = state
+            .slots()
+            .get_slot(rotxn, decision_id)?
+            .ok_or_else(|| Error::InvalidSlotId {
+                reason: format!("Decision slot {:?} does not exist", decision_id),
+            })?;
+
+        let decision = slot.decision.ok_or_else(|| Error::InvalidSlotId {
+            reason: format!("Slot {:?} has no decision", decision_id),
+        })?;
+
+        Ok(decision)
+    }
+
+    /// Validate vote value is appropriate for decision type.
+    ///
+    /// Per Bitcoin Hivemind whitepaper section 3.3:
+    /// - Binary decisions: values in [0.0, 1.0] or NaN (abstain)
+    /// - Scalar decisions: values in [min, max] or NaN (abstain)
+    ///
+    /// # Arguments
+    /// * `decision` - Decision to validate against
+    /// * `vote_value` - Vote value to validate
+    ///
+    /// # Returns
+    /// * `Ok(())` - Vote value is valid for decision type
+    /// * `Err(Error)` - Invalid vote value
+    fn validate_vote_value(
+        decision: &crate::state::slots::Decision,
+        vote_value: f64,
+    ) -> Result<(), Error> {
+        if decision.is_scaled {
+            // Scalar decision - validate value is within range
+            let min = decision.min.unwrap_or(0) as f64;
+            let max = decision.max.unwrap_or(1) as f64;
+            if !vote_value.is_nan()
+                && (vote_value < min || vote_value > max)
+            {
+                return Err(Error::InvalidTransaction {
+                    reason: format!(
+                        "Vote value {} outside valid range [{}, {}]",
+                        vote_value, min, max
+                    ),
+                });
+            }
+        } else {
+            // Binary decision - validate value is between 0.0 and 1.0, or NaN (abstain)
+            // Per Bitcoin Hivemind whitepaper, 0.5 represents "inconclusive"
+            // Voters can express uncertainty using any value in [0.0, 1.0]
+            if !vote_value.is_nan()
+                && (vote_value < 0.0 || vote_value > 1.0)
+            {
+                return Err(Error::InvalidTransaction {
+                    reason: format!(
+                        "Binary decision vote must be between 0.0 and 1.0, or NaN (abstain), got {}",
+                        vote_value
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Get current timestamp and height for voting period validation.
+    ///
+    /// This method serves as the canonical source for time-based validation,
+    /// supporting caching to reduce database reads during batch processing.
+    ///
+    /// # Arguments
+    /// * `state` - Blockchain state
+    /// * `rotxn` - Read-only transaction
+    ///
+    /// # Returns
+    /// * `Ok((timestamp, height))` - Current timestamp and optional height
+    /// * `Err(Error)` - Timestamp not available
+    fn get_current_time_context(
+        state: &crate::state::State,
+        rotxn: &RoTxn,
+    ) -> Result<(u64, Option<u32>), Error> {
+        let current_ts = state
+            .try_get_mainchain_timestamp(rotxn)?
+            .ok_or_else(|| Error::InvalidTransaction {
+                reason: "No mainchain timestamp available".to_string(),
+            })?;
+        let current_height = state.try_get_height(rotxn)?;
+        Ok((current_ts, current_height))
+    }
+
+    /// Validate slot is in voting period.
+    ///
+    /// Per Bitcoin Hivemind whitepaper section 3.2, votes can only be submitted
+    /// during active voting periods.
+    ///
+    /// # Arguments
+    /// * `state` - Blockchain state
+    /// * `decision_id` - Slot to check
+    /// * `current_ts` - Current timestamp (cached for efficiency)
+    /// * `current_height` - Current height (cached for efficiency)
+    ///
+    /// # Returns
+    /// * `Ok(())` - Slot is in voting period
+    /// * `Err(Error)` - Slot is not accepting votes
+    fn validate_voting_period(
+        state: &crate::state::State,
+        decision_id: crate::state::slots::SlotId,
+        current_ts: u64,
+        current_height: Option<u32>,
+    ) -> Result<(), Error> {
+        if !state
+            .slots()
+            .is_slot_in_voting(decision_id, current_ts, current_height)
+        {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "Decision slot {:?} is not in voting period",
+                    decision_id
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate no duplicate votes exist.
+    ///
+    /// Per Bitcoin Hivemind whitepaper section 3.2, each voter can submit
+    /// exactly one vote per decision per voting period.
+    ///
+    /// # Arguments
+    /// * `state` - Blockchain state
+    /// * `rotxn` - Read-only transaction
+    /// * `voter_id` - Voter to check
+    /// * `period_id` - Voting period
+    /// * `decision_id` - Decision slot
+    ///
+    /// # Returns
+    /// * `Ok(())` - No duplicate vote exists
+    /// * `Err(Error)` - Duplicate vote detected
+    fn validate_no_duplicate_vote(
+        state: &crate::state::State,
+        rotxn: &RoTxn,
+        voter_id: crate::state::voting::types::VoterId,
+        period_id: crate::state::voting::types::VotingPeriodId,
+        decision_id: crate::state::slots::SlotId,
+    ) -> Result<(), Error> {
+        if state
+            .voting()
+            .databases()
+            .get_vote(rotxn, period_id, voter_id, decision_id)?
+            .is_some()
+        {
+            return Err(Error::InvalidTransaction {
+                reason: "Duplicate vote: voter already voted on this decision in this period"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Validate complete vote submission transaction
     ///
     /// Ensures all Bitcoin Hivemind requirements are met:
@@ -1031,7 +1261,7 @@ impl VoteValidator {
             }
         })?;
 
-        // Extract and validate voter address
+        // Extract voter address
         let voter_address = filled_tx
             .spent_utxos
             .first()
@@ -1040,94 +1270,26 @@ impl VoteValidator {
             })?
             .address;
 
-        // Validate voter has Votecoin balance
-        let votecoin_balance = state.get_votecoin_balance(rotxn, &voter_address)?;
-        if votecoin_balance == 0 {
-            return Err(Error::InvalidTransaction {
-                reason: "Voter has no Votecoin balance (voting rights)".to_string(),
-            });
-        }
+        // Validate voter eligibility using shared helper
+        let _votecoin_balance = Self::validate_voter_eligibility(state, rotxn, &voter_address)?;
 
-        // Validate decision slot exists
+        // Parse and validate decision slot using shared helper
         let decision_id = SlotId::from_bytes(vote_data.slot_id_bytes)?;
-        let slot = state
-            .slots()
-            .get_slot(rotxn, decision_id)?
-            .ok_or_else(|| Error::InvalidSlotId {
-                reason: format!("Decision slot {:?} does not exist", decision_id),
-            })?;
+        let decision = Self::validate_decision_slot(state, rotxn, decision_id)?;
 
-        // Validate slot has a decision
-        let decision = slot.decision.ok_or_else(|| Error::InvalidSlotId {
-            reason: format!("Slot {:?} has no decision", decision_id),
-        })?;
+        // Validate vote value using shared helper
+        Self::validate_vote_value(&decision, vote_data.vote_value)?;
 
-        // Validate vote value is appropriate for decision type
-        if decision.is_scaled {
-            // Scalar decision - validate value is within range
-            let min = decision.min.unwrap_or(0) as f64;
-            let max = decision.max.unwrap_or(1) as f64;
-            if !vote_data.vote_value.is_nan()
-                && (vote_data.vote_value < min || vote_data.vote_value > max)
-            {
-                return Err(Error::InvalidTransaction {
-                    reason: format!(
-                        "Vote value {} outside valid range [{}, {}]",
-                        vote_data.vote_value, min, max
-                    ),
-                });
-            }
-        } else {
-            // Binary decision - validate value is 0.0, 1.0, or NaN (abstain)
-            if !vote_data.vote_value.is_nan()
-                && vote_data.vote_value != 0.0
-                && vote_data.vote_value != 1.0
-            {
-                return Err(Error::InvalidTransaction {
-                    reason: format!(
-                        "Binary decision vote must be 0.0, 1.0, or NaN (abstain), got {}",
-                        vote_data.vote_value
-                    ),
-                });
-            }
-        }
+        // Get current time context (cached for efficiency)
+        let (current_ts, current_height) = Self::get_current_time_context(state, rotxn)?;
 
-        // Validate voting period (implicit from slot state)
-        // The slot must be in voting period for votes to be accepted
-        let current_ts = state
-            .try_get_mainchain_timestamp(rotxn)?
-            .ok_or_else(|| Error::InvalidTransaction {
-                reason: "No mainchain timestamp available".to_string(),
-            })?;
-        let current_height = state.try_get_height(rotxn)?;
+        // Validate voting period using shared helper
+        Self::validate_voting_period(state, decision_id, current_ts, current_height)?;
 
-        if !state
-            .slots()
-            .is_slot_in_voting(decision_id, current_ts, current_height)
-        {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Decision slot {:?} is not in voting period",
-                    decision_id
-                ),
-            });
-        }
-
-        // Check for duplicate votes
+        // Check for duplicate votes using shared helper
         let voter_id = VoterId::from_address(&voter_address);
         let period_id = VotingPeriodId::new(vote_data.voting_period);
-
-        if state
-            .voting()
-            .databases()
-            .get_vote(rotxn, period_id, voter_id, decision_id)?
-            .is_some()
-        {
-            return Err(Error::InvalidTransaction {
-                reason: "Duplicate vote: voter already voted on this decision in this period"
-                    .to_string(),
-            });
-        }
+        Self::validate_no_duplicate_vote(state, rotxn, voter_id, period_id, decision_id)?;
 
         Ok(())
     }
@@ -1163,7 +1325,7 @@ impl VoteValidator {
             }
         })?;
 
-        // Extract and validate voter address
+        // Extract voter address
         let voter_address = filled_tx
             .spent_utxos
             .first()
@@ -1172,102 +1334,54 @@ impl VoteValidator {
             })?
             .address;
 
-        // Validate voter has Votecoin balance
-        let votecoin_balance = state.get_votecoin_balance(rotxn, &voter_address)?;
-        if votecoin_balance == 0 {
-            return Err(Error::InvalidTransaction {
-                reason: "Voter has no Votecoin balance (voting rights)".to_string(),
-            });
-        }
+        // Validate voter eligibility once for the entire batch using shared helper
+        let _votecoin_balance = Self::validate_voter_eligibility(state, rotxn, &voter_address)?;
 
         let voter_id = VoterId::from_address(&voter_address);
         let period_id = VotingPeriodId::new(batch_data.voting_period);
 
-        let current_ts = state
-            .try_get_mainchain_timestamp(rotxn)?
-            .ok_or_else(|| Error::InvalidTransaction {
-                reason: "No mainchain timestamp available".to_string(),
-            })?;
-        let current_height = state.try_get_height(rotxn)?;
+        // Get current time context once for the entire batch (cached for efficiency)
+        let (current_ts, current_height) = Self::get_current_time_context(state, rotxn)?;
 
-        // Validate each vote in the batch
+        // Validate each vote in the batch using shared helpers
         for (idx, vote_item) in batch_data.votes.iter().enumerate() {
             let decision_id = SlotId::from_bytes(vote_item.slot_id_bytes)?;
 
-            // Validate decision slot exists
-            let slot = state
-                .slots()
-                .get_slot(rotxn, decision_id)?
-                .ok_or_else(|| Error::InvalidSlotId {
-                    reason: format!(
-                        "Vote batch item {}: Decision slot {:?} does not exist",
-                        idx, decision_id
-                    ),
+            // Validate decision slot using shared helper with batch context
+            let decision = Self::validate_decision_slot(state, rotxn, decision_id)
+                .map_err(|e| match e {
+                    Error::InvalidSlotId { reason } => Error::InvalidSlotId {
+                        reason: format!("Vote batch item {}: {}", idx, reason),
+                    },
+                    other => other,
                 })?;
 
-            // Validate slot has a decision
-            let decision = slot.decision.ok_or_else(|| Error::InvalidSlotId {
-                reason: format!(
-                    "Vote batch item {}: Slot {:?} has no decision",
-                    idx, decision_id
-                ),
-            })?;
+            // Validate vote value using shared helper with batch context
+            Self::validate_vote_value(&decision, vote_item.vote_value)
+                .map_err(|e| match e {
+                    Error::InvalidTransaction { reason } => Error::InvalidTransaction {
+                        reason: format!("Vote batch item {}: {}", idx, reason),
+                    },
+                    other => other,
+                })?;
 
-            // Validate vote value is appropriate for decision type
-            if decision.is_scaled {
-                let min = decision.min.unwrap_or(0) as f64;
-                let max = decision.max.unwrap_or(1) as f64;
-                if !vote_item.vote_value.is_nan()
-                    && (vote_item.vote_value < min || vote_item.vote_value > max)
-                {
-                    return Err(Error::InvalidTransaction {
-                        reason: format!(
-                            "Vote batch item {}: Vote value {} outside valid range [{}, {}]",
-                            idx, vote_item.vote_value, min, max
-                        ),
-                    });
-                }
-            } else {
-                if !vote_item.vote_value.is_nan()
-                    && vote_item.vote_value != 0.0
-                    && vote_item.vote_value != 1.0
-                {
-                    return Err(Error::InvalidTransaction {
-                        reason: format!(
-                            "Vote batch item {}: Binary decision vote must be 0.0, 1.0, or NaN (abstain), got {}",
-                            idx, vote_item.vote_value
-                        ),
-                    });
-                }
-            }
+            // Validate voting period using shared helper with batch context
+            Self::validate_voting_period(state, decision_id, current_ts, current_height)
+                .map_err(|e| match e {
+                    Error::InvalidTransaction { reason } => Error::InvalidTransaction {
+                        reason: format!("Vote batch item {}: {}", idx, reason),
+                    },
+                    other => other,
+                })?;
 
-            // Validate slot is in voting period
-            if !state
-                .slots()
-                .is_slot_in_voting(decision_id, current_ts, current_height)
-            {
-                return Err(Error::InvalidTransaction {
-                    reason: format!(
-                        "Vote batch item {}: Decision slot {:?} is not in voting period",
-                        idx, decision_id
-                    ),
-                });
-            }
-
-            // Check for duplicate votes
-            if state
-                .voting()
-                .databases()
-                .get_vote(rotxn, period_id, voter_id, decision_id)?
-                .is_some()
-            {
-                return Err(Error::InvalidTransaction {
-                    reason: format!(
-                        "Vote batch item {}: Duplicate vote on decision {:?}",
-                        idx, decision_id
-                    ),
-                });
-            }
+            // Check for duplicate votes using shared helper with batch context
+            Self::validate_no_duplicate_vote(state, rotxn, voter_id, period_id, decision_id)
+                .map_err(|e| match e {
+                    Error::InvalidTransaction { reason } => Error::InvalidTransaction {
+                        reason: format!("Vote batch item {}: {}", idx, reason),
+                    },
+                    other => other,
+                })?;
         }
 
         Ok(())

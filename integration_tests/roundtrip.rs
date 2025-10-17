@@ -632,7 +632,7 @@ async fn roundtrip_task(
     }
     sleep(std::time::Duration::from_millis(500)).await;
 
-    tracing::info!("Replenishing voter_2 and voter_3 funds early");
+    tracing::info!("Replenishing voter_2, voter_3, and voters 5-7 funds early");
     let voter_2_deposit_address = truthcoin_nodes.voter_2.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
@@ -648,6 +648,37 @@ async fn roundtrip_task(
         &mut enforcer_post_setup,
         &mut truthcoin_nodes.voter_3,
         &voter_3_deposit_address,
+        VOTER_DEPOSIT_AMOUNT,
+        VOTER_DEPOSIT_FEE,
+    ).await?;
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    // Fund voters 5-7 for vote submission in Phase 6
+    let voter_4_deposit_address = truthcoin_nodes.voter_4.get_deposit_address().await?;
+    deposit(
+        &mut enforcer_post_setup,
+        &mut truthcoin_nodes.voter_4,
+        &voter_4_deposit_address,
+        VOTER_DEPOSIT_AMOUNT,
+        VOTER_DEPOSIT_FEE,
+    ).await?;
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    let voter_5_deposit_address = truthcoin_nodes.voter_5.get_deposit_address().await?;
+    deposit(
+        &mut enforcer_post_setup,
+        &mut truthcoin_nodes.voter_5,
+        &voter_5_deposit_address,
+        VOTER_DEPOSIT_AMOUNT,
+        VOTER_DEPOSIT_FEE,
+    ).await?;
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    let voter_6_deposit_address = truthcoin_nodes.voter_6.get_deposit_address().await?;
+    deposit(
+        &mut enforcer_post_setup,
+        &mut truthcoin_nodes.voter_6,
+        &voter_6_deposit_address,
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
     ).await?;
@@ -970,12 +1001,220 @@ async fn roundtrip_task(
         }
     }
 
-    tracing::info!("✓ All 5 phases completed successfully:");
+    // Phase 6: Vote submission according to Bitcoin Hivemind whitepaper Figure 5
+    tracing::info!("Starting Phase 6: Vote submission (Bitcoin Hivemind whitepaper example)");
+    tracing::info!("Implementing vote matrix from Figure 5, page 18:");
+    tracing::info!("  7 voters × 4 binary decisions");
+    tracing::info!("  Vote values: D1=[1,1,1,1,1,1,1], D2=[0.5,0.5,1,0.5,0.5,0.5,0.5], D3=[0,0,0,0,0,0,0], D4=[0,0,0,0,0,0,0]");
+
+    // Get decision slot IDs for voting
+    let decision_slot_ids: Vec<String> = slots_at_voting
+        .iter()
+        .map(|slot| slot.slot_id_hex.clone())
+        .collect();
+
+    anyhow::ensure!(
+        decision_slot_ids.len() == 4,
+        "Expected 4 decision slots for voting, found {}",
+        decision_slot_ids.len()
+    );
+
+    tracing::info!("Decision slots for voting:");
+    for (i, slot_id) in decision_slot_ids.iter().enumerate() {
+        tracing::info!("  D{}: {}", i + 1, slot_id);
+    }
+
+    // Whitepaper vote matrix (Figure 5, left example - 7 voters, 4 decisions)
+    // Voter 1: [1.0, 0.5, 0.0, 0.0]
+    // Voter 2: [1.0, 0.5, 0.0, 0.0]
+    // Voter 3: [1.0, 1.0, 0.0, 0.0]  <- dissenter on D2
+    // Voter 4: [1.0, 0.5, 0.0, 0.0]
+    // Voter 5: [1.0, 0.5, 0.0, 0.0]
+    // Voter 6: [1.0, 0.5, 0.0, 0.0]
+    // Voter 7: [1.0, 0.5, 0.0, 0.0]
+    let vote_matrix: Vec<Vec<f64>> = vec![
+        vec![1.0, 0.5, 0.0, 0.0], // Voter 0 (1 in whitepaper)
+        vec![1.0, 0.5, 0.0, 0.0], // Voter 1 (2 in whitepaper)
+        vec![1.0, 1.0, 0.0, 0.0], // Voter 2 (3 in whitepaper) - dissenter
+        vec![1.0, 0.5, 0.0, 0.0], // Voter 3 (4 in whitepaper)
+        vec![1.0, 0.5, 0.0, 0.0], // Voter 4 (5 in whitepaper)
+        vec![1.0, 0.5, 0.0, 0.0], // Voter 5 (6 in whitepaper)
+        vec![1.0, 0.5, 0.0, 0.0], // Voter 6 (7 in whitepaper)
+    ];
+
+    // Submit votes for all 7 voters using batch submission
+    use truthcoin_dc_app_rpc_api::{SubmitVoteBatchRequest, VoteBatchItem};
+
+    let current_period = 4u32; // We're in period 4 (voting on period 3 decisions)
+
+    tracing::info!("Submitting votes for all 7 voters...");
+    for (voter_idx, votes) in vote_matrix.iter().enumerate() {
+        let voter = match voter_idx {
+            0 => &truthcoin_nodes.voter_0,
+            1 => &truthcoin_nodes.voter_1,
+            2 => &truthcoin_nodes.voter_2,
+            3 => &truthcoin_nodes.voter_3,
+            4 => &truthcoin_nodes.voter_4,
+            5 => &truthcoin_nodes.voter_5,
+            6 => &truthcoin_nodes.voter_6,
+            _ => unreachable!(),
+        };
+
+        // Build vote batch for this voter
+        let mut vote_items = Vec::new();
+        for (decision_idx, &vote_value) in votes.iter().enumerate() {
+            vote_items.push(VoteBatchItem {
+                decision_id: decision_slot_ids[decision_idx].clone(),
+                vote_value,
+            });
+        }
+
+        let batch_request = SubmitVoteBatchRequest {
+            votes: vote_items,
+            period_id: current_period,
+            fee_sats: 1000,
+        };
+
+        tracing::info!(
+            "  Voter {} submitting batch: D1={}, D2={}, D3={}, D4={}",
+            voter_idx + 1,
+            votes[0],
+            votes[1],
+            votes[2],
+            votes[3]
+        );
+
+        let vote_txid = voter.rpc_client.submit_vote_batch(batch_request).await?;
+        tracing::debug!("    Vote batch txid: {}", vote_txid);
+    }
+
+    tracing::info!("✓ All 7 voters submitted vote batches");
+
+    // Mine a block to confirm all votes
+    sleep(std::time::Duration::from_millis(500)).await;
+    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    sleep(std::time::Duration::from_secs(2)).await;
+
+    // Sync all nodes
+    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3, &truthcoin_nodes.voter_4, &truthcoin_nodes.voter_5, &truthcoin_nodes.voter_6] {
+        voter.rpc_client.refresh_wallet().await?;
+    }
+    sleep(std::time::Duration::from_secs(1)).await;
+
+    let vote_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
+    tracing::info!("✓ Votes confirmed at height {}", vote_height);
+
+    // Verify votes were recorded correctly
+    tracing::info!("Verifying vote submissions via RPC...");
+
+    for (decision_idx, decision_id) in decision_slot_ids.iter().enumerate() {
+        let votes = truthcoin_nodes
+            .issuer
+            .rpc_client
+            .get_decision_votes(decision_id.clone())
+            .await?;
+
+        tracing::info!(
+            "  Decision {} (D{}): {} votes recorded",
+            decision_id,
+            decision_idx + 1,
+            votes.len()
+        );
+
+        anyhow::ensure!(
+            votes.len() == 7,
+            "Expected 7 votes for decision {}, found {}",
+            decision_id,
+            votes.len()
+        );
+
+        // Verify vote values match the whitepaper matrix
+        // Note: votes are returned in arbitrary order (likely by voter ID hash),
+        // so we need to match by voter address rather than assuming order
+        for vote in &votes {
+            // Find which voter this is by matching address
+            let voter_idx = voter_addresses
+                .iter()
+                .position(|addr| addr.to_string() == vote.voter_address)
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Unknown voter address: {}",
+                    vote.voter_address
+                ))?;
+
+            let expected_value = vote_matrix[voter_idx][decision_idx];
+            anyhow::ensure!(
+                (vote.vote_value - expected_value).abs() < 0.01,
+                "Vote mismatch: Voter {} on D{} expected {}, got {}",
+                voter_idx + 1,
+                decision_idx + 1,
+                expected_value,
+                vote.vote_value
+            );
+        }
+    }
+
+    tracing::info!("✓ All votes verified against whitepaper matrix");
+
+    // Verify voter participation
+    for (voter_idx, voter_addr) in voter_addresses.iter().enumerate() {
+        let voter_votes = truthcoin_nodes
+            .issuer
+            .rpc_client
+            .get_voter_votes(*voter_addr, Some(current_period))
+            .await?;
+
+        tracing::info!(
+            "  Voter {} cast {} votes in period {}",
+            voter_idx + 1,
+            voter_votes.len(),
+            current_period
+        );
+
+        anyhow::ensure!(
+            voter_votes.len() == 4,
+            "Expected 4 votes from voter {}, found {}",
+            voter_idx + 1,
+            voter_votes.len()
+        );
+    }
+
+    tracing::info!("✓ Phase 6: Vote submission completed successfully");
+    tracing::info!("  - 7 voters each voted on 4 binary decisions");
+    tracing::info!("  - Total 28 votes recorded and verified");
+    tracing::info!("  - Vote matrix matches Bitcoin Hivemind whitepaper Figure 5");
+
+    // Print complete vote matrix as submitted and verified
+    tracing::info!("\n=== FINAL VOTE MATRIX (Bitcoin Hivemind Figure 5) ===");
+    tracing::info!("       D1    D2    D3    D4");
+    tracing::info!("     ╔═════╦═════╦═════╦═════╗");
+    for (voter_idx, votes) in vote_matrix.iter().enumerate() {
+        tracing::info!("V{} → ║ {:>3} ║ {:>3} ║ {:>3} ║ {:>3} ║{}",
+            voter_idx + 1,
+            votes[0],
+            votes[1],
+            votes[2],
+            votes[3],
+            if voter_idx == 2 { " (dissenter on D2)" } else { "" }
+        );
+    }
+    tracing::info!("     ╚═════╩═════╩═════╩═════╝");
+    tracing::info!("Decision IDs:");
+    for (i, decision_id) in decision_slot_ids.iter().enumerate() {
+        tracing::info!("  D{}: {}", i + 1, decision_id);
+    }
+    tracing::info!("Voter addresses:");
+    for (i, voter_addr) in voter_addresses.iter().enumerate() {
+        tracing::info!("  V{}: {}", i + 1, voter_addr);
+    }
+    tracing::info!("════════════════════════════════════════════════════\n");
+
+    tracing::info!("\n✓ All 6 phases completed successfully:");
     tracing::info!("  Phase 1: Votecoin distribution and voting");
     tracing::info!("  Phase 2: Decision slot claims");
     tracing::info!("  Phase 3: Market creation");
     tracing::info!("  Phase 4: 7 blocks of trading");
     tracing::info!("  Phase 5: Transition to voting period");
+    tracing::info!("  Phase 6: Vote submission per whitepaper");
 
     // Cleanup
     {

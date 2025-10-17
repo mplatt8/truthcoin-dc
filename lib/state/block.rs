@@ -1568,7 +1568,7 @@ fn apply_submit_vote(
 ) -> Result<(), Error> {
     use crate::state::{
         slots::SlotId,
-        voting::types::{Vote, VoteValue, VoterId, VotingPeriodId},
+        voting::types::{Vote, VoterId, VotingPeriodId},
     };
 
     let vote_data = filled_tx.submit_vote().ok_or_else(|| {
@@ -1597,14 +1597,8 @@ fn apply_submit_vote(
             reason: "No mainchain timestamp available".to_string(),
         })?;
 
-    // Convert vote value to VoteValue enum
-    let vote_value = if vote_data.vote_value.is_nan() {
-        VoteValue::Abstain
-    } else if vote_data.vote_value == 0.0 || vote_data.vote_value == 1.0 {
-        VoteValue::Binary(vote_data.vote_value == 1.0)
-    } else {
-        VoteValue::Scalar(vote_data.vote_value)
-    };
+    // Convert vote value using centralized helper (single source of truth)
+    let vote_value = crate::validation::VoteValidator::convert_vote_value(vote_data.vote_value);
 
     // Create vote structure
     let vote = Vote::new(
@@ -1694,7 +1688,7 @@ fn apply_submit_vote_batch(
 ) -> Result<(), Error> {
     use crate::state::{
         slots::SlotId,
-        voting::types::{Vote, VoteValue, VoterId, VotingPeriodId},
+        voting::types::{Vote, VoterId, VotingPeriodId},
     };
 
     let batch_data = filled_tx.submit_vote_batch().ok_or_else(|| {
@@ -1726,14 +1720,8 @@ fn apply_submit_vote_batch(
     for vote_item in &batch_data.votes {
         let decision_id = SlotId::from_bytes(vote_item.slot_id_bytes)?;
 
-        // Convert vote value to VoteValue enum
-        let vote_value = if vote_item.vote_value.is_nan() {
-            VoteValue::Abstain
-        } else if vote_item.vote_value == 0.0 || vote_item.vote_value == 1.0 {
-            VoteValue::Binary(vote_item.vote_value == 1.0)
-        } else {
-            VoteValue::Scalar(vote_item.vote_value)
-        };
+        // Convert vote value using centralized helper (single source of truth)
+        let vote_value = crate::validation::VoteValidator::convert_vote_value(vote_item.vote_value);
 
         // Create vote structure
         let vote = Vote::new(

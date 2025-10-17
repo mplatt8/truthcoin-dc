@@ -1240,17 +1240,30 @@ impl Wallet {
             voting_period,
         };
 
+        // CRITICAL: Include at least one Votecoin UTXO as the first input
+        // The validation logic checks if the first input's address has Votecoin balance
+        // to verify voting rights per Bitcoin Hivemind protocol
+        let (total_votecoin, votecoin_utxos) = self.select_votecoin_utxos(1)?;
         let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(fee)?;
-        let change = total_bitcoin - fee;
+        let change_bitcoin = total_bitcoin - fee;
 
-        let inputs = bitcoin_utxos.into_keys().collect();
+        // First input must be Votecoin UTXO for validation
+        let mut inputs: Vec<_> = votecoin_utxos.into_keys().collect();
+        inputs.extend(bitcoin_utxos.into_keys());
+
         let mut outputs = Vec::new();
 
-        // Add change output if needed
-        if change > bitcoin::Amount::ZERO {
+        // Return the Votecoin (not consumed by voting)
+        outputs.push(Output::new(
+            self.get_new_address()?,
+            OutputContent::Votecoin(total_votecoin),
+        ));
+
+        // Add Bitcoin change output if needed
+        if change_bitcoin > bitcoin::Amount::ZERO {
             outputs.push(Output::new(
                 self.get_new_address()?,
-                OutputContent::Bitcoin(BitcoinOutputContent(change)),
+                OutputContent::Bitcoin(BitcoinOutputContent(change_bitcoin)),
             ));
         }
 
@@ -1272,17 +1285,30 @@ impl Wallet {
             voting_period,
         };
 
+        // CRITICAL: Include at least one Votecoin UTXO as the first input
+        // The validation logic checks if the first input's address has Votecoin balance
+        // to verify voting rights per Bitcoin Hivemind protocol
+        let (total_votecoin, votecoin_utxos) = self.select_votecoin_utxos(1)?;
         let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(fee)?;
-        let change = total_bitcoin - fee;
+        let change_bitcoin = total_bitcoin - fee;
 
-        let inputs = bitcoin_utxos.into_keys().collect();
+        // First input must be Votecoin UTXO for validation
+        let mut inputs: Vec<_> = votecoin_utxos.into_keys().collect();
+        inputs.extend(bitcoin_utxos.into_keys());
+
         let mut outputs = Vec::new();
 
-        // Add change output if needed
-        if change > bitcoin::Amount::ZERO {
+        // Return the Votecoin (not consumed by voting)
+        outputs.push(Output::new(
+            self.get_new_address()?,
+            OutputContent::Votecoin(total_votecoin),
+        ));
+
+        // Add Bitcoin change output if needed
+        if change_bitcoin > bitcoin::Amount::ZERO {
             outputs.push(Output::new(
                 self.get_new_address()?,
-                OutputContent::Bitcoin(BitcoinOutputContent(change)),
+                OutputContent::Bitcoin(BitcoinOutputContent(change_bitcoin)),
             ));
         }
 

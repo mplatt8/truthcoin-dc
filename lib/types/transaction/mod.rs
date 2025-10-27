@@ -209,15 +209,6 @@ pub enum TransactionData {
         /// Reserved for future voter metadata
         initial_data: [u8; 32],
     },
-    /// Update voter reputation after consensus (system transaction)
-    UpdateReputation {
-        /// Voter identifier
-        voter_id: [u8; 32],
-        /// New reputation score
-        new_reputation: f64,
-        /// Period this reputation update applies to
-        voting_period: u32,
-    },
     /// Submit multiple votes efficiently
     SubmitVoteBatch {
         /// List of votes to submit
@@ -263,11 +254,6 @@ impl TxData {
     /// `true` if the tx data corresponds to registering a voter
     pub fn is_register_voter(&self) -> bool {
         matches!(self, Self::RegisterVoter { .. })
-    }
-
-    /// `true` if the tx data corresponds to updating reputation
-    pub fn is_update_reputation(&self) -> bool {
-        matches!(self, Self::UpdateReputation { .. })
     }
 
     /// `true` if the tx data corresponds to submitting a batch of votes
@@ -371,17 +357,6 @@ pub struct SubmitVote {
 pub struct RegisterVoter {
     /// Reserved for future voter metadata
     pub initial_data: [u8; 32],
-}
-
-/// Struct describing a reputation update (system transaction)
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct UpdateReputation {
-    /// Voter identifier
-    pub voter_id: [u8; 32],
-    /// New reputation score
-    pub new_reputation: f64,
-    /// Period this reputation update applies to
-    pub voting_period: u32,
 }
 
 /// Struct describing a batch vote submission
@@ -498,14 +473,6 @@ impl FilledTransaction {
     pub fn is_register_voter(&self) -> bool {
         match &self.transaction.data {
             Some(tx_data) => tx_data.is_register_voter(),
-            None => false,
-        }
-    }
-
-    /// `true` if the tx data corresponds to updating reputation
-    pub fn is_update_reputation(&self) -> bool {
-        match &self.transaction.data {
-            Some(tx_data) => tx_data.is_update_reputation(),
             None => false,
         }
     }
@@ -645,22 +612,6 @@ impl FilledTransaction {
                 initial_data,
             }) => Some(RegisterVoter {
                 initial_data: *initial_data,
-            }),
-            _ => None,
-        }
-    }
-
-    /// If the tx is a reputation update, returns the corresponding [`UpdateReputation`].
-    pub fn update_reputation(&self) -> Option<UpdateReputation> {
-        match &self.transaction.data {
-            Some(TransactionData::UpdateReputation {
-                voter_id,
-                new_reputation,
-                voting_period,
-            }) => Some(UpdateReputation {
-                voter_id: *voter_id,
-                new_reputation: *new_reputation,
-                voting_period: *voting_period,
             }),
             _ => None,
         }

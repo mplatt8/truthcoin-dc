@@ -389,6 +389,11 @@ impl StateUpdate {
         }
 
         // Apply vote submissions atomically
+        tracing::debug!(
+            "apply_all_changes: Applying {} vote submissions",
+            self.vote_submissions.len()
+        );
+
         for submission in &self.vote_submissions {
             state.voting().databases().put_vote(rwtxn, &submission.vote)?;
         }
@@ -729,15 +734,6 @@ pub fn connect(
                     height,
                 )?;
             }
-            Some(TxData::UpdateReputation { .. }) => {
-                apply_update_reputation(
-                    state,
-                    rwtxn,
-                    &filled_tx,
-                    &mut state_update,
-                    height,
-                )?;
-            }
             Some(TxData::SubmitVoteBatch { .. }) => {
                 apply_submit_vote_batch(
                     state,
@@ -829,9 +825,6 @@ pub fn disconnect_tip(
             }
             Some(TxData::RegisterVoter { .. }) => {
                 let () = revert_register_voter(state, rwtxn, &filled_tx)?;
-            }
-            Some(TxData::UpdateReputation { .. }) => {
-                let () = revert_update_reputation(state, rwtxn, &filled_tx)?;
             }
             Some(TxData::SubmitVoteBatch { .. }) => {
                 let () = revert_submit_vote_batch(state, rwtxn, &filled_tx)?;
@@ -942,6 +935,20 @@ fn apply_claim_decision_slot(
         Some(block_height),
     )?;
 
+    // BITCOIN HIVEMIND PRINCIPLE: Periods are derived from slots, not stored separately
+    // When a slot is claimed in period N, it will be voted on in period N+1
+    // The slot ID encodes all necessary period information (10 bits for period index)
+    // No need to create or update voting period entities - they are calculated on-demand
+    let slot_period = slot_id.period_index();
+    let voting_period = slot_id.voting_period();
+
+    tracing::debug!(
+        "Claimed slot {} from period {} (votes in period {})",
+        hex::encode(slot_id.as_bytes()),
+        slot_period,
+        voting_period
+    );
+
     Ok(())
 }
 
@@ -1013,8 +1020,6 @@ fn configure_market_builder(
 ///
 /// This provides a standardized way to store markets in the database while
 /// maintaining consistent error reporting across all market creation types.
-// Old collect_market_trade function removed - now using apply_market_trade
-
 fn revert_create_market(
     _state: &State,
     _rwtxn: &mut RwTxn,
@@ -1376,7 +1381,7 @@ fn apply_market_creation(
         market_data.trading_fee,
     );
 
-    let mut builder = match market_data.market_type.as_str() {
+    let builder = match market_data.market_type.as_str() {
         "independent" => builder.add_decisions(slot_ids),
         "categorical" => builder.set_categorical(
             slot_ids,
@@ -1481,7 +1486,7 @@ fn apply_dimensional_market(
     );
 
     // Use the dimensional specification
-    let mut builder = builder.with_dimensions(dimension_specs);
+    let builder = builder.with_dimensions(dimension_specs);
 
     // Initial liquidity is now calculated automatically based on beta parameter
 
@@ -1588,7 +1593,27 @@ fn apply_submit_vote(
 
     let voter_id = VoterId::from_address(&voter_address);
     let decision_id = SlotId::from_bytes(vote_data.slot_id_bytes)?;
-    let period_id = VotingPeriodId::new(vote_data.voting_period);
+
+    // BITCOIN HIVEMIND PRINCIPLE: Voting period is derived from slot ID
+    // Slots claimed in period N are voted on in period N+1
+    // The slot ID encodes the period it was claimed in (10 bits for period index)
+    let slot_claim_period = decision_id.period_index();
+    let voting_period = decision_id.voting_period();
+    let period_id = VotingPeriodId::new(voting_period);
+
+    // Validate that transaction's voting_period matches derived period (if provided)
+    // This ensures backward compatibility while enforcing the new constraint
+    if vote_data.voting_period != voting_period {
+        return Err(Error::InvalidTransaction {
+            reason: format!(
+                "Vote period mismatch: slot {} was claimed in period {} and must be voted on in period {}, but transaction specifies period {}",
+                hex::encode(vote_data.slot_id_bytes),
+                slot_claim_period,
+                voting_period,
+                vote_data.voting_period
+            ),
+        });
+    }
 
     // Get current timestamp for vote recording
     let timestamp = state
@@ -1653,7 +1678,10 @@ fn revert_submit_vote(
 
     let voter_id = VoterId::from_address(&voter_address);
     let decision_id = SlotId::from_bytes(vote_data.slot_id_bytes)?;
-    let period_id = VotingPeriodId::new(vote_data.voting_period);
+
+    // BITCOIN HIVEMIND PRINCIPLE: Derive voting period from slot ID
+    let voting_period = decision_id.voting_period();
+    let period_id = VotingPeriodId::new(voting_period);
 
     // Delete vote from database
     state
@@ -1707,7 +1735,6 @@ fn apply_submit_vote_batch(
         .address;
 
     let voter_id = VoterId::from_address(&voter_address);
-    let period_id = VotingPeriodId::new(batch_data.voting_period);
 
     // Get current timestamp for vote recording
     let timestamp = state
@@ -1716,9 +1743,45 @@ fn apply_submit_vote_batch(
             reason: "No mainchain timestamp available".to_string(),
         })?;
 
+    // BITCOIN HIVEMIND PRINCIPLE: All votes in batch must be for same period
+    // Verify all slots are from same claim period
+    let mut expected_voting_period: Option<u32> = None;
+
     // Process each vote in the batch
     for vote_item in &batch_data.votes {
         let decision_id = SlotId::from_bytes(vote_item.slot_id_bytes)?;
+
+        // Derive voting period from slot ID
+        let voting_period = decision_id.voting_period();
+
+        // Ensure all votes in batch are for same voting period
+        if let Some(expected) = expected_voting_period {
+            if voting_period != expected {
+                return Err(Error::InvalidTransaction {
+                    reason: format!(
+                        "Batch vote period mismatch: slot {} requires period {} but batch expects period {}",
+                        hex::encode(vote_item.slot_id_bytes),
+                        voting_period,
+                        expected
+                    ),
+                });
+            }
+        } else {
+            expected_voting_period = Some(voting_period);
+
+            // Validate transaction's voting_period matches derived period
+            if batch_data.voting_period != voting_period {
+                return Err(Error::InvalidTransaction {
+                    reason: format!(
+                        "Batch vote period mismatch: slots require period {} but transaction specifies period {}",
+                        voting_period,
+                        batch_data.voting_period
+                    ),
+                });
+            }
+        }
+
+        let period_id = VotingPeriodId::new(voting_period);
 
         // Convert vote value using centralized helper (single source of truth)
         let vote_value = crate::validation::VoteValidator::convert_vote_value(vote_item.vote_value);
@@ -1776,11 +1839,14 @@ fn revert_submit_vote_batch(
         .address;
 
     let voter_id = VoterId::from_address(&voter_address);
-    let period_id = VotingPeriodId::new(batch_data.voting_period);
 
     // Delete each vote from the batch
     for vote_item in &batch_data.votes {
         let decision_id = SlotId::from_bytes(vote_item.slot_id_bytes)?;
+
+        // BITCOIN HIVEMIND PRINCIPLE: Derive voting period from slot ID
+        let voting_period = decision_id.voting_period();
+        let period_id = VotingPeriodId::new(voting_period);
 
         state
             .voting()
@@ -1842,9 +1908,9 @@ fn apply_register_voter(
             reason: "No mainchain timestamp available".to_string(),
         })?;
 
-    // Create initial reputation (0.5 = neutral starting point)
+    // Create initial reputation (neutral starting point)
     let period_id = VotingPeriodId::new(0); // Initial period
-    let mut reputation = VoterReputation::new(voter_id, 0.5, timestamp, period_id);
+    let mut reputation = VoterReputation::new_default(voter_id, timestamp, period_id);
 
     // Update Votecoin proportion
     let votecoin_proportion =
@@ -1874,153 +1940,5 @@ fn revert_register_voter(
     // Voter registration is immutable once created in Bitcoin Hivemind
     // During reorgs, we keep the registration but may need to adjust reputation
     // based on which votes are reverted. For now, we accept the registration.
-    Ok(())
-}
-
-/// # Arguments
-/// * `state` - Blockchain state
-/// * `rwtxn` - Database write transaction
-/// * `filled_tx` - Filled transaction containing reputation update data
-/// * `state_update` - State update tracker for rollback support
-/// * `height` - Block height when update occurs
-fn apply_update_reputation(
-    state: &State,
-    rwtxn: &mut RwTxn,
-    filled_tx: &FilledTransaction,
-    state_update: &mut StateUpdate,
-    height: u32,
-) -> Result<(), Error> {
-    use crate::state::voting::types::{VoterId, VotingPeriodId};
-
-    let update_data = filled_tx.update_reputation().ok_or_else(|| {
-        Error::InvalidTransaction {
-            reason: "Not a reputation update transaction".to_string(),
-        }
-    })?;
-
-    let voter_id = VoterId::from_bytes(update_data.voter_id[0..20].try_into().map_err(
-        |_| Error::InvalidTransaction {
-            reason: "Invalid voter ID format".to_string(),
-        },
-    )?);
-
-    let period_id = VotingPeriodId::new(update_data.voting_period);
-
-    crate::validation::VoterValidator::validate_reputation_update(state, rwtxn, voter_id, period_id)?;
-
-    let old_reputation = state
-        .voting()
-        .databases()
-        .get_voter_reputation(rwtxn, voter_id)?
-        .expect("Voter exists after validation");
-
-    let timestamp = state
-        .try_get_mainchain_timestamp(rwtxn)?
-        .ok_or_else(|| Error::InvalidTransaction {
-            reason: "No mainchain timestamp available".to_string(),
-        })?;
-
-    let consensus_outcomes = state
-        .voting()
-        .databases()
-        .get_consensus_outcomes_for_period(rwtxn, period_id)?;
-
-    let voter_votes = state
-        .voting()
-        .databases()
-        .get_votes_by_voter(rwtxn, voter_id)?;
-
-    let mut correct_count = 0;
-    let mut total_count = 0;
-
-    for (vote_key, vote_entry) in voter_votes {
-        if vote_key.period_id != period_id {
-            continue;
-        }
-
-        if let Some(consensus_outcome) =
-            consensus_outcomes.get(&vote_key.decision_id)
-        {
-            total_count += 1;
-
-            let voter_value = vote_entry.to_f64();
-
-            if voter_value.is_nan() {
-                continue;
-            }
-
-            let matches = (voter_value - consensus_outcome).abs() < 0.01;
-
-            if matches {
-                correct_count += 1;
-            }
-        }
-    }
-
-    let was_correct = (correct_count as f64 / total_count as f64) > 0.5;
-
-    // Update reputation with correct logic
-    let mut updated_reputation = old_reputation.clone();
-    updated_reputation.update(
-        was_correct,
-        timestamp,
-        period_id,
-        filled_tx.txid(),
-        height,
-    );
-
-    // Defer reputation update to StateUpdate for atomic application
-    state_update.add_reputation_update(voter_id, old_reputation, updated_reputation);
-
-    Ok(())
-}
-
-/// # Arguments
-/// * `state` - Blockchain state
-/// * `rwtxn` - Database write transaction
-/// * `filled_tx` - Filled transaction containing reputation update to revert
-fn revert_update_reputation(
-    state: &State,
-    rwtxn: &mut RwTxn,
-    filled_tx: &FilledTransaction,
-) -> Result<(), Error> {
-    use crate::state::voting::types::VoterId;
-
-    let update_data = filled_tx.update_reputation().ok_or_else(|| {
-        Error::InvalidTransaction {
-            reason: "Not a reputation update transaction".to_string(),
-        }
-    })?;
-
-    let voter_id = VoterId::from_bytes(update_data.voter_id[0..20].try_into().map_err(
-        |_| Error::InvalidTransaction {
-            reason: "Invalid voter ID format".to_string(),
-        },
-    )?);
-
-    // Get current reputation
-    let mut reputation = state
-        .voting()
-        .databases()
-        .get_voter_reputation(rwtxn, voter_id)?
-        .ok_or_else(|| Error::InvalidTransaction {
-            reason: "Voter not found for reputation revert".to_string(),
-        })?;
-
-    // Rollback to previous reputation using history
-    if reputation.rollback_update().is_some() {
-        // Store the reverted reputation
-        state
-            .voting()
-            .databases()
-            .put_voter_reputation(rwtxn, &reputation)?;
-    } else {
-        // If no history available (shouldn't happen), log error but don't fail
-        // This maintains system liveness during reorgs
-        return Err(Error::InvalidTransaction {
-            reason: "Cannot revert reputation: no history available".to_string(),
-        });
-    }
-
     Ok(())
 }

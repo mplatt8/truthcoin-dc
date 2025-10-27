@@ -1277,6 +1277,23 @@ impl VoteValidator {
         let decision_id = SlotId::from_bytes(vote_data.slot_id_bytes)?;
         let decision = Self::validate_decision_slot(state, rotxn, decision_id)?;
 
+        // BITCOIN HIVEMIND PRINCIPLE: Validate period matches slot's expected voting period
+        // Slots claimed in period N are voted on in period N (same period)
+        let slot_claim_period = decision_id.period_index();
+        let expected_voting_period = decision_id.voting_period();
+
+        if vote_data.voting_period != expected_voting_period {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "Vote period mismatch: slot {} was claimed in period {} and must be voted on in period {}, but transaction specifies period {}",
+                    hex::encode(vote_data.slot_id_bytes),
+                    slot_claim_period,
+                    expected_voting_period,
+                    vote_data.voting_period
+                ),
+            });
+        }
+
         // Validate vote value using shared helper
         Self::validate_vote_value(&decision, vote_data.vote_value)?;
 
@@ -1346,6 +1363,24 @@ impl VoteValidator {
         // Validate each vote in the batch using shared helpers
         for (idx, vote_item) in batch_data.votes.iter().enumerate() {
             let decision_id = SlotId::from_bytes(vote_item.slot_id_bytes)?;
+
+            // BITCOIN HIVEMIND PRINCIPLE: Validate period matches slot's expected voting period
+            // Slots claimed in period N are voted on in period N (same period)
+            let slot_claim_period = decision_id.period_index();
+            let expected_voting_period = decision_id.voting_period();
+
+            if batch_data.voting_period != expected_voting_period {
+                return Err(Error::InvalidTransaction {
+                    reason: format!(
+                        "Vote batch item {}: period mismatch - slot {} was claimed in period {} and must be voted on in period {}, but batch specifies period {}",
+                        idx,
+                        hex::encode(vote_item.slot_id_bytes),
+                        slot_claim_period,
+                        expected_voting_period,
+                        batch_data.voting_period
+                    ),
+                });
+            }
 
             // Validate decision slot using shared helper with batch context
             let decision = Self::validate_decision_slot(state, rotxn, decision_id)
@@ -1528,67 +1563,5 @@ impl PeriodValidator {
             });
         }
         Ok(())
-    }
-}
-
-/// Period calculation utilities.
-pub struct PeriodCalculator;
-
-impl PeriodCalculator {
-    /// Convert block height to testing period.
-    ///
-    /// # Single Source of Truth
-    /// Block heights are 0-indexed and directly map to periods:
-    /// - Heights 0-9   → Period 1
-    /// - Heights 10-19 → Period 2
-    /// - Heights 20-29 → Period 3
-    /// - Heights 30-39 → Period 4
-    ///
-    /// This ensures consistent period boundaries across all subsystems.
-    #[inline(always)]
-    pub const fn block_height_to_testing_period(
-        block_height: u32,
-        testing_blocks_per_period: u32,
-    ) -> u32 {
-        // Use const function for compile-time optimization when possible
-        if testing_blocks_per_period == 0 {
-            0
-        } else {
-            // Direct division: heights 0-9 = period 1, 10-19 = period 2, etc.
-            (block_height / testing_blocks_per_period) + 1
-        }
-    }
-
-    /// Convert L1 timestamp to production period.
-    #[inline]
-    pub fn timestamp_to_period(timestamp: u64) -> u32 {
-        // Handle pre-genesis timestamps
-        if timestamp < crate::types::BITCOIN_GENESIS_TIMESTAMP {
-            return 0;
-        }
-
-        let elapsed_seconds =
-            timestamp - crate::types::BITCOIN_GENESIS_TIMESTAMP;
-
-        (elapsed_seconds / crate::types::SECONDS_PER_QUARTER) as u32
-    }
-
-    /// Get human-readable period name for timestamp with stack allocation
-    ///
-    /// Provides quarter-year formatting for period display using stack-based string building
-    #[inline]
-    pub fn period_to_name(period_index: u32) -> String {
-        let year = 2009_u32.wrapping_add(period_index / 4);
-        let quarter = (period_index % 4) + 1;
-
-        // Use format! which is more efficient than string concatenation
-        format!("Q{} {}", quarter, year)
-    }
-
-    /// Validate period index is within reasonable bounds (performance optimization)
-    #[inline(always)]
-    pub const fn is_valid_period_index(period_index: u32) -> bool {
-        // Reasonable upper bound: ~1000 years from 2009
-        period_index < 4000
     }
 }

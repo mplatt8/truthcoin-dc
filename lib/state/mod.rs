@@ -932,12 +932,6 @@ impl State {
             }
         }
 
-        // Validate reputation updates (system transactions only - minimal validation)
-        if tx.is_update_reputation() {
-            // Reputation updates are typically system-generated after consensus
-            // Validation is minimal here, actual logic in block application
-        }
-
         // Validate share redemption
         if tx
             .transaction

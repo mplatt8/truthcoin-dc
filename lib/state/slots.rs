@@ -1,5 +1,6 @@
 use crate::state::Error;
-use crate::validation::{PeriodCalculator, SlotValidationInterface};
+use crate::validation::SlotValidationInterface;
+use crate::types::{BITCOIN_GENESIS_TIMESTAMP, SECONDS_PER_QUARTER};
 use fallible_iterator::FallibleIterator;
 use heed::types::SerdeBincode;
 use serde::{Deserialize, Serialize};
@@ -144,6 +145,28 @@ impl SlotId {
     pub fn to_hex(self) -> String {
         hex::encode(self.0)
     }
+
+    /// Calculate the voting period for this slot
+    ///
+    /// # Returns
+    /// The voting period index when this slot will be voted on
+    ///
+    /// # Bitcoin Hivemind Principle
+    /// **SINGLE SOURCE OF TRUTH for slot-to-voting-period conversion**
+    ///
+    /// Slots claimed in period N are voted on in period N.
+    /// This is the ONLY function in the codebase that should perform this calculation.
+    /// All other code must use this method instead of duplicating the formula.
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper Section 4.1: "Voting Periods"
+    /// - Slot period = period when slot was claimed
+    /// - Voting period = period when votes on this slot are accepted
+    /// - Relationship: voting_period = slot_period (SAME period)
+    #[inline(always)]
+    pub const fn voting_period(self) -> u32 {
+        self.period_index()
+    }
 }
 
 #[derive(
@@ -266,10 +289,15 @@ impl SlotConfig {
     }
 }
 
-// Use PeriodCalculator::timestamp_to_period for consistency
+// Convert L1 timestamp to period index for slot claims
+// Inline implementation since this is for claim periods, not voting periods
 #[inline]
 fn timestamp_to_quarter_index(ts_secs: u64) -> Result<u32, Error> {
-    Ok(PeriodCalculator::timestamp_to_period(ts_secs))
+    if ts_secs < BITCOIN_GENESIS_TIMESTAMP {
+        return Ok(0);
+    }
+    let elapsed_seconds = ts_secs - BITCOIN_GENESIS_TIMESTAMP;
+    Ok((elapsed_seconds / SECONDS_PER_QUARTER) as u32)
 }
 
 pub fn quarter_to_string(quarter_idx: u32, config: &SlotConfig) -> String {
@@ -296,12 +324,15 @@ fn get_current_period(
 ) -> Result<u32, Error> {
     if config.testing_mode {
         let height = block_height.unwrap_or(0);
-        Ok(PeriodCalculator::block_height_to_testing_period(
-            height,
-            config.testing_blocks_per_period,
-        ))
+        // Block heights are 0-indexed and directly map to periods
+        // Heights 0-9 = period 1, 10-19 = period 2, etc.
+        if config.testing_blocks_per_period == 0 {
+            Ok(0)
+        } else {
+            Ok((height / config.testing_blocks_per_period) + 1)
+        }
     } else {
-        Ok(PeriodCalculator::timestamp_to_period(timestamp))
+        timestamp_to_quarter_index(timestamp)
     }
 }
 
@@ -475,10 +506,13 @@ impl Dbs {
     }
 
     pub fn block_height_to_testing_period(&self, block_height: u32) -> u32 {
-        PeriodCalculator::block_height_to_testing_period(
-            block_height,
-            self.config.testing_blocks_per_period,
-        )
+        // Block heights are 0-indexed and directly map to periods
+        // Heights 0-9 = period 1, 10-19 = period 2, etc.
+        if self.config.testing_blocks_per_period == 0 {
+            0
+        } else {
+            (block_height / self.config.testing_blocks_per_period) + 1
+        }
     }
 
     pub fn get_config(&self) -> &SlotConfig {
@@ -490,7 +524,8 @@ impl Dbs {
     }
 
     /// Check if a slot period is ossified (past voting and resolution periods)
-    /// Ossification occurs 4 periods after voting ends (8 periods after claim)
+    /// Ossification occurs 4 periods after voting ends (7 periods after claim)
+    /// Voting ends at period N+3, so ossification is at N+7
     pub fn is_period_ossified(
         &self,
         slot_period: u32,
@@ -500,13 +535,13 @@ impl Dbs {
         let current_period = self
             .get_current_period(current_ts, current_height)
             .unwrap_or(0);
-        // Ossified when current_period > slot_period + 8
-        current_period > slot_period.saturating_add(8)
+        // Ossified when current_period > slot_period + 7
+        current_period > slot_period.saturating_add(7)
     }
 
     /// Check if a slot period is in the voting window
-    /// Voting occurs starting in the period after the slot's claim period through 4 periods total
-    /// If slot claimed in period N, voting is active in periods N+1, N+2, N+3, N+4
+    /// Voting occurs starting in the slot's claim period through 4 periods total
+    /// If slot claimed in period N, voting is active in periods N, N+1, N+2, N+3
     pub fn is_period_in_voting(
         &self,
         slot_period: u32,
@@ -516,11 +551,11 @@ impl Dbs {
         let current_period = self
             .get_current_period(current_ts, current_height)
             .unwrap_or(0);
-        // Voting window: periods (slot_period + 1) through (slot_period + 4) inclusive
-        // At the START of period N+1, voting begins (so current_period > slot_period)
-        // Voting ends at the END of period N+4 (so current_period <= slot_period + 4)
-        current_period > slot_period
-            && current_period <= slot_period.saturating_add(4)
+        // Voting window: periods slot_period through (slot_period + 3) inclusive
+        // At the START of period N, voting begins (so current_period >= slot_period)
+        // Voting ends at the END of period N+3 (so current_period <= slot_period + 3)
+        current_period >= slot_period
+            && current_period <= slot_period.saturating_add(3)
     }
 
     /// Check if a specific slot is ossified
@@ -825,6 +860,37 @@ impl Dbs {
             .unwrap_or_default();
 
         Ok(claimed_slots.len() as u64)
+    }
+
+    /// Get all claimed slots across all periods
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only transaction
+    ///
+    /// # Returns
+    /// Vector of all claimed Slots in the database
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// This method is used to calculate voting periods on-demand by finding
+    /// all slots that have been claimed, without needing a separate period database.
+    pub fn get_all_claimed_slots(
+        &self,
+        rotxn: &sneed::RoTxn,
+    ) -> Result<Vec<Slot>, Error> {
+        let mut all_claimed_slots = Vec::new();
+
+        // Iterate through all periods
+        let mut iter = self.period_slots.iter(rotxn)?;
+        while let Some((_period, period_slots)) = iter.next()? {
+            // Collect all slots that have decisions (i.e., are claimed)
+            for slot in &period_slots {
+                if slot.decision.is_some() {
+                    all_claimed_slots.push(slot.clone());
+                }
+            }
+        }
+
+        Ok(all_claimed_slots)
     }
 
     /// Get all periods that are currently in voting

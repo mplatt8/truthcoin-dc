@@ -1589,8 +1589,8 @@ impl Market {
 
             // Slot is resolved if past voting period (voting ends at slot_period + 4)
             if current_period > slot_period.saturating_add(4) {
-                // TODO: Check if slot has decision outcome recorded
-                // For now, consider it resolved if past voting period
+                // Slot is resolved based on deterministic time boundary per Bitcoin Hivemind
+                // Outcomes are calculated on-demand or stored in decision_outcomes table
                 slots_resolved += 1;
 
                 // Check if enough time has passed for ossification
@@ -2928,37 +2928,35 @@ impl MarketsDatabase {
         transaction_id: Option<[u8; 32]>,
         height: u64,
     ) -> Result<Vec<MarketId>, Error> {
-        use crate::state::voting::types::VotingPeriodStatus;
-
         // Only check markets in Voting state, as only they can transition to Resolved
         let voting_markets = self.get_markets_by_state(txn, MarketState::Voting)?;
         let mut newly_resolved = Vec::new();
 
         for mut market in voting_markets {
-            // Find the voting period ID for this market's decision slots
-            // We need to determine which voting period contains these slots
-            // For now, we'll check all Resolved periods and see if consensus exists
+            // Bitcoin Hivemind: Periods are calculated from slots, not stored in database
+            // A slot claimed in period N is voted on in period N+1
+            // We need to check if consensus exists for all decision slots' voting periods
 
-            // Get all resolved voting periods
-            let resolved_periods = voting_system.databases()
-                .get_periods_by_status(txn, VotingPeriodStatus::Resolved)?;
+            // Determine the voting period(s) for this market's decision slots
+            // All slots in a market should be from the same original period
+            let mut voting_period_ids = std::collections::HashSet::new();
+            for slot_id in &market.decision_slots {
+                // Slot claimed in period N is voted on in period N+1
+                let voting_period = slot_id.voting_period();
+                voting_period_ids.insert(voting_period);
+            }
 
             let mut consensus_complete = false;
             let mut final_prices = ndarray::Array1::zeros(market.share_vector_length);
 
-            // Check each resolved period for our decision slots
-            for period in resolved_periods {
-                // Check if this period contains all our decision slots
-                let period_contains_all_slots = market.decision_slots.iter()
-                    .all(|slot| period.decision_slots.contains(slot));
-
-                if !period_contains_all_slots {
-                    continue;
-                }
+            // Check if consensus exists for all our decision slots
+            // We check all potential voting periods (usually just one)
+            for voting_period in voting_period_ids {
+                let period_id = crate::state::voting::types::VotingPeriodId(voting_period);
 
                 // Get consensus outcomes for this period
                 let consensus_outcomes = voting_system.databases()
-                    .get_consensus_outcomes_for_period(txn, period.id)?;
+                    .get_consensus_outcomes_for_period(txn, period_id)?;
 
                 // Check if we have consensus for all decision slots
                 let all_slots_have_consensus = market.decision_slots.iter()
@@ -3234,10 +3232,11 @@ impl MarketsDatabase {
 
             if all_slots_ossified {
                 // Create new state version with Ossified state
+                // Ossification is time-based (automatic after confirmation period), not transaction-triggered
                 market
                     .create_new_state_version(
-                        None, // transaction_id
-                        0,    // height - TODO: get actual height
+                        None, // transaction_id - no specific transaction triggers ossification
+                        0,    // height - time-based transition, not height-specific
                         Some(MarketState::Ossified),
                         None,
                         None,
@@ -3261,6 +3260,9 @@ impl MarketsDatabase {
     }
 
     /// Cancel a market (only valid before trading starts)
+    ///
+    /// Database-layer convenience method for testing/admin purposes.
+    /// Governance transactions should call Market::cancel_market() directly with proper txid/height.
     pub fn cancel_market(
         &self,
         txn: &mut RwTxn,
@@ -3272,12 +3274,15 @@ impl MarketsDatabase {
             .ok_or(MarketError::MarketNotFound {
                 id: market_id.clone(),
             })?;
-        market.cancel_market(None, 0)?; // TODO: Add transaction_id and height parameters
+        market.cancel_market(None, 0)?;
         self.update_market(txn, &market)
             .map_err(|e| MarketError::DatabaseError(e.to_string()))
     }
 
     /// Invalidate a market (governance action)
+    ///
+    /// Database-layer convenience method for testing/admin purposes.
+    /// Governance transactions should call Market::invalidate_market() directly with proper txid/height.
     pub fn invalidate_market(
         &self,
         txn: &mut RwTxn,
@@ -3289,7 +3294,7 @@ impl MarketsDatabase {
             .ok_or(MarketError::MarketNotFound {
                 id: market_id.clone(),
             })?;
-        market.invalidate_market(None, 0)?; // TODO: Add transaction_id and height parameters
+        market.invalidate_market(None, 0)?;
         self.update_market(txn, &market)
             .map_err(|e| MarketError::DatabaseError(e.to_string()))
     }

@@ -1040,24 +1040,24 @@ where
     /// Get all available (unclaimed) slot IDs in a specific period
     pub fn get_available_slots_in_period(
         &self,
-        period_index: u32,
+        period_id: crate::state::voting::types::VotingPeriodId,
     ) -> Result<Vec<crate::state::slots::SlotId>, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self
             .state
-            .get_available_slots_in_period(&rotxn, period_index)?)
+            .get_available_slots_in_period(&rotxn, period_id.as_u32())?)
     }
 
     /// Get all claimed slots in a specific period
     pub fn get_claimed_slots_in_period(
         &self,
-        period_index: u32,
+        period_id: crate::state::voting::types::VotingPeriodId,
     ) -> Result<Vec<crate::state::slots::Slot>, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self
             .state
             .slots()
-            .get_claimed_slots_in_period(&rotxn, period_index)?)
+            .get_claimed_slots_in_period(&rotxn, period_id.as_u32())?)
     }
 
     /// Check if a slot is in voting period
@@ -1095,12 +1095,12 @@ where
     /// Get the count of claimed slots in a specific period
     pub fn get_claimed_slot_count_in_period(
         &self,
-        period_index: u32,
+        period_id: crate::state::voting::types::VotingPeriodId,
     ) -> Result<u64, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self
             .state
-            .get_claimed_slot_count_in_period(&rotxn, period_index)?)
+            .get_claimed_slot_count_in_period(&rotxn, period_id.as_u32())?)
     }
 
     /// Check if the slots system is in testing mode
@@ -1111,6 +1111,16 @@ where
     /// Get testing mode configuration (blocks per period)
     pub fn get_slots_testing_config(&self) -> u32 {
         self.state.slots().get_testing_blocks_per_period()
+    }
+
+    /// Get slot configuration (public accessor for RPC layer)
+    pub fn get_slot_config(&self) -> &crate::state::slots::SlotConfig {
+        self.state.slots().get_config()
+    }
+
+    /// Get slots database reference (public accessor for RPC layer)
+    pub fn get_slots_db(&self) -> &crate::state::slots::Dbs {
+        self.state.slots()
     }
 
     /// Convert timestamp to quarter index
@@ -1266,6 +1276,89 @@ where
     ) -> Result<u32, Error> {
         self.state
             .get_votecoin_balance(rotxn, address)
+            .map_err(Into::into)
+    }
+
+    /// Get current tip block height from the archive
+    pub fn get_tip_height(&self) -> Result<u32, Error> {
+        self.try_get_tip_height()?
+            .ok_or_else(|| Error::State(Box::new(state::Error::InvalidTransaction {
+                reason: "No tip height found".to_string()
+            })))
+    }
+
+    /// Get the last block timestamp
+    pub fn get_last_block_timestamp(&self) -> Result<u64, Error> {
+        // For now, use the current system time as a placeholder
+        // This should be replaced with the actual block timestamp when available
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| Error::State(Box::new(state::Error::InvalidTransaction {
+                reason: format!("Failed to get current time: {}", e)
+            })))?;
+        Ok(timestamp.as_secs())
+    }
+
+    /// Resolve voting period decisions with consensus
+    ///
+    /// This method performs consensus calculation for a voting period:
+    /// 1. Snapshots Votecoin proportions for all voters (cached for performance)
+    /// 2. Calculates and stores consensus outcomes
+    ///
+    /// # Performance Optimization
+    /// The Votecoin proportion snapshot reduces consensus resolution complexity
+    /// from O(N×U) to O(N) by caching proportions once at period close time.
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Periods are calculated on-demand from slots, not stored in database.
+    pub fn resolve_voting_period(
+        &self,
+        period_id: crate::state::voting::types::VotingPeriodId,
+    ) -> Result<Vec<crate::state::voting::types::DecisionOutcome>, Error> {
+        let mut rwtxn = self.env.write_txn()?;
+        let current_timestamp = self.get_last_block_timestamp()?;
+        let current_height = self.get_tip_height()?;
+
+        // First, snapshot Votecoin proportions for all voters
+        // This is a performance optimization to avoid O(N×U) recalculation
+        self.state.voting().snapshot_votecoin_proportions(
+            &mut rwtxn,
+            period_id,
+            &self.state,
+            current_height as u64,
+        )?;
+
+        // Get slot configuration and database references
+        let config = self.state.slots().get_config();
+        let slots_db = self.state.slots();
+
+        // Resolve period decisions using the new signature with config and slots_db
+        let outcomes = self.state.voting().resolve_period_decisions(
+            &mut rwtxn,
+            period_id,
+            current_timestamp,
+            current_height as u64,
+            &self.state,
+            config,
+            slots_db,
+        )?;
+
+        rwtxn.commit()
+            .map_err(|e| Error::DbWrite(RwTxnError::Commit(e)))?;
+        Ok(outcomes)
+    }
+
+    /// Get consensus outcomes for a voting period
+    pub fn get_consensus_outcomes(
+        &self,
+        period_id: crate::state::voting::types::VotingPeriodId,
+    ) -> Result<std::collections::HashMap<crate::state::slots::SlotId, f64>, Error> {
+        let rotxn = self.env.read_txn()?;
+        self.state
+            .voting()
+            .databases()
+            .get_consensus_outcomes_for_period(&rotxn, period_id)
             .map_err(Into::into)
     }
 }

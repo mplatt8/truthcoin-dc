@@ -2,6 +2,7 @@ use crate::state::slots::SlotId;
 use crate::state::rollback::{RollBack, TxidStamped};
 use crate::types::{Address, Txid, hashes};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(
     Clone,
@@ -50,10 +51,25 @@ pub struct VotingPeriod {
     pub end_timestamp: u64,
     pub status: VotingPeriodStatus,
     pub decision_slots: Vec<SlotId>,
+    /// DEPRECATED: This field is not used for calculated periods (will be removed in future)
+    /// For backwards compatibility with old stored periods, defaults to 0 for new instances
+    #[serde(default)]
     pub created_at_height: u64,
 }
 
 impl VotingPeriod {
+    /// Create a calculated voting period (standard constructor)
+    ///
+    /// # Arguments
+    /// * `id` - Period identifier
+    /// * `start_timestamp` - Period start time
+    /// * `end_timestamp` - Period end time
+    /// * `decision_slots` - Slots to be voted on in this period
+    /// * `created_at_height` - DEPRECATED, use 0 for calculated periods
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Periods are calculated on-demand from slots. The created_at_height field
+    /// is deprecated and will be removed in future versions.
     pub fn new(
         id: VotingPeriodId,
         start_timestamp: u64,
@@ -269,15 +285,10 @@ pub struct VoterReputation {
     /// Cached Votecoin holdings proportion (0.0 to 1.0) of total supply
     /// This is updated when voting weights are calculated to avoid repeated UTXO queries
     pub votecoin_proportion: f64,
-    /// Final voting weight combining reputation and Votecoin holdings
-    /// Calculated as: reputation × votecoin_proportion
-    pub voting_weight: f64,
     /// Total number of decisions this voter has participated in
     pub total_decisions: u64,
     /// Number of decisions where voter was in consensus
     pub correct_decisions: u64,
-    /// Running average of voter accuracy
-    pub accuracy_rate: f64,
     /// Timestamp of last reputation update
     pub last_updated: u64,
     /// Voting period when reputation was last calculated
@@ -314,7 +325,10 @@ impl VoterReputation {
         timestamp: u64,
         period_id: VotingPeriodId,
     ) -> Self {
-        let reputation = initial_reputation.clamp(0.0, 1.0);
+        let reputation = initial_reputation.clamp(
+            crate::math::voting::constants::REPUTATION_MIN,
+            crate::math::voting::constants::REPUTATION_MAX,
+        );
 
         // Initialize reputation history with genesis/initial transaction
         // Uses a zero txid to represent the initial state
@@ -325,15 +339,44 @@ impl VoterReputation {
             voter_id,
             reputation,
             votecoin_proportion: 0.0, // Must be updated with actual holdings
-            voting_weight: 0.0, // Will be calculated when Votecoin proportion is set
             total_decisions: 0,
             correct_decisions: 0,
-            accuracy_rate: 0.0,
             last_updated: timestamp,
             last_period: period_id,
             votecoin_updated_height: None,
             reputation_history,
         }
+    }
+
+    /// Create initial reputation with default neutral value
+    ///
+    /// # Arguments
+    /// * `voter_id` - ID of the voter
+    /// * `timestamp` - Current timestamp
+    /// * `period_id` - Current voting period
+    ///
+    /// # Returns
+    /// VoterReputation initialized with neutral starting reputation (0.5)
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// This is the preferred method for creating new voter reputations.
+    /// Uses BITCOIN_HIVEMIND_NEUTRAL_VALUE constant to ensure consistency
+    /// across all initialization points.
+    ///
+    /// # Single Source of Truth
+    /// All code creating new voter reputations MUST use this method instead
+    /// of calling new() with hard-coded 0.5 to maintain architectural consistency.
+    pub fn new_default(
+        voter_id: VoterId,
+        timestamp: u64,
+        period_id: VotingPeriodId,
+    ) -> Self {
+        Self::new(
+            voter_id,
+            crate::math::voting::constants::BITCOIN_HIVEMIND_NEUTRAL_VALUE,
+            timestamp,
+            period_id,
+        )
     }
 
     /// Update base reputation based on voting performance
@@ -369,19 +412,15 @@ impl VoterReputation {
             self.correct_decisions += 1;
         }
 
-        self.accuracy_rate = if self.total_decisions > 0 {
+        // Update base reputation (can be enhanced with more sophisticated algorithms)
+        let accuracy_rate = if self.total_decisions > 0 {
             self.correct_decisions as f64 / self.total_decisions as f64
         } else {
             0.0
         };
-
-        // Update base reputation (can be enhanced with more sophisticated algorithms)
-        self.reputation = self.accuracy_rate.clamp(0.0, 1.0);
+        self.reputation = accuracy_rate.clamp(0.0, 1.0);
         self.last_updated = timestamp;
         self.last_period = period_id;
-
-        // Recalculate final voting weight with updated reputation
-        self.update_voting_weight();
     }
 
     /// Rollback the most recent reputation update
@@ -400,16 +439,6 @@ impl VoterReputation {
             // Decrement counters (note: this is approximate as we don't track
             // individual decision correctness in history)
             self.total_decisions = self.total_decisions.saturating_sub(1);
-
-            // Recalculate accuracy rate
-            self.accuracy_rate = if self.total_decisions > 0 {
-                self.correct_decisions as f64 / self.total_decisions as f64
-            } else {
-                0.0
-            };
-
-            // Recalculate voting weight
-            self.update_voting_weight();
 
             Some(previous_reputation)
         } else {
@@ -433,28 +462,22 @@ impl VoterReputation {
     ) {
         self.votecoin_proportion = votecoin_proportion.clamp(0.0, 1.0);
         self.votecoin_updated_height = Some(current_height);
-        self.update_voting_weight();
     }
 
-    /// Recalculate final voting weight from reputation and Votecoin proportion
+    /// Calculate the final voting weight for consensus calculations on-demand
+    ///
+    /// # Returns
+    /// Final voting weight incorporating both reputation and Votecoin holdings
     ///
     /// # Bitcoin Hivemind Formula
     /// **Final Voting Weight = Base Reputation × Votecoin Holdings Proportion**
     ///
-    /// Special cases handled:
-    /// - If no Votecoin holdings (proportion = 0.0), voting weight = 0.0
-    /// - If no reputation (reputation = 0.0), voting weight = 0.0
-    /// - This ensures both economic stake and performance matter for influence
-    pub fn update_voting_weight(&mut self) {
-        self.voting_weight = self.reputation * self.votecoin_proportion;
-    }
-
-    /// Get the final voting weight for consensus calculations
-    ///
-    /// # Returns
-    /// Final voting weight incorporating both reputation and Votecoin holdings
+    /// This is calculated on-demand rather than stored to:
+    /// - Reduce redundancy (derived from stored fields)
+    /// - Prevent inconsistency if fields update separately
+    /// - Save memory (one less f64 field per voter)
     pub fn get_voting_weight(&self) -> f64 {
-        self.voting_weight
+        self.reputation * self.votecoin_proportion
     }
 
     /// Get base reputation score (without Votecoin weighting)
@@ -471,6 +494,23 @@ impl VoterReputation {
     /// Cached Votecoin proportion (may need refresh if UTXO set changed)
     pub fn get_votecoin_proportion(&self) -> f64 {
         self.votecoin_proportion
+    }
+
+    /// Calculate accuracy rate on-demand
+    ///
+    /// # Returns
+    /// Running average of voter accuracy (correct_decisions / total_decisions)
+    ///
+    /// This is calculated on-demand rather than stored to:
+    /// - Reduce redundancy (derived from correct_decisions and total_decisions)
+    /// - Prevent inconsistency if counters update separately
+    /// - Save memory (one less f64 field per voter)
+    pub fn get_accuracy_rate(&self) -> f64 {
+        if self.total_decisions > 0 {
+            self.correct_decisions as f64 / self.total_decisions as f64
+        } else {
+            0.0
+        }
     }
 
     /// Check if Votecoin proportion needs refresh based on block height
@@ -900,6 +940,15 @@ pub struct VotingPeriodStats {
     pub consensus_decisions: u64,
     /// Timestamp when statistics were calculated
     pub calculated_at: u64,
+    /// First principal component from SVD (only populated after consensus)
+    pub first_loading: Option<Vec<f64>>,
+    /// Variance explained by the first component (0.0 to 1.0, only after consensus)
+    pub explained_variance: Option<f64>,
+    /// Average certainty score across all decisions (0.0 to 1.0, only after consensus)
+    pub certainty: Option<f64>,
+    /// Reputation changes from consensus: maps VoterId to (old_reputation, new_reputation)
+    /// This is populated during consensus calculation to track reputation updates
+    pub reputation_changes: Option<HashMap<VoterId, (f64, f64)>>,
 }
 
 impl VotingPeriodStats {
@@ -914,6 +963,10 @@ impl VotingPeriodStats {
             total_reputation_weight: 0.0,
             consensus_decisions: 0,
             calculated_at,
+            first_loading: None,
+            explained_variance: None,
+            certainty: None,
+            reputation_changes: None,
         }
     }
 
@@ -1002,13 +1055,13 @@ mod tests {
         reputation.update(true, 1100, VotingPeriodId::new(2), Txid([1u8; 32]), 1);
         assert_eq!(reputation.total_decisions, 1);
         assert_eq!(reputation.correct_decisions, 1);
-        assert_eq!(reputation.accuracy_rate, 1.0);
+        assert_eq!(reputation.get_accuracy_rate(), 1.0);
         assert_eq!(reputation.reputation, 1.0);
 
         reputation.update(false, 1200, VotingPeriodId::new(3), Txid([2u8; 32]), 2);
         assert_eq!(reputation.total_decisions, 2);
         assert_eq!(reputation.correct_decisions, 1);
-        assert_eq!(reputation.accuracy_rate, 0.5);
+        assert_eq!(reputation.get_accuracy_rate(), 0.5);
         assert_eq!(reputation.reputation, 0.5);
     }
 

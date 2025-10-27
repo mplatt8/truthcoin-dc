@@ -5,12 +5,12 @@
 //! ACID principles and are optimized for the sparse matrix nature of voting data.
 //!
 //! ## Database Schema
-//! - `voting_periods`: VotingPeriodId -> VotingPeriod
 //! - `votes`: VoteMatrixKey -> VoteMatrixEntry
-//! - `vote_matrices`: (VotingPeriodId, u32) -> VoteBatch (for bulk operations)
+//! - `vote_batches`: (VotingPeriodId, u32) -> VoteBatch (for bulk operations)
 //! - `voter_reputation`: VoterId -> VoterReputation
-//! - `decision_outcomes`: (VotingPeriodId, SlotId) -> DecisionOutcome
+//! - `decision_outcomes`: SlotId -> DecisionOutcome (period derived from slot.period_index() + 1)
 //! - `period_stats`: VotingPeriodId -> VotingPeriodStats
+//! - `consensus_outcomes`: (VotingPeriodId, SlotId) -> f64 (for reputation calculation)
 //!
 //! ## Bitcoin Hivemind Specification References
 //! - Section 4: "Consensus Algorithm" - Vote matrix storage requirements
@@ -28,15 +28,12 @@ use std::collections::{HashMap, HashSet};
 /// This struct encapsulates all database tables needed for the voting mechanism,
 /// providing a clean interface for CRUD operations while maintaining ACID
 /// transaction semantics as required by the Bitcoin Hivemind specification.
+///
+/// ## Architecture Note
+/// Voting periods are NOT stored in the database. They are calculated on-demand
+/// from slots using period_calculator. This ensures a single source of truth.
 #[derive(Clone)]
 pub struct VotingDatabases {
-    /// Core voting periods database
-    /// Key: VotingPeriodId, Value: VotingPeriod
-    voting_periods: DatabaseUnique<
-        SerdeBincode<VotingPeriodId>,
-        SerdeBincode<VotingPeriod>,
-    >,
-
     /// Individual votes in sparse matrix format
     /// Key: VoteMatrixKey, Value: VoteMatrixEntry
     votes: DatabaseUnique<
@@ -57,9 +54,10 @@ pub struct VotingDatabases {
         DatabaseUnique<SerdeBincode<VoterId>, SerdeBincode<VoterReputation>>,
 
     /// Final decision outcomes after consensus
-    /// Key: (VotingPeriodId, SlotId), Value: DecisionOutcome
+    /// Key: SlotId, Value: DecisionOutcome
+    /// Period is derived from slot.period_index() + 1
     decision_outcomes: DatabaseUnique<
-        SerdeBincode<(VotingPeriodId, crate::state::slots::SlotId)>,
+        SerdeBincode<crate::state::slots::SlotId>,
         SerdeBincode<DecisionOutcome>,
     >,
 
@@ -69,19 +67,12 @@ pub struct VotingDatabases {
         SerdeBincode<VotingPeriodId>,
         SerdeBincode<VotingPeriodStats>,
     >,
-
-    /// Consensus outcomes for reputation calculation
-    /// Key: (VotingPeriodId, SlotId), Value: f64 (consensus outcome)
-    /// This is used to compare voter votes against consensus for reputation updates
-    consensus_outcomes: DatabaseUnique<
-        SerdeBincode<(VotingPeriodId, crate::state::slots::SlotId)>,
-        SerdeBincode<f64>,
-    >,
 }
 
 impl VotingDatabases {
     /// Number of database tables managed by this struct
-    pub const NUM_DBS: u32 = 7;
+    /// Reduced from 6 to 5 after removing consensus_outcomes table (redundant with decision_outcomes)
+    pub const NUM_DBS: u32 = 5;
 
     /// Create new voting databases
     ///
@@ -94,13 +85,15 @@ impl VotingDatabases {
     ///
     /// # Errors
     /// Returns database creation errors if any table fails to initialize
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Voting periods are NOT stored in the database. They are calculated on-demand
+    /// from the slots database using period_calculator, ensuring a single source of truth.
+    ///
+    /// Consensus outcomes are NOT stored separately. They are stored as part of DecisionOutcome
+    /// and extracted on-demand to eliminate redundancy.
     pub fn new(env: &Env, rwtxn: &mut RwTxn<'_>) -> Result<Self, Error> {
         Ok(Self {
-            voting_periods: DatabaseUnique::create(
-                env,
-                rwtxn,
-                "voting_periods",
-            )?,
             votes: DatabaseUnique::create(env, rwtxn, "votes")?,
             vote_batches: DatabaseUnique::create(env, rwtxn, "vote_batches")?,
             voter_reputation: DatabaseUnique::create(
@@ -114,131 +107,19 @@ impl VotingDatabases {
                 "decision_outcomes",
             )?,
             period_stats: DatabaseUnique::create(env, rwtxn, "period_stats")?,
-            consensus_outcomes: DatabaseUnique::create(
-                env,
-                rwtxn,
-                "consensus_outcomes",
-            )?,
         })
     }
 
     // ================================================================================
     // Voting Period Operations
     // ================================================================================
-
-    /// Store a voting period
-    ///
-    /// # Arguments
-    /// * `rwtxn` - Read-write transaction
-    /// * `period` - Voting period to store
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Ensures periods are stored with deterministic ordering and immutable
-    /// once created, maintaining consensus across all network participants.
-    pub fn put_voting_period(
-        &self,
-        rwtxn: &mut RwTxn,
-        period: &VotingPeriod,
-    ) -> Result<(), Error> {
-        self.voting_periods.put(rwtxn, &period.id, period)?;
-        Ok(())
-    }
-
-    /// Retrieve a voting period by ID
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `period_id` - ID of period to retrieve
-    ///
-    /// # Returns
-    /// Some(VotingPeriod) if found, None otherwise
-    pub fn get_voting_period(
-        &self,
-        rotxn: &RoTxn,
-        period_id: VotingPeriodId,
-    ) -> Result<Option<VotingPeriod>, Error> {
-        Ok(self.voting_periods.try_get(rotxn, &period_id)?)
-    }
-
-    /// Update voting period status
-    ///
-    /// # Arguments
-    /// * `rwtxn` - Read-write transaction
-    /// * `period_id` - ID of period to update
-    /// * `new_status` - New status to set
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Status transitions follow the deterministic lifecycle defined in the
-    /// whitepaper: Pending -> Active -> Closed -> Resolved
-    pub fn update_period_status(
-        &self,
-        rwtxn: &mut RwTxn,
-        period_id: VotingPeriodId,
-        new_status: VotingPeriodStatus,
-    ) -> Result<(), Error> {
-        if let Some(mut period) =
-            self.voting_periods.try_get(rwtxn, &period_id)?
-        {
-            period.status = new_status;
-            self.voting_periods.put(rwtxn, &period_id, &period)?;
-        }
-        Ok(())
-    }
-
-    /// Get all voting periods with a specific status
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `status` - Status to filter by
-    ///
-    /// # Returns
-    /// Vector of periods matching the status
-    pub fn get_periods_by_status(
-        &self,
-        rotxn: &RoTxn,
-        status: VotingPeriodStatus,
-    ) -> Result<Vec<VotingPeriod>, Error> {
-        let mut periods = Vec::new();
-        let mut iter = self.voting_periods.iter(rotxn)?;
-
-        while let Some((_period_id, period)) = iter.next()? {
-            if period.status == status {
-                periods.push(period);
-            }
-        }
-
-        Ok(periods)
-    }
-
-    /// Get voting periods within a time range
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `start_time` - Start of time range (inclusive)
-    /// * `end_time` - End of time range (exclusive)
-    ///
-    /// # Returns
-    /// Vector of periods overlapping the time range
-    pub fn get_periods_in_range(
-        &self,
-        rotxn: &RoTxn,
-        start_time: u64,
-        end_time: u64,
-    ) -> Result<Vec<VotingPeriod>, Error> {
-        let mut periods = Vec::new();
-        let mut iter = self.voting_periods.iter(rotxn)?;
-
-        while let Some((_period_id, period)) = iter.next()? {
-            // Period overlaps range if it starts before end_time and ends after start_time
-            if period.start_timestamp < end_time
-                && period.end_timestamp > start_time
-            {
-                periods.push(period);
-            }
-        }
-
-        Ok(periods)
-    }
+    //
+    // NOTE: Voting periods are NO LONGER STORED in the database!
+    // All period information is calculated on-demand using period_calculator module.
+    // This section has been removed to enforce the single source of truth: slots database.
+    //
+    // Use period_calculator::calculate_voting_period() instead of get_voting_period()
+    // Use period_calculator::get_all_active_periods() instead of get_periods_by_status()
 
     // ================================================================================
     // Vote Operations
@@ -262,6 +143,14 @@ impl VotingDatabases {
             VoteMatrixKey::new(vote.period_id, vote.voter_id, vote.decision_id);
         let entry =
             VoteMatrixEntry::new(vote.value, vote.timestamp, vote.block_height);
+
+        tracing::debug!(
+            "put_vote: Storing vote for period {}, voter {:?}, decision {:?}, value {:?}",
+            vote.period_id.0,
+            hex::encode(vote.voter_id.as_bytes()),
+            vote.decision_id.to_hex(),
+            vote.value
+        );
 
         self.votes.put(rwtxn, &key, &entry)?;
         Ok(())
@@ -303,12 +192,26 @@ impl VotingDatabases {
     ) -> Result<HashMap<VoteMatrixKey, VoteMatrixEntry>, Error> {
         let mut votes = HashMap::new();
         let mut iter = self.votes.iter(rotxn)?;
+        let mut total_votes_scanned = 0;
+        let mut periods_seen = HashSet::new();
 
         while let Some((key, entry)) = iter.next()? {
+            total_votes_scanned += 1;
+            periods_seen.insert(key.period_id.0);
+
             if key.period_id == period_id {
                 votes.insert(key, entry);
             }
         }
+
+        tracing::debug!(
+            "get_votes_for_period: Looking for period {}, found {} votes. \
+            Total votes scanned: {}, Unique periods seen: {:?}",
+            period_id.0,
+            votes.len(),
+            total_votes_scanned,
+            periods_seen
+        );
 
         Ok(votes)
     }
@@ -574,33 +477,34 @@ impl VotingDatabases {
     /// # Bitcoin Hivemind Compliance
     /// Outcomes are immutable once stored and represent the final consensus
     /// value used for market resolution and payout calculations.
+    /// Key is SlotId only - period is derived from slot.period_index() + 1
     pub fn put_decision_outcome(
         &self,
         rwtxn: &mut RwTxn,
         outcome: &DecisionOutcome,
     ) -> Result<(), Error> {
-        let key = (outcome.period_id, outcome.decision_id);
-        self.decision_outcomes.put(rwtxn, &key, outcome)?;
+        self.decision_outcomes.put(rwtxn, &outcome.decision_id, outcome)?;
         Ok(())
     }
 
-    /// Retrieve a decision outcome
+    /// Retrieve a decision outcome by SlotId
     ///
     /// # Arguments
     /// * `rotxn` - Read-only transaction
-    /// * `period_id` - Voting period
     /// * `decision_id` - Decision to query
     ///
     /// # Returns
     /// Some(DecisionOutcome) if outcome exists, None otherwise
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Period information is available in the returned DecisionOutcome.
+    /// No need to pass period_id since it's derivable from slot.period_index() + 1
     pub fn get_decision_outcome(
         &self,
         rotxn: &RoTxn,
-        period_id: VotingPeriodId,
         decision_id: crate::state::slots::SlotId,
     ) -> Result<Option<DecisionOutcome>, Error> {
-        let key = (period_id, decision_id);
-        Ok(self.decision_outcomes.try_get(rotxn, &key)?)
+        Ok(self.decision_outcomes.try_get(rotxn, &decision_id)?)
     }
 
     /// Get all outcomes for a voting period
@@ -611,6 +515,11 @@ impl VotingDatabases {
     ///
     /// # Returns
     /// HashMap mapping SlotId to DecisionOutcome for all resolved decisions
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Filters outcomes by checking if outcome.period_id matches the query.
+    /// Period is stored in DecisionOutcome for backwards compatibility but
+    /// is redundant with slot.period_index() + 1
     pub fn get_outcomes_for_period(
         &self,
         rotxn: &RoTxn,
@@ -620,8 +529,8 @@ impl VotingDatabases {
         let mut outcomes = HashMap::new();
         let mut iter = self.decision_outcomes.iter(rotxn)?;
 
-        while let Some(((p_id, decision_id), outcome)) = iter.next()? {
-            if p_id == period_id {
+        while let Some((decision_id, outcome)) = iter.next()? {
+            if outcome.period_id == period_id {
                 outcomes.insert(decision_id, outcome);
             }
         }
@@ -629,30 +538,23 @@ impl VotingDatabases {
         Ok(outcomes)
     }
 
-    /// Get outcomes for a specific decision across all periods
+    /// Get outcome for a specific decision
     ///
     /// # Arguments
     /// * `rotxn` - Read-only transaction
     /// * `decision_id` - Decision to query
     ///
     /// # Returns
-    /// Vector of outcomes for this decision sorted by period
-    pub fn get_outcomes_for_decision(
+    /// Option<DecisionOutcome> for this decision
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// This is the most efficient lookup - O(1) direct key access
+    pub fn get_outcome_for_decision(
         &self,
         rotxn: &RoTxn,
         decision_id: crate::state::slots::SlotId,
-    ) -> Result<Vec<DecisionOutcome>, Error> {
-        let mut outcomes = Vec::new();
-        let mut iter = self.decision_outcomes.iter(rotxn)?;
-
-        while let Some(((_period_id, d_id), outcome)) = iter.next()? {
-            if d_id == decision_id {
-                outcomes.push(outcome);
-            }
-        }
-
-        outcomes.sort_by_key(|outcome| outcome.period_id.as_u32());
-        Ok(outcomes)
+    ) -> Result<Option<DecisionOutcome>, Error> {
+        Ok(self.decision_outcomes.try_get(rotxn, &decision_id)?)
     }
 
     // ================================================================================
@@ -767,40 +669,46 @@ impl VotingDatabases {
     ///
     /// # Returns
     /// Vector of consistency warnings/errors found
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Periods are now calculated on-demand, so we don't validate against stored periods.
+    /// Instead, we check internal database consistency only.
     pub fn check_consistency(
         &self,
         rotxn: &RoTxn,
     ) -> Result<Vec<String>, Error> {
         let mut issues = Vec::new();
 
-        // Check that all votes reference valid periods
-        let mut valid_periods = HashSet::new();
-        let mut period_iter = self.voting_periods.iter(rotxn)?;
-        while let Some((period_id, _period)) = period_iter.next()? {
-            valid_periods.insert(period_id);
-        }
-
+        // Count votes and ensure vote matrix keys are valid
+        let mut vote_count = 0;
         let mut vote_iter = self.votes.iter(rotxn)?;
-        while let Some((key, _entry)) = vote_iter.next()? {
-            if !valid_periods.contains(&key.period_id) {
+        while let Some((_key, _entry)) = vote_iter.next()? {
+            vote_count += 1;
+        }
+
+        // Count outcomes and ensure consistency
+        let mut outcome_count = 0;
+        let mut outcome_iter = self.decision_outcomes.iter(rotxn)?;
+        while let Some((_decision_id, outcome)) = outcome_iter.next()? {
+            outcome_count += 1;
+
+            // Verify period consistency: outcome.period_id should equal decision_id.period_index() + 1
+            let expected_period = outcome.decision_id.period_index() + 1;
+            if outcome.period_id.as_u32() != expected_period {
                 issues.push(format!(
-                    "Vote references invalid period: {:?}",
-                    key.period_id
+                    "Outcome period mismatch: decision {:?} claims period {:?} but should be {}",
+                    outcome.decision_id,
+                    outcome.period_id,
+                    expected_period
                 ));
             }
         }
 
-        // Check that all outcomes reference valid periods
-        let mut outcome_iter = self.decision_outcomes.iter(rotxn)?;
-        while let Some(((period_id, _decision_id), _outcome)) =
-            outcome_iter.next()?
-        {
-            if !valid_periods.contains(&period_id) {
-                issues.push(format!(
-                    "Outcome references invalid period: {:?}",
-                    period_id
-                ));
-            }
+        if issues.is_empty() {
+            issues.push(format!(
+                "Database consistent: {} votes, {} outcomes",
+                vote_count, outcome_count
+            ));
         }
 
         Ok(issues)
@@ -815,86 +723,114 @@ impl VotingDatabases {
     /// This operation is irreversible and should only be used for testing
     /// or complete system resets.
     pub fn clear_all_data(&self, rwtxn: &mut RwTxn) -> Result<(), Error> {
-        self.voting_periods.clear(rwtxn)?;
         self.votes.clear(rwtxn)?;
         self.vote_batches.clear(rwtxn)?;
         self.voter_reputation.clear(rwtxn)?;
         self.decision_outcomes.clear(rwtxn)?;
         self.period_stats.clear(rwtxn)?;
-        self.consensus_outcomes.clear(rwtxn)?;
         Ok(())
     }
 
     // ================================================================================
-    // Consensus Outcome Operations (for Reputation Updates)
+    // Consensus Outcome Operations (Extract from DecisionOutcome)
     // ================================================================================
+    //
+    // ARCHITECTURE NOTE: Consensus outcomes are NOT stored in a separate table.
+    // They are extracted from DecisionOutcome.outcome_value on-demand to eliminate
+    // redundancy. This is the single source of truth for consensus values.
 
-    /// Store consensus outcome for a decision
-    ///
-    /// # Arguments
-    /// * `rwtxn` - Read-write transaction
-    /// * `period_id` - Voting period
-    /// * `decision_id` - Decision that was resolved
-    /// * `outcome` - Consensus outcome value
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// This stores the consensus outcome calculated by the consensus algorithm
-    /// (Phase 3) for use in reputation updates. Voters are rewarded/penalized
-    /// based on agreement with these consensus values.
-    pub fn store_consensus_outcome(
-        &self,
-        rwtxn: &mut RwTxn,
-        period_id: VotingPeriodId,
-        decision_id: crate::state::slots::SlotId,
-        outcome: f64,
-    ) -> Result<(), Error> {
-        let key = (period_id, decision_id);
-        self.consensus_outcomes.put(rwtxn, &key, &outcome)?;
-        Ok(())
-    }
-
-    /// Retrieve consensus outcome for a decision
+    /// Get consensus outcome for a decision by extracting from DecisionOutcome
     ///
     /// # Arguments
     /// * `rotxn` - Read-only transaction
-    /// * `period_id` - Voting period
     /// * `decision_id` - Decision to query
     ///
     /// # Returns
-    /// Some(outcome) if consensus has been calculated, None otherwise
+    /// Some(outcome) if decision has been resolved, None otherwise
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Extracts the consensus value from the DecisionOutcome struct instead of
+    /// storing it separately, eliminating redundancy.
     pub fn get_consensus_outcome(
         &self,
         rotxn: &RoTxn,
-        period_id: VotingPeriodId,
+        _period_id: VotingPeriodId,
         decision_id: crate::state::slots::SlotId,
     ) -> Result<Option<f64>, Error> {
-        let key = (period_id, decision_id);
-        Ok(self.consensus_outcomes.try_get(rotxn, &key)?)
+        if let Some(outcome) = self.decision_outcomes.try_get(rotxn, &decision_id)? {
+            Ok(Some(outcome.outcome_value))
+        } else {
+            Ok(None)
+        }
     }
 
-    /// Get all consensus outcomes for a period
+    /// Get all consensus outcomes for a period by extracting from DecisionOutcomes
     ///
     /// # Arguments
     /// * `rotxn` - Read-only transaction
     /// * `period_id` - Voting period to query
     ///
     /// # Returns
-    /// HashMap mapping SlotId to consensus outcome
+    /// HashMap mapping SlotId to consensus outcome value
+    ///
+    /// # Bitcoin Hivemind Compliance
+    /// Extracts consensus values from DecisionOutcome structs for the period.
+    /// This eliminates the need for a separate consensus_outcomes table.
     pub fn get_consensus_outcomes_for_period(
         &self,
         rotxn: &RoTxn,
         period_id: VotingPeriodId,
     ) -> Result<HashMap<crate::state::slots::SlotId, f64>, Error> {
         let mut outcomes = HashMap::new();
-        let mut iter = self.consensus_outcomes.iter(rotxn)?;
+        let mut iter = self.decision_outcomes.iter(rotxn)?;
+        let mut total_scanned = 0;
 
-        while let Some(((p_id, decision_id), outcome)) = iter.next()? {
-            if p_id == period_id {
-                outcomes.insert(decision_id, outcome);
+        while let Some((decision_id, outcome)) = iter.next()? {
+            total_scanned += 1;
+
+            if outcome.period_id == period_id {
+                outcomes.insert(decision_id, outcome.outcome_value);
             }
         }
 
         Ok(outcomes)
+    }
+
+    /// Check if consensus has been calculated for a period
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only transaction
+    /// * `period_id` - Voting period to check
+    ///
+    /// # Returns
+    /// true if any decision outcomes exist for the period
+    pub fn has_consensus(
+        &self,
+        rotxn: &RoTxn,
+        period_id: VotingPeriodId,
+    ) -> Result<bool, Error> {
+        let outcomes = self.get_consensus_outcomes_for_period(rotxn, period_id)?;
+        Ok(!outcomes.is_empty())
+    }
+
+    /// Get period consensus status (used by RPC layer for backwards compatibility)
+    ///
+    /// # Arguments
+    /// * `rotxn` - Read-only transaction
+    /// * `period_id` - Voting period to query
+    ///
+    /// # Returns
+    /// Some(status_string) if period has consensus data, None otherwise
+    pub fn get_period_consensus(
+        &self,
+        rotxn: &RoTxn,
+        period_id: VotingPeriodId,
+    ) -> Result<Option<String>, Error> {
+        if self.has_consensus(rotxn, period_id)? {
+            Ok(Some("Resolved".to_string()))
+        } else {
+            Ok(None)
+        }
     }
 }
 

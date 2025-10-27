@@ -328,28 +328,32 @@ fn test_multi_period_reputation_management() {
         rwtxn.commit().unwrap();
     }
 
-    // Update reputations based on period 1 performance
+    // Close period1 and resolve decisions (this automatically updates reputations)
     {
         let mut rwtxn = test_env.state.rw_txn().unwrap();
 
-        // Voters 0 and 1 were correct (voted with majority)
-        test_env.state.voting_system().update_voter_reputation(
-            &mut rwtxn, voters[0], true, 2500, period2
-        ).unwrap();
+        test_env.state.voting_system().close_voting_period(&mut rwtxn, period1, 2000).unwrap();
 
-        test_env.state.voting_system().update_voter_reputation(
-            &mut rwtxn, voters[1], true, 2500, period2
-        ).unwrap();
+        // Get slot configuration and database references
+        let config = test_env.state.slots().get_config();
+        let slots_db = test_env.state.slots();
 
-        // Voter 2 was incorrect
-        test_env.state.voting_system().update_voter_reputation(
-            &mut rwtxn, voters[2], false, 2500, period2
+        // resolve_period_decisions automatically updates voter reputations based on consensus
+        // using the SVD algorithm specified in the Bitcoin Hivemind whitepaper
+        test_env.state.voting_system().resolve_period_decisions(
+            &mut rwtxn,
+            period1,
+            2500,
+            300,
+            &test_env.state,
+            config,
+            slots_db,
         ).unwrap();
 
         rwtxn.commit().unwrap();
     }
 
-    // Verify reputation changes
+    // Verify reputation changes (updated automatically by consensus algorithm)
     {
         let rotxn = test_env.state.ro_txn().unwrap();
 

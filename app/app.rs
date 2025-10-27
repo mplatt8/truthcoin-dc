@@ -13,7 +13,7 @@ use truthcoin_dc::{
     node::{self, Node},
     types::{
         self, Address, AmountOverflowError, BitcoinOutputContent, Body,
-        FilledOutput, GetBitcoinValue, OutPoint, Output, Transaction,
+        FilledOutput, OutPoint, Output, Transaction,
         proto::mainchain::{
             self,
             generated::{validator_service_server, wallet_service_server},
@@ -77,7 +77,6 @@ fn update_wallet(node: &Node, wallet: &Wallet) -> Result<(), Error> {
     Ok(())
 }
 
-/// Update (unconfirmed) utxos & wallet
 fn update(
     node: &Node,
     utxos: &mut HashMap<OutPoint, FilledOutput>,
@@ -137,7 +136,6 @@ impl App {
         )
     }
 
-    /// Check that a service has `Serving` status via gRPC health
     async fn check_status_serving(
         client: &mut HealthClient<tonic::transport::Channel>,
         service_name: &str,
@@ -165,16 +163,12 @@ impl App {
         }
     }
 
-    /// Returns `true` if validator service AND wallet service are available,
-    /// `false` if only validator service is available, and error if validator
-    /// service is unavailable.
     async fn check_proto_support(
         transport: tonic::transport::channel::Channel,
     ) -> Result<bool, tonic::Status> {
         let mut health_client = HealthClient::new(transport);
         let validator_service_name = validator_service_server::SERVICE_NAME;
         let wallet_service_name = wallet_service_server::SERVICE_NAME;
-        // The validator service MUST exist. We therefore error out here directly.
         if !Self::check_status_serving(
             &mut health_client,
             validator_service_name,
@@ -186,7 +180,6 @@ impl App {
             )));
         }
         tracing::info!("Verified existence of {}", validator_service_name);
-        // The wallet service is optional.
         let has_wallet_service =
             Self::check_status_serving(&mut health_client, wallet_service_name)
                 .await?;
@@ -199,8 +192,6 @@ impl App {
     }
 
     pub fn new(config: &Config) -> Result<Self, Error> {
-        // Node launches some tokio tasks for p2p networking, that is why we need a tokio runtime
-        // here.
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
@@ -242,7 +233,6 @@ impl App {
             .map(|wallet| Miner::new(cusf_mainchain.clone(), wallet))
             .transpose()?;
         let local_pool = LocalPoolHandle::new(1);
-        tracing::debug!("Initializing node...");
         let node = runtime.block_on(Node::new(
             config.net_addr,
             &config.datadir,
@@ -288,7 +278,6 @@ impl App {
         })
     }
 
-    /// Update utxos & wallet
     pub fn update(&self) -> Result<(), Error> {
         update(
             self.node.as_ref(),
@@ -344,7 +333,6 @@ impl App {
         const NUM_TRANSACTIONS: usize = 1000;
         let (txs, tx_fees) = self.node.get_transactions(NUM_TRANSACTIONS)?;
 
-        // Check if the NEW block being mined will be the genesis block (height 0)
         let new_block_height =
             self.node.try_get_tip_height()?.map_or(0, |h| h + 1);
         let is_genesis = new_block_height == 0;
@@ -357,9 +345,8 @@ impl App {
             )],
         };
 
-        // Add initial Votecoin supply in genesis block only
         if is_genesis {
-            const INITIAL_VOTECOIN_SUPPLY: u32 = 1000000; // 1 million Votecoin
+            const INITIAL_VOTECOIN_SUPPLY: u32 = 1000000;
             coinbase.push(types::Output::new(
                 self.wallet.get_new_address()?,
                 types::OutputContent::Votecoin(INITIAL_VOTECOIN_SUPPLY),
@@ -398,7 +385,6 @@ impl App {
         miner_write
             .attempt_bmm(bribe.to_sat(), 0, header, body)
             .await?;
-        tracing::trace!("confirming bmm...");
         if let Some((main_hash, header, body)) =
             miner_write.confirm_bmm().await.inspect_err(|err| {
                 tracing::error!(

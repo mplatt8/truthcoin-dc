@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use truthcoin_dc::{
     authorization::{Dst, Signature},
     net::{Peer, PeerConnectionStatus},
+    state::voting::types::{VoterId, VotingPeriodId},
     types::{
         Address, AssetId, Authorization, BitcoinOutputContent, Block,
         BlockHash, Body, EncryptionPubKey, FilledOutputContent, Header,
@@ -272,6 +273,28 @@ pub struct VoterParticipation {
     pub participated_in_consensus: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct ReputationUpdate {
+    pub old_reputation: f64,
+    pub new_reputation: f64,
+    pub votecoin_proportion: f64,
+    pub compliance_score: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct VotingConsensusResults {
+    pub period_id: u32,
+    pub status: String,
+    pub outcomes: std::collections::HashMap<String, f64>,
+    pub first_loading: Vec<f64>,
+    pub explained_variance: f64,
+    pub certainty: f64,
+    pub reputation_updates: std::collections::HashMap<String, ReputationUpdate>,
+    pub outliers: Vec<String>,
+    pub vote_matrix_dimensions: (usize, usize),
+    pub algorithm_version: String,
+}
+
 #[open_api(ref_schemas[
     truthcoin_schema::BitcoinAddr, truthcoin_schema::BitcoinBlockHash,
     truthcoin_schema::BitcoinTransaction, truthcoin_schema::BitcoinOutPoint,
@@ -280,9 +303,9 @@ pub struct VoterParticipation {
     CreateMarketRequest, EncryptionPubKey, FilledOutputContent, Header,
     InitialLiquidityCalculation, MarketData, MarketOutcome, MarketSummary,
     MerkleRoot, OutPoint, Output, OutputContent,
-    PeerConnectionStatus, RegisterVoterRequest, SharePosition, Signature, SlotInfo, SlotStatus,
+    PeerConnectionStatus, RegisterVoterRequest, ReputationUpdate, SharePosition, Signature, SlotInfo, SlotStatus,
     SubmitVoteRequest, SubmitVoteBatchRequest, Transaction, TxData, Txid, TxIn, UserHoldings,
-    VoteBatchItem, VoteInfo, VoterInfo, VoterParticipation,
+    VoteBatchItem, VoteInfo, VoterInfo, VoterParticipation, VotingConsensusResults,
     VotingPeriodDetails, VotingPeriodInfo, WithdrawalOutputContent, VerifyingKey,
 ])]
 #[rpc(client, server)]
@@ -785,10 +808,29 @@ pub trait Rpc {
         &self,
     ) -> RpcResult<Option<VotingPeriodDetails>>;
 
+    /// Get the consensus results for a voting period including SVD analysis
+    /// Returns detailed consensus outcomes, reputation updates, and SVD metrics
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "get_voting_consensus_results")]
+    async fn get_voting_consensus_results(
+        &self,
+        period_id: u32,
+    ) -> RpcResult<VotingConsensusResults>;
+
     /// Refresh wallet UTXOs from chain state
     /// Manually synchronizes wallet database with current chain state
     /// Useful for test environments to sync wallet after mining
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "refresh_wallet")]
     async fn refresh_wallet(&self) -> RpcResult<()>;
+
+    /// Get the reputation value for a specific voter
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "get_voter_reputation")]
+    async fn get_voter_reputation(&self, voter_id: String) -> RpcResult<f64>;
+
+    /// Get the status of a voting period
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "get_voting_period_status")]
+    async fn get_voting_period_status(&self, period_id: u32) -> RpcResult<String>;
 }

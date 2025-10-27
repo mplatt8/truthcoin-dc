@@ -17,12 +17,13 @@ use tower_http::{
 use truthcoin_dc::{
     authorization::{self, Dst, Signature},
     net::Peer,
+    node::Node,
     types::{
         Address, Authorization, Block, BlockHash, EncryptionPubKey,
         FilledOutputContent, PointedOutput, Transaction, Txid, VerifyingKey,
         WithdrawalBundle,
     },
-    validation::{PeriodCalculator, SlotValidator},
+    validation::SlotValidator,
     wallet::Balance,
 };
 use truthcoin_dc_app_rpc_api::{
@@ -65,38 +66,74 @@ pub struct RpcServerImpl {
 }
 
 impl RpcServerImpl {
-    // NOTE: Removed duplicate get_current_period - use state.slots().get_current_period() instead
-    // This ensures single source of truth for period calculation per Bitcoin Hivemind architecture
+    #[inline(always)]
+    fn node(&self) -> &Node {
+        &self.app.node
+    }
+
+    #[inline]
+    fn block_height_to_testing_period(
+        block_height: u32,
+        testing_blocks_per_period: u32,
+    ) -> u32 {
+        if testing_blocks_per_period == 0 {
+            0
+        } else {
+            (block_height / testing_blocks_per_period) + 1
+        }
+    }
+
+    #[inline]
+    fn timestamp_to_period(timestamp: u64) -> u32 {
+        const BITCOIN_GENESIS_TIMESTAMP: u64 = 1231006505;
+        const SECONDS_PER_QUARTER: u64 = 3 * 30 * 24 * 60 * 60;
+
+        if timestamp < BITCOIN_GENESIS_TIMESTAMP {
+            return 0;
+        }
+        let elapsed_seconds = timestamp - BITCOIN_GENESIS_TIMESTAMP;
+        (elapsed_seconds / SECONDS_PER_QUARTER) as u32
+    }
+
+    #[inline]
+    fn period_to_name(period: u32) -> String {
+        if period == 0 {
+            return "Genesis".to_string();
+        }
+
+        let year = 2009 + (period - 1) / 4;
+        let quarter = ((period - 1) % 4) + 1;
+
+        format!("Q{} Y{}", quarter, year)
+    }
 }
 
 #[async_trait]
 impl RpcServer for RpcServerImpl {
     async fn get_block(&self, block_hash: BlockHash) -> RpcResult<Block> {
         let block = self
-            .app
-            .node
+            .node()
             .get_block(block_hash)
-            .expect("This error should have been handled properly.");
+            .map_err(custom_err)?;
         Ok(block)
     }
 
     async fn get_best_sidechain_block_hash(
         &self,
     ) -> RpcResult<Option<BlockHash>> {
-        self.app.node.try_get_tip().map_err(custom_err)
+        self.node().try_get_tip().map_err(custom_err)
     }
 
     async fn get_best_mainchain_block_hash(
         &self,
     ) -> RpcResult<Option<bitcoin::BlockHash>> {
         let Some(sidechain_hash) =
-            self.app.node.try_get_tip().map_err(custom_err)?
+            self.node().try_get_tip().map_err(custom_err)?
         else {
             return Ok(None);
         };
         let block_hash = self
-            .app
-            .node
+            .node()
             .get_best_main_verification(sidechain_hash)
             .map_err(custom_err)?;
         Ok(Some(block_hash))
@@ -128,7 +165,7 @@ impl RpcServer for RpcServerImpl {
         &self,
         txid: Txid,
     ) -> RpcResult<Option<Transaction>> {
-        self.app.node.try_get_transaction(txid).map_err(custom_err)
+        self.node().try_get_transaction(txid).map_err(custom_err)
     }
 
     async fn get_transaction_info(
@@ -184,9 +221,6 @@ impl RpcServer for RpcServerImpl {
     async fn get_wallet_utxos(
         &self,
     ) -> RpcResult<Vec<PointedOutput<FilledOutputContent>>> {
-        // Wallet UTXOs are automatically updated via App::task() background process
-        // which watches node.watch_state() for blockchain state changes.
-        // No manual update needed here.
         let utxos = self.app.wallet.get_utxos().map_err(custom_err)?;
         let utxos = utxos
             .into_iter()
@@ -196,13 +230,8 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn getblockcount(&self) -> RpcResult<u32> {
-        // Returns Bitcoin-compatible block COUNT (height + 1) per Bitcoin RPC spec
-        // Internal storage remains 0-indexed (height), but RPC returns count for compatibility
-        // Note: period calculations use internal height, not this RPC count value
-        let height = self.app.node.try_get_tip_height().map_err(custom_err)?;
+        let height = self.node().try_get_tip_height().map_err(custom_err)?;
         let height = height.unwrap_or(0);
-        // Return count (height + 1) for Bitcoin RPC compatibility
-        // Genesis block at height 0 = count 1, height 1 = count 2, etc.
         Ok(height + 1)
     }
 
@@ -218,14 +247,14 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn list_peers(&self) -> RpcResult<Vec<Peer>> {
-        let peers = self.app.node.get_active_peers();
+        let peers = self.node().get_active_peers();
         Ok(peers)
     }
 
     async fn list_utxos(
         &self,
     ) -> RpcResult<Vec<PointedOutput<FilledOutputContent>>> {
-        let utxos = self.app.node.get_all_utxos().map_err(custom_err)?;
+        let utxos = self.node().get_all_utxos().map_err(custom_err)?;
         let res = utxos
             .into_iter()
             .map(|(outpoint, output)| PointedOutput { outpoint, output })
@@ -261,9 +290,6 @@ impl RpcServer for RpcServerImpl {
     async fn my_utxos(
         &self,
     ) -> RpcResult<Vec<PointedOutput<FilledOutputContent>>> {
-        // Wallet UTXOs are automatically updated via App::task() background process
-        // which watches node.watch_state() for blockchain state changes.
-        // No manual update needed here.
         let utxos = self
             .app
             .wallet
@@ -291,7 +317,7 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn remove_from_mempool(&self, txid: Txid) -> RpcResult<()> {
-        self.app.node.remove_from_mempool(txid).map_err(custom_err)
+        self.node().remove_from_mempool(txid).map_err(custom_err)
     }
 
     async fn set_seed_from_mnemonic(&self, mnemonic: String) -> RpcResult<()> {
@@ -303,7 +329,7 @@ impl RpcServer for RpcServerImpl {
 
     async fn sidechain_wealth_sats(&self) -> RpcResult<u64> {
         let sidechain_wealth =
-            self.app.node.get_sidechain_wealth().map_err(custom_err)?;
+            self.node().get_sidechain_wealth().map_err(custom_err)?;
         Ok(sidechain_wealth.to_sat())
     }
 
@@ -433,7 +459,7 @@ impl RpcServer for RpcServerImpl {
         &self,
     ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::SlotInfo>> {
         let slots =
-            self.app.node.get_all_slot_quarters().map_err(custom_err)?;
+            self.node().get_all_slot_quarters().map_err(custom_err)?;
         let result = slots
             .into_iter()
             .map(|(period, slots)| truthcoin_dc_app_rpc_api::SlotInfo {
@@ -454,9 +480,9 @@ impl RpcServer for RpcServerImpl {
     async fn slots_status(
         &self,
     ) -> RpcResult<truthcoin_dc_app_rpc_api::SlotStatus> {
-        let is_testing_mode = self.app.node.is_slots_testing_mode();
+        let is_testing_mode = self.node().is_slots_testing_mode();
         let blocks_per_period = if is_testing_mode {
-            self.app.node.get_slots_testing_config()
+            self.node().get_slots_testing_config()
         } else {
             0
         };
@@ -473,17 +499,17 @@ impl RpcServer for RpcServerImpl {
                 .map_err(custom_err)?
                 .unwrap_or(0);
             let testing_blocks_per_period =
-                self.app.node.get_slots_testing_config();
-            PeriodCalculator::block_height_to_testing_period(
+                self.node().get_slots_testing_config();
+            Self::block_height_to_testing_period(
                 tip_height,
                 testing_blocks_per_period,
             )
         } else {
-            PeriodCalculator::timestamp_to_period(current_timestamp)
+            Self::timestamp_to_period(current_timestamp)
         };
 
         let current_period_name =
-            PeriodCalculator::period_to_name(current_period);
+            Self::period_to_name(current_period);
 
         Ok(truthcoin_dc_app_rpc_api::SlotStatus {
             is_testing_mode,
@@ -494,11 +520,11 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn timestamp_to_quarter(&self, timestamp: u64) -> RpcResult<u32> {
-        Ok(PeriodCalculator::timestamp_to_period(timestamp))
+        Ok(Self::timestamp_to_period(timestamp))
     }
 
     async fn quarter_to_string(&self, quarter: u32) -> RpcResult<String> {
-        Ok(PeriodCalculator::period_to_name(quarter))
+        Ok(Self::period_to_name(quarter))
     }
 
     async fn block_height_to_testing_period(
@@ -506,8 +532,8 @@ impl RpcServer for RpcServerImpl {
         block_height: u32,
     ) -> RpcResult<u32> {
         let testing_blocks_per_period =
-            self.app.node.get_slots_testing_config();
-        Ok(PeriodCalculator::block_height_to_testing_period(
+            self.node().get_slots_testing_config();
+        Ok(Self::block_height_to_testing_period(
             block_height,
             testing_blocks_per_period,
         ))
@@ -562,10 +588,13 @@ impl RpcServer for RpcServerImpl {
         &self,
         period_index: u32,
     ) -> RpcResult<Vec<AvailableSlotId>> {
+        use truthcoin_dc::state::voting::types::VotingPeriodId;
+
+        let period_id = VotingPeriodId(period_index);
         let available_slots = self
             .app
             .node
-            .get_available_slots_in_period(period_index)
+            .get_available_slots_in_period(period_id)
             .map_err(custom_err)?;
 
         let result = available_slots
@@ -586,7 +615,7 @@ impl RpcServer for RpcServerImpl {
     ) -> RpcResult<Option<truthcoin_dc_app_rpc_api::SlotDetails>> {
         let slot_id = SlotValidator::parse_slot_id_from_hex(&slot_id_hex)
             .map_err(custom_err)?;
-        let slot_opt = self.app.node.get_slot(slot_id).map_err(custom_err)?;
+        let slot_opt = self.node().get_slot(slot_id).map_err(custom_err)?;
 
         let result = slot_opt.map(|slot| {
             let content = match slot.decision {
@@ -623,10 +652,13 @@ impl RpcServer for RpcServerImpl {
         &self,
         period_index: u32,
     ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::ClaimedSlotSummary>> {
+        use truthcoin_dc::state::voting::types::VotingPeriodId;
+
+        let period_id = VotingPeriodId(period_index);
         let claimed_slots_data = self
             .app
             .node
-            .get_claimed_slots_in_period(period_index)
+            .get_claimed_slots_in_period(period_id)
             .map_err(custom_err)?;
 
         let claimed_slots = claimed_slots_data
@@ -663,7 +695,7 @@ impl RpcServer for RpcServerImpl {
         &self,
     ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::VotingPeriodInfo>> {
         let voting_periods =
-            self.app.node.get_voting_periods().map_err(custom_err)?;
+            self.node().get_voting_periods().map_err(custom_err)?;
 
         let result = voting_periods
             .into_iter()
@@ -697,7 +729,7 @@ impl RpcServer for RpcServerImpl {
         &self,
     ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::OssifiedSlotInfo>> {
         let ossified_slots =
-            self.app.node.get_ossified_slots().map_err(custom_err)?;
+            self.node().get_ossified_slots().map_err(custom_err)?;
 
         let result = ossified_slots
             .into_iter()
@@ -731,15 +763,13 @@ impl RpcServer for RpcServerImpl {
     async fn list_markets(
         &self,
     ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::MarketSummary>> {
-        // Get all markets (not filtered by state) since we'll compute state dynamically
         let markets = self
             .app
             .node
             .get_all_markets()
             .map_err(custom_err)?;
 
-        // Get current period for dynamic state computation
-        let is_testing_mode = self.app.node.is_slots_testing_mode();
+        let is_testing_mode = self.node().is_slots_testing_mode();
         let current_period = if is_testing_mode {
             let tip_height = self
                 .app
@@ -747,8 +777,8 @@ impl RpcServer for RpcServerImpl {
                 .try_get_tip_height()
                 .map_err(custom_err)?
                 .unwrap_or(0);
-            let testing_blocks_per_period = self.app.node.get_slots_testing_config();
-            PeriodCalculator::block_height_to_testing_period(
+            let testing_blocks_per_period = self.node().get_slots_testing_config();
+            Self::block_height_to_testing_period(
                 tip_height,
                 testing_blocks_per_period,
             )
@@ -757,15 +787,13 @@ impl RpcServer for RpcServerImpl {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|e| custom_err_msg(format!("System time error: {}", e)))?
                 .as_secs();
-            PeriodCalculator::timestamp_to_period(current_timestamp)
+            Self::timestamp_to_period(current_timestamp)
         };
 
         let market_summaries = markets
             .into_iter()
             .map(|market| {
                 let market_id_hex = hex::encode(market.id.as_bytes());
-                // Compute state dynamically from decision slot periods
-                // Per Bitcoin Hivemind: slots determine voting behavior, not persistent database state
                 let computed_state = market.compute_state(current_period);
 
                 truthcoin_dc_app_rpc_api::MarketSummary {
@@ -809,8 +837,7 @@ impl RpcServer for RpcServerImpl {
             .get_market_decisions(&market)
             .map_err(custom_err)?;
 
-        // Get current period for dynamic state computation
-        let is_testing_mode = self.app.node.is_slots_testing_mode();
+        let is_testing_mode = self.node().is_slots_testing_mode();
         let current_period = if is_testing_mode {
             let tip_height = self
                 .app
@@ -818,8 +845,8 @@ impl RpcServer for RpcServerImpl {
                 .try_get_tip_height()
                 .map_err(custom_err)?
                 .unwrap_or(0);
-            let testing_blocks_per_period = self.app.node.get_slots_testing_config();
-            PeriodCalculator::block_height_to_testing_period(
+            let testing_blocks_per_period = self.node().get_slots_testing_config();
+            Self::block_height_to_testing_period(
                 tip_height,
                 testing_blocks_per_period,
             )
@@ -828,7 +855,7 @@ impl RpcServer for RpcServerImpl {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|e| custom_err_msg(format!("System time error: {}", e)))?
                 .as_secs();
-            PeriodCalculator::timestamp_to_period(current_timestamp)
+            Self::timestamp_to_period(current_timestamp)
         };
 
         let mut outcomes = Vec::new();
@@ -889,8 +916,6 @@ impl RpcServer for RpcServerImpl {
             .map(|slot_id| slot_id.to_hex())
             .collect();
 
-        // Compute state dynamically from decision slot periods
-        // Per Bitcoin Hivemind: slots determine voting behavior, not persistent database state
         let computed_state = market.compute_state(current_period);
 
         let market_data = truthcoin_dc_app_rpc_api::MarketData {
@@ -1096,7 +1121,7 @@ impl RpcServer for RpcServerImpl {
         &self,
         address: Address,
     ) -> RpcResult<truthcoin_dc_app_rpc_api::UserHoldings> {
-        let node = &self.app.node;
+        let node = &self.node();
 
         let positions_data = node
             .get_user_share_positions(&address)
@@ -1182,7 +1207,7 @@ impl RpcServer for RpcServerImpl {
         market_id: String,
     ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::SharePosition>> {
         let market_id_struct = parse_market_id(&market_id)?;
-        let node = &self.app.node;
+        let node = &self.node();
 
         let positions_data = node
             .get_market_user_positions(&address, &market_id_struct)
@@ -1233,7 +1258,7 @@ impl RpcServer for RpcServerImpl {
         shares_amount: f64,
     ) -> RpcResult<u64> {
         let market_id_struct = parse_market_id(&market_id)?;
-        let node = &self.app.node;
+        let node = &self.node();
 
         if let Ok(Some(market)) = node.get_market_by_id(&market_id_struct) {
             let cost_sats = market
@@ -1289,9 +1314,6 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn bitcoin_balance(&self) -> RpcResult<Balance> {
-        // Wallet balance is automatically updated via App::task() background process
-        // which watches node.watch_state() for blockchain state changes.
-        // No manual update needed here.
         self.app.wallet.get_bitcoin_balance().map_err(custom_err)
     }
 
@@ -1322,7 +1344,7 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn connect_peer(&self, addr: SocketAddr) -> RpcResult<()> {
-        self.app.node.connect_peer(addr).map_err(custom_err)
+        self.node().connect_peer(addr).map_err(custom_err)
     }
 
     async fn decrypt_msg(
@@ -1352,7 +1374,6 @@ impl RpcServer for RpcServerImpl {
         _encryption_pubkey: EncryptionPubKey,
         _msg: String,
     ) -> RpcResult<String> {
-        // For now, return an error indicating this feature is not implemented
         Err(ErrorObject::owned(
             -32601,
             "Encryption not implemented",
@@ -1431,6 +1452,7 @@ impl RpcServer for RpcServerImpl {
         use truthcoin_dc::types::VoteBatchItem;
         use truthcoin_dc::validation::SlotValidator;
 
+
         if request.votes.is_empty() {
             return Err(custom_err_msg("Batch cannot be empty"));
         }
@@ -1441,6 +1463,7 @@ impl RpcServer for RpcServerImpl {
             let slot_id = SlotValidator::parse_slot_id_from_hex(&vote.decision_id)
                 .map_err(|e| custom_err_msg(format!("Invalid decision ID: {}", e)))?;
 
+
             batch_items.push(VoteBatchItem {
                 slot_id_bytes: slot_id.as_bytes(),
                 vote_value: vote.vote_value,
@@ -1448,6 +1471,7 @@ impl RpcServer for RpcServerImpl {
         }
 
         let fee = bitcoin::Amount::from_sat(request.fee_sats);
+
 
         let tx = self
             .app
@@ -1457,7 +1481,9 @@ impl RpcServer for RpcServerImpl {
 
         let txid = tx.txid();
 
+
         self.app.sign_and_send(tx).map_err(custom_err)?;
+
 
         Ok(format!("{}", txid))
     }
@@ -1468,7 +1494,7 @@ impl RpcServer for RpcServerImpl {
     ) -> RpcResult<Option<VoterInfo>> {
         use truthcoin_dc::state::voting::types::VoterId;
 
-        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let rotxn = self.node().read_txn().map_err(custom_err)?;
         let voter_id = VoterId::from_address(&address);
 
         // Get reputation
@@ -1498,8 +1524,8 @@ impl RpcServer for RpcServerImpl {
             reputation: reputation.reputation,
             total_votes: votes.len() as u64,
             periods_active: reputation.total_decisions as u32,
-            accuracy_score: reputation.accuracy_rate,
-            registered_at_height: 0, // TODO: Track registration height in future enhancement
+            accuracy_score: reputation.get_accuracy_rate(),
+            registered_at_height: 0,
             is_active: reputation.total_decisions > 0,
         }))
     }
@@ -1510,39 +1536,48 @@ impl RpcServer for RpcServerImpl {
     ) -> RpcResult<Option<VotingPeriodDetails>> {
         use truthcoin_dc::state::voting::types::VotingPeriodId;
 
-        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let rotxn = self.node().read_txn().map_err(custom_err)?;
 
         let voting_period_id = VotingPeriodId::new(period_id);
 
-        // Get voting period
-        let period_opt = self
+        let current_timestamp = self.node().get_last_block_timestamp().map_err(custom_err)?;
+
+        let config = self.node().get_slot_config();
+        let slots_db = self.node().get_slots_db();
+
+        let has_consensus = self
             .app
             .node
             .voting_state()
             .databases()
-            .get_voting_period(&rotxn, voting_period_id)
+            .has_consensus(&rotxn, voting_period_id)
             .map_err(custom_err)?;
 
-        let Some(period) = period_opt else {
-            return Ok(None);
+        let period = match truthcoin_dc::state::voting::period_calculator::calculate_voting_period(
+            &rotxn,
+            voting_period_id,
+            current_timestamp,
+            config,
+            slots_db,
+            has_consensus,
+        ) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
         };
 
-        // Get participation stats
         let (total_voters, total_votes, _) = self
             .app
             .node
             .voting_state()
-            .get_participation_stats(&rotxn, voting_period_id)
+            .get_participation_stats(&rotxn, voting_period_id, config, slots_db)
             .map_err(custom_err)?;
 
-        // Convert decision slots to hex strings
         let decision_slots: Vec<String> = period
             .decision_slots
             .iter()
             .map(|slot_id| slot_id.to_hex())
             .collect();
 
-        // Count active voters (voters who cast at least one vote)
         let votes = self
             .app
             .node
@@ -1556,7 +1591,6 @@ impl RpcServer for RpcServerImpl {
             .map(|k| k.voter_id)
             .collect();
 
-        // Check if consensus has been reached
         let consensus_reached = period.status == truthcoin_dc::state::voting::types::VotingPeriodStatus::Resolved
             || period.status == truthcoin_dc::state::voting::types::VotingPeriodStatus::Closed;
 
@@ -1581,7 +1615,7 @@ impl RpcServer for RpcServerImpl {
     ) -> RpcResult<Vec<VoteInfo>> {
         use truthcoin_dc::state::voting::types::{VoterId, VotingPeriodId};
 
-        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let rotxn = self.node().read_txn().map_err(custom_err)?;
         let voter_id = VoterId::from_address(&address);
 
         // Get all votes by this voter
@@ -1596,7 +1630,6 @@ impl RpcServer for RpcServerImpl {
         let mut vote_infos = Vec::new();
 
         for (vote_key, vote_entry) in all_votes {
-            // Filter by period if specified
             if let Some(pid) = period_id {
                 if vote_key.period_id != VotingPeriodId::new(pid) {
                     continue;
@@ -1609,8 +1642,8 @@ impl RpcServer for RpcServerImpl {
                 vote_value: vote_entry.to_f64(),
                 period_id: vote_key.period_id.as_u32(),
                 block_height: vote_entry.block_height,
-                txid: String::from(""), // TODO: Track txid in VoteMatrixEntry
-                is_batch_vote: false, // TODO: Track batch votes in future
+                txid: String::from(""),
+                is_batch_vote: false,
             });
         }
 
@@ -1623,13 +1656,11 @@ impl RpcServer for RpcServerImpl {
     ) -> RpcResult<Vec<VoteInfo>> {
         use truthcoin_dc::validation::SlotValidator;
 
-        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let rotxn = self.node().read_txn().map_err(custom_err)?;
 
-        // Parse decision ID
         let slot_id = SlotValidator::parse_slot_id_from_hex(&decision_id)
             .map_err(|e| custom_err_msg(format!("Invalid decision ID: {}", e)))?;
 
-        // Get all votes for this decision
         let votes = self
             .app
             .node
@@ -1649,7 +1680,7 @@ impl RpcServer for RpcServerImpl {
                 vote_value: vote_entry.to_f64(),
                 period_id: vote_key.period_id.as_u32(),
                 block_height: vote_entry.block_height,
-                txid: String::from(""), // TODO: Track txid in VoteMatrixEntry
+                txid: String::from(""),
                 is_batch_vote: false,
             });
         }
@@ -1664,24 +1695,35 @@ impl RpcServer for RpcServerImpl {
     ) -> RpcResult<Option<VoterParticipation>> {
         use truthcoin_dc::state::voting::types::{VoterId, VotingPeriodId};
 
-        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let rotxn = self.node().read_txn().map_err(custom_err)?;
         let voter_id = VoterId::from_address(&address);
         let voting_period_id = VotingPeriodId::new(period_id);
 
-        // Get voting period
-        let period_opt = self
+        let current_timestamp = self.node().get_last_block_timestamp().map_err(custom_err)?;
+
+        let config = self.node().get_slot_config();
+        let slots_db = self.node().get_slots_db();
+
+        let has_consensus = self
             .app
             .node
             .voting_state()
             .databases()
-            .get_voting_period(&rotxn, voting_period_id)
+            .has_consensus(&rotxn, voting_period_id)
             .map_err(custom_err)?;
 
-        let Some(period) = period_opt else {
-            return Ok(None);
+        let period = match truthcoin_dc::state::voting::period_calculator::calculate_voting_period(
+            &rotxn,
+            voting_period_id,
+            current_timestamp,
+            config,
+            slots_db,
+            has_consensus,
+        ) {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
         };
 
-        // Get votes by this voter in this period
         let all_votes = self
             .app
             .node
@@ -1704,7 +1746,6 @@ impl RpcServer for RpcServerImpl {
             0.0
         };
 
-        // Check if voter participated in consensus (has reputation for this period)
         let reputation_opt = self
             .app
             .node
@@ -1728,7 +1769,7 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn list_voters(&self) -> RpcResult<Vec<VoterInfo>> {
-        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let rotxn = self.node().read_txn().map_err(custom_err)?;
 
         // Get all voters
         let all_voters = self
@@ -1771,7 +1812,7 @@ impl RpcServer for RpcServerImpl {
                 reputation: reputation.reputation,
                 total_votes: votes.len() as u64,
                 periods_active: reputation.total_decisions as u32,
-                accuracy_score: reputation.accuracy_rate,
+                accuracy_score: reputation.get_accuracy_rate(),
                 registered_at_height: 0,
                 is_active: reputation.total_decisions > 0,
             });
@@ -1783,7 +1824,7 @@ impl RpcServer for RpcServerImpl {
     async fn is_registered_voter(&self, address: Address) -> RpcResult<bool> {
         use truthcoin_dc::state::voting::types::VoterId;
 
-        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let rotxn = self.node().read_txn().map_err(custom_err)?;
         let voter_id = VoterId::from_address(&address);
 
         // Check if voter has reputation (indicates registration)
@@ -1799,7 +1840,7 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn get_votecoin_balance(&self, address: Address) -> RpcResult<u32> {
-        let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+        let rotxn = self.node().read_txn().map_err(custom_err)?;
 
         // Get Votecoin balance directly
         let votecoin_balance = self
@@ -1814,22 +1855,22 @@ impl RpcServer for RpcServerImpl {
     async fn get_current_voting_stats(
         &self,
     ) -> RpcResult<Option<VotingPeriodDetails>> {
-        // Get current period ID first, then drop rotxn before await
         let period_id = {
-            let rotxn = self.app.node.read_txn().map_err(custom_err)?;
+            let rotxn = self.node().read_txn().map_err(custom_err)?;
 
-            // Get current timestamp
             let current_timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|e| custom_err_msg(format!("System time error: {}", e)))?
                 .as_secs();
 
-            // Get active period
+            let config = self.node().get_slot_config();
+            let slots_db = self.node().get_slots_db();
+
             let active_period_opt = self
                 .app
                 .node
                 .voting_state()
-                .get_active_period(&rotxn, current_timestamp)
+                .get_active_period(&rotxn, current_timestamp, config, slots_db)
                 .map_err(custom_err)?;
 
             let Some(period) = active_period_opt else {
@@ -1837,14 +1878,182 @@ impl RpcServer for RpcServerImpl {
             };
 
             period.id.as_u32()
-        }; // rotxn dropped here
+        };
 
-        // Delegate to get_voting_period_details for full stats
         self.get_voting_period_details(period_id).await
     }
 
     async fn refresh_wallet(&self) -> RpcResult<()> {
         self.app.update().map_err(custom_err)
+    }
+
+    async fn get_voting_consensus_results(
+        &self,
+        period_id: u32,
+    ) -> RpcResult<truthcoin_dc_app_rpc_api::VotingConsensusResults> {
+        use truthcoin_dc::state::voting::types::VotingPeriodId;
+
+        let voting_period_id = VotingPeriodId(period_id);
+
+
+        let outcomes = self.node().resolve_voting_period(voting_period_id)
+            .map_err(|e| {
+                tracing::error!("Failed to resolve voting period {}: {:?}", period_id, e);
+                custom_err(e)
+            })?;
+
+
+        if outcomes.is_empty() {
+            return Err(custom_err_msg(format!(
+                "No votes found for period {}",
+                period_id
+            )));
+        }
+
+        let rotxn = self.node().read_txn().map_err(custom_err)?;
+        let outcomes_map = self.node().voting_state().databases()
+            .get_consensus_outcomes_for_period(&rotxn, voting_period_id)
+            .map_err(custom_err)?;
+
+        let mut outcomes = std::collections::HashMap::new();
+        for (slot_id, outcome) in outcomes_map {
+            outcomes.insert(slot_id.to_hex(), outcome);
+        }
+
+        let votes = self.node().voting_state().databases()
+            .get_votes_for_period(&rotxn, voting_period_id)
+            .map_err(custom_err)?;
+
+        let mut unique_voters = std::collections::HashSet::new();
+        let mut unique_decisions = std::collections::HashSet::new();
+        for (key, _) in &votes {
+            unique_voters.insert(key.voter_id);
+            unique_decisions.insert(key.decision_id);
+        }
+
+        let period_stats = self.node().voting_state().databases()
+            .get_period_stats(&rotxn, voting_period_id)
+            .map_err(custom_err)?;
+
+        let mut reputation_updates = std::collections::HashMap::new();
+
+        let (first_loading, explained_variance, certainty) = if let Some(ref stats) = period_stats {
+            if let Some(ref rep_changes) = stats.reputation_changes {
+                for (voter_id, (old_rep, new_rep)) in rep_changes {
+                    if let Some(reputation) = self.node().voting_state().databases()
+                        .get_voter_reputation(&rotxn, *voter_id)
+                        .map_err(custom_err)?
+                    {
+                        let rep_update = truthcoin_dc_app_rpc_api::ReputationUpdate {
+                            old_reputation: *old_rep,
+                            new_reputation: *new_rep,
+                            votecoin_proportion: reputation.votecoin_proportion,
+                            compliance_score: 0.0,
+                        };
+                        reputation_updates.insert(hex::encode(voter_id.as_bytes()), rep_update);
+                    }
+                }
+            }
+
+            (
+                stats.first_loading.clone().unwrap_or_else(|| vec![0.0; unique_voters.len()]),
+                stats.explained_variance.unwrap_or(0.0),
+                stats.certainty.unwrap_or(0.0),
+            )
+        } else {
+            (vec![0.0; unique_voters.len()], 0.0, 0.0)
+        };
+
+        if reputation_updates.is_empty() {
+            for voter_id in &unique_voters {
+                if let Some(reputation) = self.node().voting_state().databases()
+                    .get_voter_reputation(&rotxn, *voter_id)
+                    .map_err(custom_err)?
+                {
+                    let rep_update = truthcoin_dc_app_rpc_api::ReputationUpdate {
+                        old_reputation: reputation.reputation,
+                        new_reputation: reputation.reputation,
+                        votecoin_proportion: reputation.votecoin_proportion,
+                        compliance_score: 0.0,
+                    };
+                    reputation_updates.insert(hex::encode(voter_id.as_bytes()), rep_update);
+                }
+            }
+        }
+
+        Ok(truthcoin_dc_app_rpc_api::VotingConsensusResults {
+            period_id,
+            status: "Resolved".to_string(),
+            outcomes,
+            first_loading,
+            explained_variance,
+            certainty,
+            reputation_updates,
+            outliers: Vec::new(),
+            vote_matrix_dimensions: (unique_voters.len(), unique_decisions.len()),
+            algorithm_version: "SVD-PCA-v1.0".to_string(),
+        })
+    }
+
+    async fn get_voter_reputation(&self, voter_id: String) -> RpcResult<f64> {
+        use truthcoin_dc::state::voting::types::VoterId;
+
+        let rotxn = self.node().read_txn().map_err(custom_err)?;
+
+        let voter_id_bytes = hex::decode(&voter_id).map_err(|e| {
+            custom_err(anyhow::anyhow!("Invalid voter ID hex: {}", e))
+        })?;
+
+        if voter_id_bytes.len() != 20 {
+            return Err(custom_err(anyhow::anyhow!(
+                "Invalid voter ID: expected 20 bytes, got {}",
+                voter_id_bytes.len()
+            )));
+        }
+
+        let mut voter_id_array = [0u8; 20];
+        voter_id_array.copy_from_slice(&voter_id_bytes);
+        let voter_id = VoterId::from_bytes(voter_id_array);
+
+        let reputation = self.node().voting_state().databases()
+            .get_voter_reputation(&rotxn, voter_id)
+            .map_err(custom_err)?
+            .ok_or_else(|| custom_err(anyhow::anyhow!("Voter not found")))?;
+
+        Ok(reputation.reputation)
+    }
+
+    async fn get_voting_period_status(&self, period_id: u32) -> RpcResult<String> {
+        use truthcoin_dc::state::voting::types::VotingPeriodId;
+
+        let rotxn = self.node().read_txn().map_err(custom_err)?;
+        let voting_period_id = VotingPeriodId(period_id);
+
+        if self.node().voting_state().databases()
+            .get_consensus_outcomes_for_period(&rotxn, voting_period_id)
+            .map_err(custom_err)?
+            .len() > 0
+        {
+            return Ok("Resolved".to_string());
+        }
+
+        let votes = self.node().voting_state().databases()
+            .get_votes_for_period(&rotxn, voting_period_id)
+            .map_err(custom_err)?;
+
+        if !votes.is_empty() {
+            return Ok("Active".to_string());
+        }
+
+        let slots = self.node()
+            .get_claimed_slots_in_period(voting_period_id)
+            .map_err(custom_err)?;
+
+        if !slots.is_empty() {
+            return Ok("Pending".to_string());
+        }
+
+        Ok("NotFound".to_string())
     }
 }
 
@@ -1857,11 +2066,9 @@ impl MakeRequestId for RequestIdMaker {
         _: &http::Request<B>,
     ) -> Option<RequestId> {
         use uuid::Uuid;
-        // the 'simple' format renders the UUID with no dashes, which
-        // makes for easier copy/pasting.
         let id = Uuid::new_v4();
         let id = id.as_simple();
-        let id = format!("req_{id}"); // prefix all IDs with "req_", to make them easier to identify
+        let id = format!("req_{id}");
 
         let Ok(header_value) = http::HeaderValue::from_str(&id) else {
             return None;
@@ -1877,8 +2084,6 @@ pub async fn run_server(
 ) -> anyhow::Result<SocketAddr> {
     const REQUEST_ID_HEADER: &str = "x-request-id";
 
-    // Ordering here matters! Order here is from official docs on request IDs tracings
-    // https://docs.rs/tower-http/latest/tower_http/request_id/index.html#using-trace
     let tracer = tower::ServiceBuilder::new()
         .layer(SetRequestIdLayer::new(
             http::HeaderName::from_static(REQUEST_ID_HEADER),
@@ -1898,7 +2103,7 @@ pub async fn run_server(
                         "request",
                         method = %request.method(),
                         uri = %request.uri(),
-                        request_id , // this is needed for the record call below to work
+                        request_id,
                     )
                 })
                 .on_request(())
@@ -1927,8 +2132,6 @@ pub async fn run_server(
     let addr = server.local_addr()?;
     let handle = server.start(RpcServerImpl { app }.into_rpc());
 
-    // In this example we don't care about doing shutdown so let's it run forever.
-    // You may use the `ServerHandle` to shut it down or manage it yourself.
     tokio::spawn(handle.stopped());
 
     Ok(addr)

@@ -14,6 +14,7 @@
 //! - Section 4.5: "Iterative Convergence" - Reputation and outcome updates
 
 use super::{SparseVoteMatrix, VotingMathError};
+use super::constants::{BITCOIN_HIVEMIND_NEUTRAL_VALUE, SVD_NUMERICAL_TOLERANCE};
 use ndarray::{Array1, Array2};
 use std::collections::HashMap;
 
@@ -50,8 +51,8 @@ impl MatrixPreprocessor {
 
         match method {
             ImputationMethod::Neutral => {
-                // Fill with 0.5 (neutral value)
-                Ok(matrix.to_dense(0.5))
+                // Fill with neutral value
+                Ok(matrix.to_dense(BITCOIN_HIVEMIND_NEUTRAL_VALUE))
             }
             ImputationMethod::VoterMean => Self::fill_with_voter_means(matrix),
             ImputationMethod::DecisionMean => {
@@ -66,7 +67,7 @@ impl MatrixPreprocessor {
         matrix: &SparseVoteMatrix,
     ) -> Result<Array2<f64>, VotingMathError> {
         let (num_voters, num_decisions) = matrix.dimensions();
-        let mut dense = Array2::from_elem((num_voters, num_decisions), 0.5);
+        let mut dense = Array2::from_elem((num_voters, num_decisions), BITCOIN_HIVEMIND_NEUTRAL_VALUE);
 
         // Calculate voter means
         let voters = matrix.get_voters();
@@ -79,7 +80,7 @@ impl MatrixPreprocessor {
                     votes.values().sum::<f64>() / votes.len() as f64;
                 voter_means.insert(*voter_id, mean);
             } else {
-                voter_means.insert(*voter_id, 0.5);
+                voter_means.insert(*voter_id, BITCOIN_HIVEMIND_NEUTRAL_VALUE);
             }
         }
 
@@ -106,7 +107,7 @@ impl MatrixPreprocessor {
         matrix: &SparseVoteMatrix,
     ) -> Result<Array2<f64>, VotingMathError> {
         let (num_voters, num_decisions) = matrix.dimensions();
-        let mut dense = Array2::from_elem((num_voters, num_decisions), 0.5);
+        let mut dense = Array2::from_elem((num_voters, num_decisions), BITCOIN_HIVEMIND_NEUTRAL_VALUE);
 
         // Calculate decision means
         let decisions = matrix.get_decisions();
@@ -119,7 +120,7 @@ impl MatrixPreprocessor {
                     votes.values().sum::<f64>() / votes.len() as f64;
                 decision_means.insert(*decision_id, mean);
             } else {
-                decision_means.insert(*decision_id, 0.5);
+                decision_means.insert(*decision_id, BITCOIN_HIVEMIND_NEUTRAL_VALUE);
             }
         }
 
@@ -155,7 +156,7 @@ impl MatrixPreprocessor {
         let global_mean = if !all_votes.is_empty() {
             all_votes.iter().sum::<f64>() / all_votes.len() as f64
         } else {
-            0.5
+            BITCOIN_HIVEMIND_NEUTRAL_VALUE
         };
 
         Ok(matrix.to_dense(global_mean))
@@ -201,7 +202,7 @@ impl MatrixPreprocessor {
                 variance.sqrt()
             };
 
-            if std_dev > 1e-10 {
+            if std_dev > SVD_NUMERICAL_TOLERANCE {
                 column.mapv_inplace(|x| (x - mean) / std_dev);
             }
         }
@@ -222,7 +223,7 @@ impl MatrixPreprocessor {
                 column.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
             let range = max_val - min_val;
-            if range > 1e-10 {
+            if range > SVD_NUMERICAL_TOLERANCE {
                 column.mapv_inplace(|x| (x - min_val) / range);
             }
         }
@@ -239,7 +240,7 @@ impl MatrixPreprocessor {
         // Normalize each row (voter) independently
         for mut row in normalized.rows_mut() {
             let norm = row.iter().map(|x| x.powi(2)).sum::<f64>().sqrt();
-            if norm > 1e-10 {
+            if norm > SVD_NUMERICAL_TOLERANCE {
                 row.mapv_inplace(|x| x / norm);
             }
         }
@@ -391,7 +392,7 @@ impl MatrixAnalyzer {
         }
 
         let denominator = (sum_sq_x * sum_sq_y).sqrt();
-        if denominator < 1e-10 {
+        if denominator < SVD_NUMERICAL_TOLERANCE {
             Ok(0.0) // No correlation if no variance
         } else {
             Ok(numerator / denominator)
@@ -479,7 +480,7 @@ impl MatrixAnalyzer {
 
             // Eliminate column
             for k in (i + 1)..rows {
-                if working[[i, i]].abs() > 1e-10 {
+                if working[[i, i]].abs() > SVD_NUMERICAL_TOLERANCE {
                     let factor = working[[k, i]] / working[[i, i]];
                     for j in i..cols {
                         working[[k, j]] -= factor * working[[i, j]];
@@ -515,7 +516,7 @@ impl ConsensusOps {
         matrix: &Array2<f64>,
         reputations: &Array1<f64>,
     ) -> Result<Array2<f64>, VotingMathError> {
-        let (num_voters, num_decisions) = matrix.dim();
+        let (num_voters, _num_decisions) = matrix.dim();
 
         if reputations.len() != num_voters {
             return Err(VotingMathError::DimensionMismatch {

@@ -534,7 +534,8 @@ impl Wallet {
                 OutputContent::Votecoin(votecoin_change),
             ))
         }
-        Ok(Transaction::new(inputs, outputs))
+        let tx = Transaction::new(inputs, outputs);
+        Ok(tx)
     }
 
     /// Select confirmed Bitcoin UTXOs only, following Bitcoin Hivemind's requirement
@@ -1201,7 +1202,10 @@ impl Wallet {
     }
 
     /// Register as a voter
-    pub fn register_voter(&self, fee: bitcoin::Amount) -> Result<Transaction, Error> {
+    pub fn register_voter(
+        &self,
+        fee: bitcoin::Amount,
+    ) -> Result<Transaction, Error> {
         let tx_data = crate::types::TransactionData::RegisterVoter {
             initial_data: [0u8; 32],
         };
@@ -1247,15 +1251,22 @@ impl Wallet {
         let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(fee)?;
         let change_bitcoin = total_bitcoin - fee;
 
+        // Extract voter address from first Votecoin UTXO to maintain "one address = one voter"
+        let voter_address = votecoin_utxos
+            .values()
+            .next()
+            .ok_or_else(|| Error::NotEnoughFunds)?
+            .address;
+
         // First input must be Votecoin UTXO for validation
         let mut inputs: Vec<_> = votecoin_utxos.into_keys().collect();
         inputs.extend(bitcoin_utxos.into_keys());
 
         let mut outputs = Vec::new();
 
-        // Return the Votecoin (not consumed by voting)
+        // Return the Votecoin to the SAME address to maintain voter identity
         outputs.push(Output::new(
-            self.get_new_address()?,
+            voter_address,
             OutputContent::Votecoin(total_votecoin),
         ));
 
@@ -1292,15 +1303,22 @@ impl Wallet {
         let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(fee)?;
         let change_bitcoin = total_bitcoin - fee;
 
+        // Extract voter address from first Votecoin UTXO to maintain "one address = one voter"
+        let voter_address = votecoin_utxos
+            .values()
+            .next()
+            .ok_or_else(|| Error::NotEnoughFunds)?
+            .address;
+
         // First input must be Votecoin UTXO for validation
         let mut inputs: Vec<_> = votecoin_utxos.into_keys().collect();
         inputs.extend(bitcoin_utxos.into_keys());
 
         let mut outputs = Vec::new();
 
-        // Return the Votecoin (not consumed by voting)
+        // Return the Votecoin to the SAME address to maintain voter identity
         outputs.push(Output::new(
-            self.get_new_address()?,
+            voter_address,
             OutputContent::Votecoin(total_votecoin),
         ));
 

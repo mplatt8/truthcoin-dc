@@ -1011,7 +1011,7 @@ impl NetTask {
                     }
                 }
                 MailboxItem::NewTipReady(new_tip, _addr, resp_tx) => {
-                    let reorg_applied = task::block_in_place(|| {
+                    let reorg_result = task::block_in_place(|| {
                         reorg_to_tip(
                             &self.ctxt.env,
                             &self.ctxt.archive,
@@ -1021,12 +1021,24 @@ impl NetTask {
                             &self.ctxt.zmq_pub_handler,
                             new_tip,
                         )
-                    })?;
+                    });
+
+                    // Always send response, even on error
                     if let Some(resp_tx) = resp_tx {
+                        let reorg_applied = match &reorg_result {
+                            Ok(applied) => *applied,
+                            Err(e) => {
+                                tracing::error!("Reorg failed: {:?}", e);
+                                false // Indicate reorg was not applied
+                            }
+                        };
                         let () = resp_tx
                             .send(reorg_applied)
                             .map_err(|_| Error::SendReorgResultOneshot)?;
                     }
+
+                    // Now propagate the error if there was one
+                    let _ = reorg_result?;
                 }
                 MailboxItem::PeerInfo(None) => {
                     return Err(Error::PeerInfoRxClosed);

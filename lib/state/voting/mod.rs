@@ -1,138 +1,45 @@
-//! Bitcoin Hivemind Voting Module with Votecoin Integration
+//! Bitcoin Hivemind Voting Module
 //!
-//! This module implements the complete Bitcoin Hivemind voting mechanism as specified
-//! in the whitepaper, now fully integrated with the Votecoin economic stake system.
-//! It provides high-level operations for vote management, period handling, reputation
-//! tracking, and outcome determination using the complete voting weight formula.
+//! Implements the Bitcoin Hivemind voting mechanism with Votecoin economic stake integration.
 //!
-//! ## Votecoin-Voting Integration
-//!
-//! This implementation provides clean integration between the Votecoin system and the
-//! voting power system according to the Bitcoin Hivemind specification:
-//!
-//! ### Bitcoin Hivemind Voting Weight Formula
-//! **Final Voting Weight = Base Reputation × Votecoin Holdings Proportion**
-//!
-//! Where:
-//! - **Base Reputation**: Historical accuracy-based weighting (0.0 to 1.0)
-//! - **Votecoin Holdings Proportion**: Economic stake as fraction of total supply (0.0 to 1.0)
-//! - **Final Voting Weight**: Combined influence in consensus calculations
-//!
-//! ### Key Features
-//! 1. **Efficient UTXO-based Balance Queries**: O(k) time complexity for Votecoin balance lookups
-//! 2. **Cached Proportion Updates**: Votecoin proportions cached with staleness checking
-//! 3. **Atomic Weight Calculations**: Both components updated together for consistency
-//! 4. **Backward Compatibility**: Existing voting system enhanced, not replaced
-//! 5. **Economic Incentive Alignment**: Voting power tied to both performance and stake
-//!
-//! ### Integration Points
-//! - `State::get_votecoin_balance()` - Query individual Votecoin holdings
-//! - `State::get_votecoin_proportions_batch()` - Efficient batch proportion calculation
-//! - `VoterReputation::update_votecoin_proportion()` - Update economic stake component
-//! - `VotingSystem::get_fresh_reputation_weights()` - Get complete voting weights
-//! - `ReputationVector::from_voter_reputations()` - Convert to mathematical operations
-//!
-//! ## Architecture
-//! - `types`: Core data structures enhanced with Votecoin weighting
-//! - `database`: Low-level database operations and CRUD
-//! - Main module: High-level business logic with Votecoin integration
-//! - `State`: UTXO-based Votecoin balance queries
-//! - `math::voting`: Mathematical operations using combined weights
-//!
-//! ## Bitcoin Hivemind Specification References
-//! - Section 3: "Voting" - Core voting mechanism
-//! - Section 4: "Consensus Algorithm" - Vote aggregation and reputation weighting
-//! - Section 5: "Economics" - Economic incentives and stake-based weighting
-//! - Section 6: "Implementation" - Technical details for economic stake integration
+//! ## Voting Weight Formula
+//! Final Voting Weight = Base Reputation × Votecoin Holdings Proportion
 
 pub mod database;
-pub mod types;
 pub mod period_calculator;
-
-// Tests temporarily disabled - can be re-enabled after Phase 2
-// #[cfg(test)]
-// mod basic_tests;
+pub mod redistribution;
+pub mod types;
 
 use crate::state::{Error, slots::SlotId};
 use database::VotingDatabases;
 use sneed::{Env, RoTxn, RwTxn};
 use std::collections::{HashMap, HashSet};
 use types::{
-    DecisionOutcome, DecisionResolution, Vote, VoteValue, VoterId,
-    VoterReputation, VotingPeriod, VotingPeriodId, VotingPeriodStats,
-    VotingPeriodStatus,
+    DecisionOutcome, DecisionResolution, Vote, VoteValue, VoterReputation,
+    VotingPeriod, VotingPeriodId, VotingPeriodStats, VotingPeriodStatus,
 };
 
-/// High-level voting system interface
-///
-/// This struct provides the main interface for all voting operations,
-/// combining database operations with business logic validation to ensure
-/// compliance with Bitcoin Hivemind consensus rules.
 #[derive(Clone)]
 pub struct VotingSystem {
-    /// Database layer for persistent storage
     databases: VotingDatabases,
+    consensus_lock: std::sync::Arc<std::sync::Mutex<()>>,
 }
 
 impl VotingSystem {
-    /// Number of databases managed by the voting system
     pub const NUM_DBS: u32 = VotingDatabases::NUM_DBS;
 
-    /// Create a new voting system
-    ///
-    /// # Arguments
-    /// * `env` - LMDB environment
-    /// * `rwtxn` - Read-write transaction for initialization
-    ///
-    /// # Returns
-    /// New VotingSystem instance with all databases initialized
     pub fn new(env: &Env, rwtxn: &mut RwTxn<'_>) -> Result<Self, Error> {
         let databases = VotingDatabases::new(env, rwtxn)?;
-        Ok(Self { databases })
+        Ok(Self {
+            databases,
+            consensus_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+        })
     }
 
-    /// Get read-only access to underlying databases
     pub fn databases(&self) -> &VotingDatabases {
         &self.databases
     }
 
-    // ================================================================================
-    // Voting Period Management
-    // ================================================================================
-    //
-    // NOTE: Voting periods are NO LONGER STORED or explicitly managed!
-    // All period information is calculated on-demand using period_calculator module.
-    //
-    // Period lifecycle is now implicit:
-    // - Pending: before start_timestamp (calculated from period index)
-    // - Active: between start and end timestamps
-    // - Closed: after end_timestamp, before consensus calculated
-    // - Resolved: after consensus outcomes stored
-    //
-    // No create_voting_period(), activate_voting_period(), or close_voting_period() methods.
-    // Use period_calculator::calculate_voting_period() to get current period state.
-    // Use cast_vote() during active periods - it validates period status automatically.
-    // Use resolve_period_decisions() to calculate consensus and mark period resolved.
-
-    /// Snapshot Votecoin proportions for all voters in a period
-    ///
-    /// This method caches Votecoin proportions at period close time to avoid
-    /// expensive O(N×U) recalculation during consensus resolution. The cached
-    /// proportions are stored in voter reputation records.
-    ///
-    /// # Arguments
-    /// * `rwtxn` - Read-write transaction
-    /// * `period_id` - Period to snapshot proportions for
-    /// * `state` - State reference for UTXO queries
-    /// * `current_height` - Current block height for cache timestamp
-    ///
-    /// # Returns
-    /// Ok(()) if proportions were successfully cached
-    ///
-    /// # Performance
-    /// This optimization reduces consensus resolution from O(N×U) to O(N)
-    /// where N = voters, U = UTXOs, by caching proportions once instead
-    /// of recalculating on every resolution attempt.
     pub fn snapshot_votecoin_proportions(
         &self,
         rwtxn: &mut RwTxn,
@@ -141,25 +48,23 @@ impl VotingSystem {
         current_height: u64,
     ) -> Result<(), Error> {
         let votes = self.databases.get_votes_for_period(rwtxn, period_id)?;
-        let voters: HashSet<VoterId> = votes.keys().map(|k| k.voter_id).collect();
+        let voters: HashSet<crate::types::Address> =
+            votes.keys().map(|k| k.voter_address).collect();
 
-        // Convert VoterIds to Addresses for UTXO queries
-        let addresses: HashSet<crate::types::Address> = voters
-            .iter()
-            .map(|voter_id| voter_id.to_address())
-            .collect();
-
-        // Get current Votecoin proportions for all voters (single batch query)
         let votecoin_proportions =
-            state.get_votecoin_proportions_batch(rwtxn, &addresses)?;
+            state.get_votecoin_proportions_batch(rwtxn, &voters)?;
 
-        // Update cached proportions in voter reputations
-        for voter_id in voters {
-            if let Some(mut reputation) = self.databases.get_voter_reputation(rwtxn, voter_id)? {
-                let address = voter_id.to_address();
-                let proportion = votecoin_proportions.get(&address).copied().unwrap_or(0.0);
+        for voter_address in voters {
+            if let Some(mut reputation) =
+                self.databases.get_voter_reputation(rwtxn, voter_address)?
+            {
+                let proportion = votecoin_proportions
+                    .get(&voter_address)
+                    .copied()
+                    .unwrap_or(0.0);
 
-                reputation.update_votecoin_proportion(proportion, current_height);
+                reputation
+                    .update_votecoin_proportion(proportion, current_height);
                 self.databases.put_voter_reputation(rwtxn, &reputation)?;
             }
         }
@@ -167,55 +72,46 @@ impl VotingSystem {
         Ok(())
     }
 
-    /// Calculate and store consensus outcomes for a voting period
+    /// Calculate and store consensus outcomes for a voting period.
     ///
-    /// **SINGLE SOURCE OF TRUTH FOR CONSENSUS AND REPUTATION UPDATES**
-    ///
-    /// This is the authoritative function for both consensus calculation and reputation
-    /// updates across the entire system. It ensures that reputation changes happen in
-    /// exactly one place, using the mathematically correct SVD-based algorithm from
-    /// the Bitcoin Hivemind whitepaper.
-    ///
-    /// # Responsibilities
-    /// 1. **Consensus Calculation**: Uses SVD-based PCA to determine decision outcomes
-    /// 2. **Reputation Updates**: Updates voter reputations based on SVD alignment
-    /// 3. **Metrics Storage**: Stores SVD metrics (loading, variance, certainty)
-    /// 4. **Outcome Storage**: Persists consensus outcomes to database
-    ///
-    /// # Arguments
-    /// * `rwtxn` - Read-write transaction
-    /// * `period_id` - Period to calculate consensus for
-    ///
-    /// # Returns
-    /// Ok(()) if consensus was calculated and stored successfully
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Implements Section 4.2: "Reputation System"
-    /// - Uses current reputation to calculate consensus outcomes
-    /// - Updates reputation based on SVD principal component alignment
-    /// - Applies smoothing factor (alpha) to prevent volatility
-    /// - Handles PCA sign ambiguity through reflection analysis
-    ///
-    /// **CRITICAL**: No other function in the codebase should update reputation.
-    /// This is the ONLY location where reputation changes occur, ensuring:
-    /// - Consistency with whitepaper mathematical specification
-    /// - No duplicate or conflicting updates
-    /// - Proper application of smoothing and consensus algorithms
-    ///
-    /// Reference: lib/math/voting/consensus.rs::run_consensus()
-    fn calculate_and_store_consensus(
+    /// SINGLE SOURCE OF TRUTH for consensus calculation and reputation updates.
+    /// Uses SVD-based PCA as specified in Bitcoin Hivemind Section 4.2.
+    pub(crate) fn calculate_and_store_consensus(
         &self,
         rwtxn: &mut RwTxn,
         period_id: VotingPeriodId,
+        state: &crate::state::State,
+        current_timestamp: u64,
+        current_height: u64,
+        slots_db: &crate::state::slots::Dbs,
     ) -> Result<(), Error> {
-        use crate::math::voting::{calculate_consensus, ReputationVector, SparseVoteMatrix};
+        use crate::math::voting::{
+            ReputationVector, SparseVoteMatrix, calculate_consensus,
+        };
+
+        let _consensus_guard = self.consensus_lock.lock().map_err(|_| {
+            Error::DatabaseError("Failed to acquire consensus lock".to_string())
+        })?;
 
         tracing::debug!(
-            "calculate_and_store_consensus: Starting for period {}",
+            "calculate_and_store_consensus: Starting for period {} (lock acquired)",
             period_id.0
         );
 
-        let all_votes = self.databases.get_votes_for_period(rwtxn, period_id)?;
+        let existing_outcomes = self
+            .databases
+            .get_consensus_outcomes_for_period(rwtxn, period_id)?;
+        if !existing_outcomes.is_empty() {
+            tracing::warn!(
+                "calculate_and_store_consensus: Consensus already calculated for period {} ({} outcomes exist), skipping",
+                period_id.0,
+                existing_outcomes.len()
+            );
+            return Ok(());
+        }
+
+        let all_votes =
+            self.databases.get_votes_for_period(rwtxn, period_id)?;
 
         if all_votes.is_empty() {
             tracing::warn!(
@@ -230,28 +126,22 @@ impl VotingSystem {
         let mut voter_reputations = HashMap::new();
 
         for vote_key in all_votes.keys() {
-            if voters_set.insert(vote_key.voter_id) {
-                if let Some(rep) = self.databases.get_voter_reputation(rwtxn, vote_key.voter_id)? {
-                    let reputation_value = rep.reputation;
-                    voter_reputations.insert(vote_key.voter_id, rep);
+            if voters_set.insert(vote_key.voter_address) {
+                if let Some(rep) = self
+                    .databases
+                    .get_voter_reputation(rwtxn, vote_key.voter_address)?
+                {
+                    voter_reputations.insert(vote_key.voter_address, rep);
                 } else {
-                    // New voter - initialize with default neutral reputation
-                    // This is required by Bitcoin Hivemind: new voters start with neutral reputation
-
-                    // Get current timestamp (we can use 0 as it's just for initialization)
                     let timestamp = 0u64;
-
-                    // Create default reputation for new voter using new_default method
                     let default_rep = crate::state::voting::types::VoterReputation::new_default(
-                        vote_key.voter_id,
+                        vote_key.voter_address,
                         timestamp,
                         period_id,
                     );
-
-                    // Store the reputation for future use
                     self.databases.put_voter_reputation(rwtxn, &default_rep)?;
-                    voter_reputations.insert(vote_key.voter_id, default_rep);
-
+                    voter_reputations
+                        .insert(vote_key.voter_address, default_rep);
                 }
             }
             decisions_set.insert(vote_key.decision_id);
@@ -259,7 +149,6 @@ impl VotingSystem {
 
         if voter_reputations.is_empty() {
             return Ok(());
-        } else {
         }
 
         let voters: Vec<_> = voters_set.into_iter().collect();
@@ -268,121 +157,247 @@ impl VotingSystem {
         let mut vote_matrix = SparseVoteMatrix::new(voters, decisions);
 
         for (vote_key, vote_entry) in &all_votes {
-            vote_matrix.set_vote(
-                vote_key.voter_id,
-                vote_key.decision_id,
-                vote_entry.to_f64(),
-            ).map_err(|e| Error::InvalidTransaction {
-                reason: format!("Failed to set vote in matrix: {:?}", e),
-            })?;
+            vote_matrix
+                .set_vote(
+                    vote_key.voter_address,
+                    vote_key.decision_id,
+                    vote_entry.to_f64(),
+                )
+                .map_err(|e| Error::InvalidTransaction {
+                    reason: format!("Failed to set vote in matrix: {:?}", e),
+                })?;
         }
 
-        let reputation_vector = ReputationVector::from_voter_reputations(&voter_reputations);
+        let reputation_vector =
+            ReputationVector::from_voter_reputations(&voter_reputations);
 
-        // Calculate consensus outcomes with full SVD metrics
-        let consensus_result = calculate_consensus(&vote_matrix, &reputation_vector)
-            .map_err(|e| Error::InvalidTransaction {
-                reason: format!("Failed to calculate consensus: {:?}", e),
-            })?;
+        let consensus_result =
+            calculate_consensus(&vote_matrix, &reputation_vector).map_err(
+                |e| Error::InvalidTransaction {
+                    reason: format!("Failed to calculate consensus: {:?}", e),
+                },
+            )?;
 
-
-        // Store SVD metrics in period stats
-        let mut period_stats = self.databases.get_period_stats(rwtxn, period_id)?
+        let mut period_stats = self
+            .databases
+            .get_period_stats(rwtxn, period_id)?
             .unwrap_or_else(|| VotingPeriodStats::new(period_id, 0));
 
-        period_stats.first_loading = Some(consensus_result.first_loading.clone());
-        period_stats.explained_variance = Some(consensus_result.explained_variance);
+        period_stats.first_loading =
+            Some(consensus_result.first_loading.clone());
+        period_stats.explained_variance =
+            Some(consensus_result.explained_variance);
         period_stats.certainty = Some(consensus_result.certainty);
 
-        // Collect reputation changes before updating
         let mut reputation_changes = HashMap::new();
 
-        // Update voter reputations based on SVD consensus results
-        // This is CRITICAL for the Bitcoin Hivemind incentive mechanism
-        for (voter_id, new_reputation) in consensus_result.updated_reputations.iter() {
-            if let Some(mut voter_rep) = self.databases.get_voter_reputation(rwtxn, *voter_id)? {
-                let old_reputation = voter_rep.reputation;
+        for (voter_id, new_reputation) in
+            consensus_result.updated_reputations.iter()
+        {
+            let mut voter_rep = self
+                .databases
+                .get_voter_reputation(rwtxn, *voter_id)?
+                .unwrap_or_else(|| {
+                    VoterReputation::new_default(*voter_id, 0, period_id)
+                });
 
-                // Store the change for period stats
-                reputation_changes.insert(*voter_id, (old_reputation, *new_reputation));
+            let old_reputation = voter_rep.reputation;
 
-                // Push old reputation to history before updating
-                // Use a dummy txid for consensus updates
-                let consensus_txid = crate::types::Txid([0xff; 32]);
-                voter_rep.reputation_history.push(old_reputation, consensus_txid, 0);
+            reputation_changes
+                .insert(*voter_id, (old_reputation, *new_reputation));
 
-                // Update reputation to the new value calculated by SVD consensus
-                // The consensus algorithm already applies smoothing (alpha factor)
-                voter_rep.reputation = *new_reputation;
-                voter_rep.last_updated = 0; // Will be set properly in resolve_period_decisions
-                voter_rep.last_period = period_id;
+            let consensus_txid = crate::types::Txid([0xff; 32]);
+            voter_rep.reputation_history.push(
+                old_reputation,
+                consensus_txid,
+                0,
+            );
 
-                // Store the updated reputation
-                self.databases.put_voter_reputation(rwtxn, &voter_rep)?;
+            voter_rep.reputation = *new_reputation;
+            voter_rep.last_updated = 0;
+            voter_rep.last_period = period_id;
 
-            } else {
-            }
+            self.databases.put_voter_reputation(rwtxn, &voter_rep)?;
         }
 
-        // Store reputation changes in period stats
         if !reputation_changes.is_empty() {
-            period_stats.reputation_changes = Some(reputation_changes);
+            period_stats.reputation_changes = Some(reputation_changes.clone());
         }
 
-        // Save the updated period stats with reputation changes
         self.databases.put_period_stats(rwtxn, &period_stats)?;
 
+        for (slot_id, outcome_value) in &consensus_result.outcomes {
+            // Handle unanimous abstention: if outcome is None, skip storing outcome
+            // but still process the slot (it will be marked as unresolved)
+            let Some(outcome_f64) = outcome_value else {
+                tracing::warn!(
+                    "Slot {} has unanimous abstention - no consensus outcome stored",
+                    hex::encode(slot_id.as_bytes())
+                );
+                continue;
+            };
 
-        // Store the consensus outcomes in the database as DecisionOutcome objects
-        for (slot_id, outcome_value) in consensus_result.outcomes {
-            // Create resolution tracking for this decision
-            let mut resolution = DecisionResolution::new(
-                slot_id,
-                period_id,
-                0,  // voting_deadline - not needed for already calculated consensus
-                1,  // min_votes_required
-                0,  // current_timestamp
-                0,  // current_height
-            );
-            resolution.mark_outcome_ready();  // Mark as ready since we have consensus
+            let mut resolution =
+                DecisionResolution::new(*slot_id, period_id, 0, 1, 0, 0);
+            resolution.mark_outcome_ready();
 
-            // Create a DecisionOutcome for this consensus result
             let outcome = DecisionOutcome::new(
-                slot_id,
+                *slot_id,
                 period_id,
-                outcome_value,
-                0.0,  // min value for binary/scalar decisions
-                1.0,  // max value for binary/scalar decisions
-                1.0,  // confidence (100% for initial consensus)
-                all_votes.len() as u64,  // total votes
-                voter_reputations.values().map(|r| r.reputation).sum(),  // total reputation weight
-                0,  // timestamp (will be set later)
-                0,  // block height (will be set later)
-                true,  // is_consensus
-                resolution,  // resolution tracking
+                *outcome_f64,
+                0.0,
+                1.0,
+                1.0,
+                all_votes.len() as u64,
+                voter_reputations.values().map(|r| r.reputation).sum(),
+                0,
+                0,
+                true,
+                resolution,
             );
 
             self.databases.put_decision_outcome(rwtxn, &outcome)?;
-
         }
+
+        let redistribution_summary =
+            redistribution::redistribute_votecoin_after_consensus(
+                state,
+                rwtxn,
+                period_id,
+                &reputation_changes,
+                current_timestamp,
+                current_height,
+            )?;
+
+        // ATOMIC: Apply redistribution immediately in the same transaction
+        redistribution::apply_votecoin_redistribution(
+            state,
+            rwtxn,
+            &redistribution_summary,
+            current_height,
+        )?;
+
+        let mut slots_in_period = Vec::new();
+        for (slot_id, _) in consensus_result.outcomes.iter() {
+            slots_in_period.push(*slot_id);
+        }
+
+        // Transition slots through the full lifecycle atomically
+        // Slots with unanimous abstention (None outcome) are handled differently
+        for slot_id in &slots_in_period {
+            let outcome_opt = consensus_result.outcomes.get(slot_id).and_then(|v| *v);
+
+            match outcome_opt {
+                Some(outcome_value) => {
+                    // Normal case: slot has consensus outcome
+                    let consensus_outcome = outcome_value > 0.5;
+
+                    slots_db.transition_slot_to_redistribution(
+                        rwtxn,
+                        *slot_id,
+                        current_height,
+                        current_timestamp,
+                        consensus_outcome,
+                    )?;
+
+                    slots_db.transition_slot_to_resolved(
+                        rwtxn,
+                        *slot_id,
+                        current_height,
+                        current_timestamp,
+                    )?;
+
+                    slots_db.transition_slot_to_ossified(
+                        rwtxn,
+                        *slot_id,
+                        current_height,
+                        current_timestamp,
+                    )?;
+
+                    tracing::debug!(
+                        "Atomically transitioned slot {} through Redistribution -> Resolved -> Ossified with outcome {}",
+                        hex::encode(slot_id.as_bytes()),
+                        consensus_outcome
+                    );
+                }
+                None => {
+                    // Unanimous abstention: mark slot as unresolved
+                    // The slot remains in its current state - no transition occurs
+                    // This allows the market to remain open or be handled by other mechanisms
+                    tracing::warn!(
+                        "Slot {} has unanimous abstention - not transitioning to resolved/ossified",
+                        hex::encode(slot_id.as_bytes())
+                    );
+                }
+            }
+        }
+
+        // Collect only the slots that were actually resolved (not abstained)
+        let resolved_slot_ids: Vec<SlotId> = slots_in_period
+            .iter()
+            .filter(|slot_id| {
+                consensus_result
+                    .outcomes
+                    .get(slot_id)
+                    .and_then(|v| *v)
+                    .is_some()
+            })
+            .copied()
+            .collect();
+
+        // Store redistribution record as already applied for auditability
+        let mut period_redistribution = redistribution::PeriodRedistribution::new(
+            period_id,
+            resolved_slot_ids.clone(),
+            redistribution_summary,
+            current_height,
+        );
+        period_redistribution.mark_applied(current_height);
+
+        self.databases
+            .put_pending_redistribution(rwtxn, &period_redistribution)?;
+
+        // Collect slot outcomes for final_prices calculation in market redemption
+        let slot_outcomes: std::collections::HashMap<SlotId, f64> = consensus_result
+            .outcomes
+            .iter()
+            .filter_map(|(slot_id, opt_outcome)| {
+                opt_outcome.map(|v| (*slot_id, v))
+            })
+            .collect();
+
+        // Update market ossification status (only for resolved slots)
+        let ossified_slot_ids: std::collections::HashSet<_> =
+            resolved_slot_ids.iter().copied().collect();
+        let newly_ossified_markets = state
+            .markets()
+            .update_ossification_status(
+                rwtxn,
+                &ossified_slot_ids,
+                &slot_outcomes,
+                state.slots(),
+            )?;
+
+        if !newly_ossified_markets.is_empty() {
+            tracing::info!(
+                "Atomically transitioned {} markets to Ossified state: {:?}",
+                newly_ossified_markets.len(),
+                newly_ossified_markets
+            );
+        }
+
+        let abstained_count = slots_in_period.len() - resolved_slot_ids.len();
+        tracing::info!(
+            "Atomically applied VoteCoin redistribution for period {} at height {}: {} resolved, {} abstained",
+            period_id.0,
+            current_height,
+            resolved_slot_ids.len(),
+            abstained_count
+        );
 
         Ok(())
     }
 
-    /// Get all voting periods using calculated period information
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `current_timestamp` - Current L1 timestamp
-    /// * `config` - Slot configuration for period calculation
-    /// * `slots_db` - Slots database reference
-    ///
-    /// # Returns
-    /// HashMap of VotingPeriodId to VotingPeriod for all periods with slots
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Periods are calculated on-demand from slots, not retrieved from storage.
-    /// This replaces get_active_period() and get_periods_by_status() calls.
     pub fn get_all_periods(
         &self,
         rotxn: &RoTxn,
@@ -399,19 +414,6 @@ impl VotingSystem {
         )
     }
 
-    /// Get the current active voting period
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `current_timestamp` - Current L1 timestamp
-    /// * `config` - Slot configuration for period calculation
-    /// * `slots_db` - Slots database reference
-    ///
-    /// # Returns
-    /// Some(VotingPeriod) if there is an active period, None otherwise
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Periods are calculated on-demand from slots. Status is determined by timestamps.
     pub fn get_active_period(
         &self,
         rotxn: &RoTxn,
@@ -419,7 +421,8 @@ impl VotingSystem {
         config: &crate::state::slots::SlotConfig,
         slots_db: &crate::state::slots::Dbs,
     ) -> Result<Option<VotingPeriod>, Error> {
-        let all_periods = self.get_all_periods(rotxn, current_timestamp, config, slots_db)?;
+        let all_periods =
+            self.get_all_periods(rotxn, current_timestamp, config, slots_db)?;
 
         for period in all_periods.values() {
             if period.status == VotingPeriodStatus::Active {
@@ -430,41 +433,10 @@ impl VotingSystem {
         Ok(None)
     }
 
-    // ================================================================================
-    // Vote Management
-    // ================================================================================
-
-    /// Cast a vote on a decision
-    ///
-    /// # Arguments
-    /// * `rwtxn` - Read-write transaction
-    /// * `voter_id` - ID of voter casting the vote
-    /// * `period_id` - Voting period this vote belongs to
-    /// * `decision_id` - Decision being voted on
-    /// * `value` - Vote value (binary, scalar, or abstain)
-    /// * `timestamp` - L1 timestamp when vote was cast
-    /// * `block_height` - L2 block height when vote was included
-    /// * `tx_hash` - Hash of transaction containing this vote
-    /// * `config` - Slot configuration for period calculation
-    /// * `slots_db` - Slots database reference for decision validation
-    ///
-    /// # Returns
-    /// Ok(()) if vote was cast successfully
-    ///
-    /// # Errors
-    /// - Period not active
-    /// - Voter already voted on this decision
-    /// - Invalid vote value for decision type
-    /// - Database errors
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Votes can only be cast during active periods and each voter can only
-    /// vote once per decision per period to maintain consensus integrity.
-    /// Period is calculated on-demand from slots, not retrieved from storage.
     pub fn cast_vote(
         &self,
         rwtxn: &mut RwTxn,
-        voter_id: VoterId,
+        voter_address: crate::types::Address,
         period_id: VotingPeriodId,
         decision_id: SlotId,
         value: VoteValue,
@@ -474,7 +446,6 @@ impl VotingSystem {
         config: &crate::state::slots::SlotConfig,
         slots_db: &crate::state::slots::Dbs,
     ) -> Result<(), Error> {
-        // Calculate period on-demand (status is correctly calculated within)
         let has_outcomes = self.databases.has_consensus(rwtxn, period_id)?;
         let period = period_calculator::calculate_voting_period(
             rwtxn,
@@ -485,7 +456,6 @@ impl VotingSystem {
             has_outcomes,
         )?;
 
-        // Check if votes can be accepted based on period status
         if !period_calculator::can_accept_votes(&period) {
             return Err(Error::InvalidTransaction {
                 reason: format!(
@@ -495,11 +465,13 @@ impl VotingSystem {
             });
         }
 
-        crate::validation::PeriodValidator::validate_decision_in_period(&period, decision_id)?;
+        crate::validation::PeriodValidator::validate_decision_in_period(
+            &period,
+            decision_id,
+        )?;
 
-        // Create and store the vote
         let vote = Vote::new(
-            voter_id,
+            voter_address,
             period_id,
             decision_id,
             value,
@@ -513,71 +485,42 @@ impl VotingSystem {
         Ok(())
     }
 
-    /// Get all votes for a specific period
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `period_id` - Voting period to query
-    ///
-    /// # Returns
-    /// HashMap mapping (voter_id, decision_id) to vote value
     pub fn get_votes_for_period(
         &self,
         rotxn: &RoTxn,
         period_id: VotingPeriodId,
-    ) -> Result<HashMap<(VoterId, SlotId), VoteValue>, Error> {
+    ) -> Result<HashMap<(crate::types::Address, SlotId), VoteValue>, Error>
+    {
         let vote_entries =
             self.databases.get_votes_for_period(rotxn, period_id)?;
         let mut votes = HashMap::new();
 
         for (key, entry) in vote_entries {
-            votes.insert((key.voter_id, key.decision_id), entry.value);
+            votes.insert((key.voter_address, key.decision_id), entry.value);
         }
 
         Ok(votes)
     }
 
-    /// Get vote matrix for consensus algorithm processing
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `period_id` - Voting period to process
-    ///
-    /// # Returns
-    /// Sparse matrix representation suitable for mathematical operations
     pub fn get_vote_matrix(
         &self,
         rotxn: &RoTxn,
         period_id: VotingPeriodId,
-    ) -> Result<HashMap<(VoterId, SlotId), f64>, Error> {
+    ) -> Result<HashMap<(crate::types::Address, SlotId), f64>, Error> {
         let vote_entries =
             self.databases.get_votes_for_period(rotxn, period_id)?;
         let mut matrix = HashMap::new();
 
         for (key, entry) in vote_entries {
             let vote_value = entry.to_f64();
-            // Only include non-abstain votes in matrix
             if !vote_value.is_nan() {
-                matrix.insert((key.voter_id, key.decision_id), vote_value);
+                matrix.insert((key.voter_address, key.decision_id), vote_value);
             }
         }
 
         Ok(matrix)
     }
 
-    /// Get voting participation statistics for a period
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `period_id` - Period to analyze
-    /// * `config` - Slot configuration for period calculation
-    /// * `slots_db` - Slots database reference
-    ///
-    /// # Returns
-    /// Tuple of (total_voters, total_votes, participation_rate)
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Period is calculated on-demand from slots, not retrieved from storage.
     pub fn get_participation_stats(
         &self,
         rotxn: &RoTxn,
@@ -587,16 +530,13 @@ impl VotingSystem {
     ) -> Result<(u64, u64, f64), Error> {
         let votes = self.databases.get_votes_for_period(rotxn, period_id)?;
 
-        // Get decision slots for this period
         let decision_slots = period_calculator::get_decision_slots_for_period(
-            rotxn,
-            period_id,
-            slots_db,
+            rotxn, period_id, slots_db,
         )?;
 
         let total_votes = votes.len() as u64;
-        let unique_voters: HashSet<VoterId> =
-            votes.keys().map(|k| k.voter_id).collect();
+        let unique_voters: HashSet<crate::types::Address> =
+            votes.keys().map(|k| k.voter_address).collect();
         let total_voters = unique_voters.len() as u64;
         let total_decisions = decision_slots.len() as u64;
 
@@ -609,43 +549,29 @@ impl VotingSystem {
         Ok((total_voters, total_votes, participation_rate))
     }
 
-    // ================================================================================
-    // Reputation Management
-    // ================================================================================
-
-    /// Initialize reputation for a new voter
-    ///
-    /// # Arguments
-    /// * `rwtxn` - Read-write transaction
-    /// * `voter_id` - New voter's ID
-    /// * `initial_reputation` - Starting reputation (typically 0.5)
-    /// * `timestamp` - Current timestamp
-    /// * `period_id` - Current voting period
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// New voters start with neutral reputation to prevent gaming through
-    /// multiple identity creation while ensuring fair initial participation.
     pub fn initialize_voter_reputation(
         &self,
         rwtxn: &mut RwTxn,
-        voter_id: VoterId,
+        voter_address: crate::types::Address,
         initial_reputation: f64,
         timestamp: u64,
         period_id: VotingPeriodId,
     ) -> Result<(), Error> {
-        // Check if voter already has reputation
         if self
             .databases
-            .get_voter_reputation(rwtxn, voter_id)?
+            .get_voter_reputation(rwtxn, voter_address)?
             .is_some()
         {
             return Err(Error::InvalidTransaction {
-                reason: format!("Voter {:?} already has reputation", voter_id),
+                reason: format!(
+                    "Voter {:?} already has reputation",
+                    voter_address
+                ),
             });
         }
 
         let reputation = VoterReputation::new(
-            voter_id,
+            voter_address,
             initial_reputation,
             timestamp,
             period_id,
@@ -655,138 +581,84 @@ impl VotingSystem {
         Ok(())
     }
 
-    /// Get reputation weights for all voters in a period with Votecoin integration
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `period_id` - Period to get weights for
-    /// * `state` - State reference for Votecoin balance queries
-    ///
-    /// # Returns
-    /// HashMap mapping VoterId to final voting weight (reputation × Votecoin proportion)
-    ///
-    /// # Bitcoin Hivemind Specification
-    /// Implements the complete voting weight formula:
-    /// **Final Voting Weight = Base Reputation × Votecoin Holdings Proportion**
     pub fn get_reputation_weights(
         &self,
         rotxn: &RoTxn,
         period_id: VotingPeriodId,
-    ) -> Result<HashMap<VoterId, f64>, Error> {
+    ) -> Result<HashMap<crate::types::Address, f64>, Error> {
         let votes = self.databases.get_votes_for_period(rotxn, period_id)?;
-        let voters: HashSet<VoterId> =
-            votes.keys().map(|k| k.voter_id).collect();
+        let voters: HashSet<crate::types::Address> =
+            votes.keys().map(|k| k.voter_address).collect();
         let mut weights = HashMap::new();
 
-        for voter_id in voters {
+        for voter_address in voters {
             let reputation = self
                 .databases
-                .get_voter_reputation(rotxn, voter_id)?
+                .get_voter_reputation(rotxn, voter_address)?
                 .unwrap_or_else(|| {
-                    VoterReputation::new_default(voter_id, 0, period_id)
+                    VoterReputation::new_default(voter_address, 0, period_id)
                 });
 
-            // Use the final voting weight which incorporates Votecoin holdings
-            weights.insert(voter_id, reputation.get_voting_weight());
+            weights.insert(voter_address, reputation.get_voting_weight());
         }
 
         Ok(weights)
     }
 
-    /// Get reputation weights with fresh Votecoin proportion calculations
-    ///
-    /// This method ensures that Votecoin proportions are up-to-date by querying
-    /// the current UTXO set if needed, then calculates final voting weights.
-    ///
-    /// # Arguments
-    /// * `rwtxn` - Read-write transaction (needed for reputation updates)
-    /// * `period_id` - Period to get weights for
-    /// * `state` - State reference for Votecoin balance queries
-    /// * `current_height` - Current block height for staleness checking
-    ///
-    /// # Returns
-    /// HashMap mapping VoterId to final voting weight
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// This is the authoritative method for getting voting weights that should
-    /// be used for all consensus calculations to ensure accuracy.
+    /// Get voting weights with fresh Votecoin proportions from current UTXO set.
+    /// Use this for all consensus calculations to ensure accuracy.
     pub fn get_fresh_reputation_weights(
         &self,
         rwtxn: &mut RwTxn,
         period_id: VotingPeriodId,
         state: &crate::state::State,
         current_height: u64,
-    ) -> Result<HashMap<VoterId, f64>, Error> {
+    ) -> Result<HashMap<crate::types::Address, f64>, Error> {
         let votes = self.databases.get_votes_for_period(rwtxn, period_id)?;
-        let voters: HashSet<VoterId> =
-            votes.keys().map(|k| k.voter_id).collect();
+        let voters: HashSet<crate::types::Address> =
+            votes.keys().map(|k| k.voter_address).collect();
 
-        // Convert VoterIds to Addresses for UTXO queries
-        let addresses: HashSet<crate::types::Address> = voters
-            .iter()
-            .map(|voter_id| voter_id.to_address())
-            .collect();
-
-        // Get current Votecoin proportions for all voters
         let votecoin_proportions =
-            state.get_votecoin_proportions_batch(rwtxn, &addresses)?;
+            state.get_votecoin_proportions_batch(rwtxn, &voters)?;
 
         let mut weights = HashMap::new();
 
-        for voter_id in voters {
+        for voter_address in voters {
             let mut reputation = self
                 .databases
-                .get_voter_reputation(rwtxn, voter_id)?
+                .get_voter_reputation(rwtxn, voter_address)?
                 .unwrap_or_else(|| {
-                    VoterReputation::new_default(voter_id, 0, period_id)
+                    VoterReputation::new_default(voter_address, 0, period_id)
                 });
 
-            // Update Votecoin proportion if stale
             if reputation.needs_votecoin_refresh(
                 current_height,
                 crate::math::voting::constants::VOTECOIN_STALENESS_BLOCKS,
             ) {
-                let address = voter_id.to_address();
-                let proportion =
-                    votecoin_proportions.get(&address).copied().unwrap_or(0.0);
+                let proportion = votecoin_proportions
+                    .get(&voter_address)
+                    .copied()
+                    .unwrap_or(0.0);
                 reputation
                     .update_votecoin_proportion(proportion, current_height);
 
-                // Save updated reputation back to database
                 self.databases.put_voter_reputation(rwtxn, &reputation)?;
             }
 
-            weights.insert(voter_id, reputation.get_voting_weight());
+            weights.insert(voter_address, reputation.get_voting_weight());
         }
 
         Ok(weights)
     }
 
-    // ================================================================================
-    // Outcome Determination
-    // ================================================================================
-
-    /// Store final decision outcome after consensus resolution
-    ///
-    /// # Arguments
-    /// * `rwtxn` - Read-write transaction
-    /// * `outcome` - Decision outcome to store
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Outcomes are immutable once stored and represent the consensus truth
-    /// used for market resolution and economic settlement.
     pub fn store_decision_outcome(
         &self,
         rwtxn: &mut RwTxn,
         outcome: DecisionOutcome,
     ) -> Result<(), Error> {
-        // Validate outcome doesn't already exist
         if self
             .databases
-            .get_decision_outcome(
-                rwtxn,
-                outcome.decision_id,
-            )?
+            .get_decision_outcome(rwtxn, outcome.decision_id)?
             .is_some()
         {
             return Err(Error::InvalidTransaction {
@@ -801,25 +673,6 @@ impl VotingSystem {
         Ok(())
     }
 
-    /// Resolve all decisions in a voting period using Votecoin-integrated weights
-    ///
-    /// # Arguments
-    /// * `rwtxn` - Read-write transaction
-    /// * `period_id` - Period to resolve
-    /// * `current_timestamp` - Current timestamp
-    /// * `block_height` - Current block height
-    /// * `state` - State reference for Votecoin balance queries
-    /// * `config` - Slot configuration for period calculation
-    /// * `slots_db` - Slots database reference
-    ///
-    /// # Returns
-    /// Vector of resolved decision outcomes
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Implements the complete consensus algorithm with SVD-based PCA as specified
-    /// in the whitepaper. Uses complete voting weights including Votecoin holdings
-    /// proportion. Includes ACID-compliant error handling with automatic rollback.
-    /// Period is calculated on-demand from slots, not retrieved from storage.
     pub fn resolve_period_decisions(
         &self,
         rwtxn: &mut RwTxn,
@@ -832,7 +685,6 @@ impl VotingSystem {
     ) -> Result<Vec<DecisionOutcome>, Error> {
         use crate::types::Txid;
 
-        // Calculate period on-demand (status is correctly calculated within)
         let has_outcomes = self.databases.has_consensus(rwtxn, period_id)?;
         let period = period_calculator::calculate_voting_period(
             rwtxn,
@@ -843,44 +695,20 @@ impl VotingSystem {
             has_outcomes,
         )?;
 
-        // Validate state transition
         period_calculator::validate_transition(
             &period,
             VotingPeriodStatus::Resolved,
             current_timestamp,
         )?;
 
-        // Calculate consensus outcomes if not already calculated
-        let mut consensus_outcomes = self.databases.get_consensus_outcomes_for_period(rwtxn, period_id)?;
+        let consensus_outcomes = self
+            .databases
+            .get_consensus_outcomes_for_period(rwtxn, period_id)?;
 
         if consensus_outcomes.is_empty() {
-            // Calculate consensus now using current votes
-            self.calculate_and_store_consensus(rwtxn, period_id)?;
-
-            // Retrieve the newly calculated outcomes
-            consensus_outcomes = self.databases.get_consensus_outcomes_for_period(rwtxn, period_id)?;
-
-
-            if consensus_outcomes.is_empty() {
-                // No votes - period resolved with default outcomes
-                // Period status is now calculated on-demand, not stored
-                return Ok(Vec::new());
-            }
-
-            // Since we just calculated and stored DecisionOutcome objects in calculate_and_store_consensus,
-            // we need to retrieve them and return them, not create new ones
-            let mut outcome_vec = Vec::new();
-            for (slot_id, _) in consensus_outcomes {
-                if let Some(outcome) = self.databases.get_decision_outcome(rwtxn, slot_id)? {
-                    outcome_vec.push(outcome);
-                }
-            }
-
-
-            return Ok(outcome_vec);
+            return Err(Error::ConsensusNotYetCalculated(period_id));
         }
 
-        // Use fresh reputation weights that include up-to-date Votecoin proportions
         let reputation_weights = self.get_fresh_reputation_weights(
             rwtxn,
             period_id,
@@ -890,12 +718,14 @@ impl VotingSystem {
 
         let votes = self.databases.get_votes_for_period(rwtxn, period_id)?;
 
-        // Build voter reputations map for detailed result
         let mut voter_reputations = HashMap::new();
         for vote_key in votes.keys() {
-            if !voter_reputations.contains_key(&vote_key.voter_id) {
-                if let Some(rep) = self.databases.get_voter_reputation(rwtxn, vote_key.voter_id)? {
-                    voter_reputations.insert(vote_key.voter_id, rep);
+            if !voter_reputations.contains_key(&vote_key.voter_address) {
+                if let Some(rep) = self
+                    .databases
+                    .get_voter_reputation(rwtxn, vote_key.voter_address)?
+                {
+                    voter_reputations.insert(vote_key.voter_address, rep);
                 }
             }
         }
@@ -903,14 +733,12 @@ impl VotingSystem {
         let period_stats = self.databases.get_period_stats(rwtxn, period_id)?;
         let certainty = period_stats
             .and_then(|stats| stats.certainty)
-            .unwrap_or(0.5); // Default to neutral if consensus hasn't been calculated
+            .unwrap_or(0.5);
 
         let mut outcomes = Vec::new();
         for decision_id in &period.decision_slots {
-            let outcome_value = consensus_outcomes
-                .get(decision_id)
-                .copied()
-                .unwrap_or(0.5);
+            let outcome_value =
+                consensus_outcomes.get(decision_id).copied().unwrap_or(0.5);
 
             let decision_votes_count = votes
                 .iter()
@@ -952,40 +780,9 @@ impl VotingSystem {
             outcomes.push(outcome);
         }
 
-        // NOTE: Reputation updates are NOT done here!
-        //
-        // Bitcoin Hivemind Specification Compliance (Section 4.2):
-        // Reputation updates occur exclusively within the consensus algorithm
-        // (calculate_and_store_consensus -> consensus::run_consensus) where they
-        // are calculated using SVD-based PCA, weighted principal components, and
-        // proper smoothing factors as specified in the whitepaper.
-        //
-        // The consensus algorithm already:
-        // 1. Calculates voter alignment with the principal component (not simple tolerance)
-        // 2. Applies reputation smoothing (alpha factor) to prevent volatility
-        // 3. Handles PCA sign ambiguity and reflection attacks
-        // 4. Stores updated reputations to the database (lines 280-305)
-        //
-        // Previous duplicate logic (lines 976-1017) has been removed to maintain
-        // single source of truth for reputation updates.
-        //
-        // Reference: lib/math/voting/consensus.rs::run_consensus()
-        // Whitepaper: Section 4.2 "Reputation System" and Section 4.4 "SVD Algorithm"
-
-        // Period status is now calculated on-demand, not stored
-        // No need to call update_period_status() - has_consensus flag determines Resolved status
-
         Ok(outcomes)
     }
 
-    /// Get outcomes for all decisions in a period
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `period_id` - Period to query
-    ///
-    /// # Returns
-    /// HashMap mapping SlotId to DecisionOutcome
     pub fn get_period_outcomes(
         &self,
         rotxn: &RoTxn,
@@ -994,21 +791,6 @@ impl VotingSystem {
         self.databases.get_outcomes_for_period(rotxn, period_id)
     }
 
-    // ================================================================================
-    // Utility Functions
-    // ================================================================================
-
-    /// Get comprehensive statistics for a voting period
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `period_id` - Period to analyze
-    /// * `current_timestamp` - Current timestamp for period calculation
-    /// * `config` - Slot configuration for period calculation
-    /// * `slots_db` - Slots database reference
-    ///
-    /// # Returns
-    /// VotingPeriodStats with complete analytics
     pub fn calculate_period_statistics(
         &self,
         rotxn: &RoTxn,
@@ -1020,7 +802,6 @@ impl VotingSystem {
         let (total_voters, total_votes, participation_rate) =
             self.get_participation_stats(rotxn, period_id, config, slots_db)?;
 
-        // Calculate period on-demand (status is correctly calculated within)
         let has_outcomes = self.databases.has_consensus(rotxn, period_id)?;
         let period = period_calculator::calculate_voting_period(
             rotxn,
@@ -1053,13 +834,6 @@ impl VotingSystem {
         Ok(stats)
     }
 
-    /// Validate voting system consistency
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    ///
-    /// # Returns
-    /// Vector of consistency issues found
     pub fn validate_consistency(
         &self,
         rotxn: &RoTxn,
@@ -1067,17 +841,6 @@ impl VotingSystem {
         self.databases.check_consistency(rotxn)
     }
 
-    /// Get system-wide voting statistics
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `slots_db` - Slots database reference for counting periods
-    ///
-    /// # Returns
-    /// Tuple of (total_periods, total_votes, total_voters, avg_reputation)
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Periods are calculated from slots, so we count unique period indices in slots
     pub fn get_system_stats(
         &self,
         rotxn: &RoTxn,
@@ -1090,11 +853,9 @@ impl VotingSystem {
         let (_, avg_reputation, _, _) =
             self.databases.get_reputation_stats(rotxn)?;
 
-        // Count periods by finding unique voting periods from claimed slots
         let all_slots = slots_db.get_all_claimed_slots(rotxn)?;
         let mut unique_periods = std::collections::HashSet::new();
         for slot in all_slots {
-            // Slots claimed in period N are voted on in period N+1
             let voting_period = slot.slot_id.voting_period();
             unique_periods.insert(voting_period);
         }
@@ -1103,9 +864,3 @@ impl VotingSystem {
         Ok((total_periods, total_votes, total_voters, avg_reputation))
     }
 }
-
-// Re-export public types for convenience through the already-imported names
-
-// NOTE: Tests are available in tests.rs.disabled - rename to enable
-// #[cfg(test)]
-// mod tests;

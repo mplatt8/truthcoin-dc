@@ -6,10 +6,10 @@ use futures::{FutureExt, future::BoxFuture};
 
 use crate::{
     ibd::ibd_trial,
+    roundtrip::roundtrip_trial,
     setup::{Init, PostSetup},
     unknown_withdrawal::unknown_withdrawal_trial,
     util::BinPaths,
-    roundtrip::roundtrip_trial,
 };
 
 fn deposit_withdraw_roundtrip(

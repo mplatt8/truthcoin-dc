@@ -13,7 +13,7 @@ use truthcoin_dc::{
     node::{self, Node},
     types::{
         self, Address, AmountOverflowError, BitcoinOutputContent, Body,
-        FilledOutput, OutPoint, Output, Transaction,
+        FilledOutput, InPoint, OutPoint, Output, Transaction,
         proto::mainchain::{
             self,
             generated::{validator_service_server, wallet_service_server},
@@ -57,8 +57,34 @@ fn update_wallet(node: &Node, wallet: &Wallet) -> Result<(), Error> {
     let addresses = wallet.get_addresses()?;
     let unconfirmed_utxos =
         node.get_unconfirmed_utxos_by_addresses(&addresses)?;
-    let utxos = node.get_utxos_by_addresses(&addresses)?;
-    let confirmed_outpoints: Vec<_> = wallet.get_utxos()?.into_keys().collect();
+    let utxos_from_state = node.get_utxos_by_addresses(&addresses)?;
+
+    // Get current wallet UTXOs to detect which ones no longer exist in state
+    let wallet_utxos = wallet.get_utxos()?;
+
+    // Find UTXOs that are in wallet but NOT in state (these were removed, e.g., by redistribution)
+    let mut utxos_to_remove = Vec::new();
+    for (outpoint, _) in &wallet_utxos {
+        if !utxos_from_state.contains_key(outpoint) {
+            utxos_to_remove.push(*outpoint);
+        }
+    }
+
+    // Remove stale UTXOs from wallet (e.g., spent by redistribution)
+    if !utxos_to_remove.is_empty() {
+        tracing::debug!(
+            "Removing {} stale UTXOs from wallet (spent by redistribution or otherwise removed from state)",
+            utxos_to_remove.len()
+        );
+        wallet.spend_utxos(
+            &utxos_to_remove
+                .iter()
+                .map(|outpoint| (*outpoint, InPoint::Redistribution))
+                .collect::<Vec<_>>(),
+        )?;
+    }
+
+    let confirmed_outpoints: Vec<_> = wallet_utxos.into_keys().collect();
     let confirmed_spent = node
         .get_spent_utxos(&confirmed_outpoints)?
         .into_iter()
@@ -71,7 +97,7 @@ fn update_wallet(node: &Node, wallet: &Wallet) -> Result<(), Error> {
         )?
         .into_iter();
     let spent: Vec<_> = confirmed_spent.chain(unconfirmed_spent).collect();
-    wallet.put_utxos(&utxos)?;
+    wallet.put_utxos(&utxos_from_state)?;
     wallet.put_unconfirmed_utxos(&unconfirmed_utxos)?;
     wallet.spend_utxos(&spent)?;
     Ok(())

@@ -19,32 +19,37 @@ use crate::{
     validation::{MarketValidator, SlotValidationInterface, SlotValidator},
 };
 
-/// Trait for managing UTXO operations with address indexing
-///
-/// This trait consolidates the repetitive pattern of updating both the primary UTXO database
-/// and the secondary address index atomically. This ensures compliance with Bitcoin Hivemind
-/// whitepaper specifications for UTXO management while eliminating code duplication.
 pub trait UtxoManager {
-    /// Insert a UTXO into both primary database and address index
     fn insert_utxo_with_address_index(
         &self,
         rwtxn: &mut RwTxn,
         outpoint: &OutPoint,
         filled_output: &FilledOutput,
     ) -> Result<(), Error>;
-
-    /// Delete a UTXO from both primary database and address index
     fn delete_utxo_with_address_index(
         &self,
         rwtxn: &mut RwTxn,
         outpoint: &OutPoint,
     ) -> Result<bool, Error>;
-
-    /// Clear both UTXO database and address index
     fn clear_utxos_and_address_index(
         &self,
         rwtxn: &mut RwTxn,
     ) -> Result<(), Error>;
+
+    /// Insert UTXO without affecting total VoteCoin supply (for redistribution)
+    fn insert_utxo_supply_neutral(
+        &self,
+        rwtxn: &mut RwTxn,
+        outpoint: &OutPoint,
+        filled_output: &FilledOutput,
+    ) -> Result<(), Error>;
+
+    /// Delete UTXO without affecting total VoteCoin supply (for redistribution)
+    fn delete_utxo_supply_neutral(
+        &self,
+        rwtxn: &mut RwTxn,
+        outpoint: &OutPoint,
+    ) -> Result<bool, Error>;
 }
 
 pub mod block;
@@ -67,15 +72,10 @@ pub use voting::VotingSystem;
 
 pub const WITHDRAWAL_BUNDLE_FAILURE_GAP: u32 = 4;
 
-/// Information we have regarding a withdrawal bundle
 #[derive(Debug, Deserialize, Serialize)]
 enum WithdrawalBundleInfo {
-    /// Withdrawal bundle is known
     Known(WithdrawalBundle),
-    /// Withdrawal bundle is unknown but unconfirmed / failed
     Unknown,
-    /// If an unknown withdrawal bundle is confirmed, ALL UTXOs are
-    /// considered spent.
     UnknownConfirmed {
         spend_utxos: BTreeMap<OutPoint, FilledOutput>,
     },
@@ -100,64 +100,39 @@ type WithdrawalBundlesDb = DatabaseUnique<
 
 #[derive(Clone)]
 pub struct State {
-    /// Current tip
     tip: DatabaseUnique<UnitKey, SerdeBincode<BlockHash>>,
-    /// Current height
     height: DatabaseUnique<UnitKey, SerdeBincode<u32>>,
-    /// Current mainchain timestamp
     mainchain_timestamp: DatabaseUnique<UnitKey, SerdeBincode<u64>>,
     votecoin: votecoin::Dbs,
     slots: slots::Dbs,
     markets: MarketsDatabase,
     voting: VotingSystem,
     utxos: DatabaseUnique<SerdeBincode<OutPoint>, SerdeBincode<FilledOutput>>,
-    /// Address-indexed UTXO database for efficient address-based lookups
-    /// Maps (Address, OutPoint) -> () for O(k) address filtering where k is the number of UTXOs for the address
-    /// Uses compound key approach to maintain Bitcoin Hivemind sidechain compliance for UTXO management per whitepaper specifications
     utxos_by_address:
         DatabaseUnique<SerdeBincode<(Address, OutPoint)>, SerdeBincode<()>>,
     stxos: DatabaseUnique<SerdeBincode<OutPoint>, SerdeBincode<SpentOutput>>,
-    /// Pending withdrawal bundle and block height
     pending_withdrawal_bundle:
         DatabaseUnique<UnitKey, SerdeBincode<(WithdrawalBundle, u32)>>,
-    /// Latest failed (known) withdrawal bundle
     latest_failed_withdrawal_bundle:
         DatabaseUnique<UnitKey, SerdeBincode<RollBack<HeightStamped<M6id>>>>,
-    /// Withdrawal bundles and their status.
-    /// Some withdrawal bundles may be unknown.
-    /// in which case they are `None`.
     withdrawal_bundles: WithdrawalBundlesDb,
-    /// Deposit blocks and the height at which they were applied, keyed sequentially
     deposit_blocks: DatabaseUnique<
         SerdeBincode<u32>,
         SerdeBincode<(bitcoin::BlockHash, u32)>,
     >,
-    /// Withdrawal bundle event blocks and the height at which they were applied, keyed sequentially
     withdrawal_bundle_event_blocks: DatabaseUnique<
         SerdeBincode<u32>,
         SerdeBincode<(bitcoin::BlockHash, u32)>,
     >,
-    /// Cached total value of deposit UTXOs for O(1) sidechain wealth calculation
-    /// Updated atomically with UTXO operations per Bitcoin Hivemind sidechain requirements
     cached_deposit_utxo_value: DatabaseUnique<UnitKey, SerdeBincode<u64>>,
-    /// Cached total value of deposit STXOs for O(1) sidechain wealth calculation
-    /// Updated atomically with STXO operations per Bitcoin Hivemind sidechain requirements
     cached_deposit_stxo_value: DatabaseUnique<UnitKey, SerdeBincode<u64>>,
-    /// Cached total value of withdrawal STXOs for O(1) sidechain wealth calculation
-    /// Updated atomically with STXO operations per Bitcoin Hivemind sidechain requirements
     cached_withdrawal_stxo_value: DatabaseUnique<UnitKey, SerdeBincode<u64>>,
+    votecoin_balances: DatabaseUnique<SerdeBincode<Address>, SerdeBincode<u32>>,
+    cached_votecoin_supply: DatabaseUnique<UnitKey, SerdeBincode<u32>>,
     _version: DatabaseUnique<UnitKey, SerdeBincode<Version>>,
 }
 
-/// Implementation of SlotValidationInterface for State
-///
-/// Provides the necessary database operations for slot validation
-/// while maintaining Bitcoin Hivemind compliance and performance.
 impl SlotValidationInterface for State {
-    /// Delegate slot claim validation to slots database
-    ///
-    /// Uses the single source of truth for slot validation as specified
-    /// in the Bitcoin Hivemind whitepaper slot allocation procedures.
     fn validate_slot_claim(
         &self,
         rotxn: &RoTxn,
@@ -175,10 +150,6 @@ impl SlotValidationInterface for State {
         )
     }
 
-    /// Delegate height retrieval to State's try_get_height method
-    ///
-    /// Provides current blockchain height for validation context as needed
-    /// for period-based slot availability calculations.
     fn try_get_height(&self, rotxn: &RoTxn) -> Result<Option<u32>, Error> {
         self.try_get_height(rotxn)
     }
@@ -189,7 +160,7 @@ impl State {
         + slots::Dbs::NUM_DBS
         + MarketsDatabase::NUM_DBS
         + VotingSystem::NUM_DBS
-        + 17; // Added 3 new cache databases
+        + 19;
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn()?;
@@ -239,6 +210,10 @@ impl State {
             &mut rwtxn,
             "cached_withdrawal_stxo_value",
         )?;
+        let votecoin_balances =
+            DatabaseUnique::create(env, &mut rwtxn, "votecoin_balances")?;
+        let cached_votecoin_supply =
+            DatabaseUnique::create(env, &mut rwtxn, "cached_votecoin_supply")?;
         let version = DatabaseUnique::create(env, &mut rwtxn, "state_version")?;
         if version.try_get(&rwtxn, &())?.is_none() {
             version.put(&mut rwtxn, &(), &*VERSION)?;
@@ -253,6 +228,9 @@ impl State {
         }
         if cached_withdrawal_stxo_value.try_get(&rwtxn, &())?.is_none() {
             cached_withdrawal_stxo_value.put(&mut rwtxn, &(), &0u64)?;
+        }
+        if cached_votecoin_supply.try_get(&rwtxn, &())?.is_none() {
+            cached_votecoin_supply.put(&mut rwtxn, &(), &0u32)?;
         }
         rwtxn.commit()?;
         Ok(Self {
@@ -274,6 +252,8 @@ impl State {
             cached_deposit_utxo_value,
             cached_deposit_stxo_value,
             cached_withdrawal_stxo_value,
+            votecoin_balances,
+            cached_votecoin_supply,
             _version: version,
         })
     }
@@ -294,7 +274,6 @@ impl State {
         &self.voting
     }
 
-    /// Create a mutable reference to the voting system for advanced operations
     pub fn voting_mut(&mut self) -> &mut VotingSystem {
         &mut self.voting
     }
@@ -353,35 +332,13 @@ impl State {
         Ok(utxos)
     }
 
-    /// Efficient O(k) address-based UTXO lookup using address index
-    ///
-    /// Returns UTXOs for the specified addresses, leveraging the secondary index
-    /// to achieve O(k) performance where k is the number of matching UTXOs,
-    /// compared to the previous O(n) implementation that scanned all UTXOs.
-    ///
-    /// # Performance
-    /// - Time Complexity: O(k) where k = number of UTXOs for requested addresses
-    /// - Space Complexity: O(k) for result storage
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only database transaction
-    /// * `addresses` - Set of addresses to lookup UTXOs for
-    ///
-    /// # Returns
-    /// HashMap mapping OutPoint to FilledOutput for all UTXOs owned by the specified addresses
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// This optimization maintains full compatibility with Bitcoin Hivemind sidechain
-    /// UTXO management while dramatically improving performance for address-based queries.
     pub fn get_utxos_by_addresses(
         &self,
         rotxn: &RoTxn,
         addresses: &HashSet<Address>,
     ) -> Result<HashMap<OutPoint, FilledOutput>, Error> {
-        // Pre-allocate with estimated capacity to reduce reallocations
-        let mut result = HashMap::with_capacity(addresses.len() * 4); // Estimate 4 UTXOs per address
+        let mut result = HashMap::with_capacity(addresses.len() * 4);
 
-        // Iterate through all address-indexed UTXOs and filter by requested addresses
         let mut iter = self.utxos_by_address.iter(rotxn)?;
         while let Some(((addr, outpoint), _)) = iter.next()? {
             if addresses.contains(&addr) {
@@ -397,22 +354,6 @@ impl State {
     }
 }
 
-/// Implementation of UtxoManager trait for State with ACID transaction safety
-///
-/// This provides a interface for UTXO operations that maintains consistency
-/// between the primary UTXO database and the address index, following Bitcoin Hivemind
-/// whitepaper specifications for sidechain UTXO management.
-///
-/// # Transaction Safety
-/// All operations use LMDB's ACID transaction semantics:
-/// - Atomicity: Either all operations succeed or all fail and rollback
-/// - Consistency: Database invariants are maintained across operations  
-/// - Isolation: Concurrent transactions don't interfere
-/// - Durability: Committed changes survive system failures
-///
-/// # Rollback Behavior
-/// If any operation within a transaction fails, the entire RwTxn automatically rolls back
-/// all changes, ensuring database consistency per Bitcoin Hivemind specifications.
 impl UtxoManager for State {
     fn insert_utxo_with_address_index(
         &self,
@@ -420,22 +361,45 @@ impl UtxoManager for State {
         outpoint: &OutPoint,
         filled_output: &FilledOutput,
     ) -> Result<(), Error> {
-        // Insert into primary UTXO database
         self.utxos.put(rwtxn, outpoint, filled_output)?;
 
-        // Insert into address index for efficient lookup using compound key
         self.utxos_by_address.put(
             rwtxn,
             &(filled_output.address, *outpoint),
             &(),
         )?;
 
-        // Update cached deposit UTXO value if this is a deposit
         if matches!(outpoint, OutPoint::Deposit(_)) {
-            let current_value = self.cached_deposit_utxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+            let current_value = self
+                .cached_deposit_utxo_value
+                .try_get(rwtxn, &())?
+                .unwrap_or(0);
             let bitcoin_value = filled_output.get_bitcoin_value().to_sat();
             let new_value = current_value.saturating_add(bitcoin_value);
             self.cached_deposit_utxo_value.put(rwtxn, &(), &new_value)?;
+        }
+
+        if let crate::types::FilledOutputContent::Votecoin(amount) =
+            &filled_output.content
+        {
+            let current_balance = self
+                .votecoin_balances
+                .try_get(rwtxn, &filled_output.address)?
+                .unwrap_or(0);
+            let new_balance = current_balance.saturating_add(*amount);
+            self.votecoin_balances.put(
+                rwtxn,
+                &filled_output.address,
+                &new_balance,
+            )?;
+
+            // Update total VoteCoin supply cache
+            let current_supply = self
+                .cached_votecoin_supply
+                .try_get(rwtxn, &())?
+                .unwrap_or(0);
+            let new_supply = current_supply.saturating_add(*amount);
+            self.cached_votecoin_supply.put(rwtxn, &(), &new_supply)?;
         }
 
         Ok(())
@@ -446,46 +410,95 @@ impl UtxoManager for State {
         rwtxn: &mut RwTxn,
         outpoint: &OutPoint,
     ) -> Result<bool, Error> {
-        // Get the UTXO to find its address before deletion
         let filled_output =
             if let Some(output) = self.utxos.try_get(rwtxn, outpoint)? {
                 output
             } else {
-                // UTXO not found, nothing to delete
                 return Ok(false);
             };
 
-        // Update cached deposit UTXO value if this is a deposit (before deletion)
         if matches!(outpoint, OutPoint::Deposit(_)) {
-            let current_value = self.cached_deposit_utxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+            let current_value = self
+                .cached_deposit_utxo_value
+                .try_get(rwtxn, &())?
+                .unwrap_or(0);
             let bitcoin_value = filled_output.get_bitcoin_value().to_sat();
             let new_value = current_value.saturating_sub(bitcoin_value);
             self.cached_deposit_utxo_value.put(rwtxn, &(), &new_value)?;
         }
 
-        // Perform atomic deletion: both operations must succeed or both must fail
-        // Remove from address index first (less critical if this fails)
+        if let crate::types::FilledOutputContent::Votecoin(amount) =
+            &filled_output.content
+        {
+            let current_balance = self
+                .votecoin_balances
+                .try_get(rwtxn, &filled_output.address)?
+                .unwrap_or(0);
+            let new_balance = current_balance.saturating_sub(*amount);
+            self.votecoin_balances.put(
+                rwtxn,
+                &filled_output.address,
+                &new_balance,
+            )?;
+
+            // Update total VoteCoin supply cache
+            let current_supply = self
+                .cached_votecoin_supply
+                .try_get(rwtxn, &())?
+                .unwrap_or(0);
+            let new_supply = current_supply.saturating_sub(*amount);
+            self.cached_votecoin_supply.put(rwtxn, &(), &new_supply)?;
+        }
+
         self.utxos_by_address
             .delete(rwtxn, &(filled_output.address, *outpoint))?;
 
-        // Remove from primary UTXO database (this is the critical operation)
         let deleted = self.utxos.delete(rwtxn, outpoint)?;
 
-        // If primary deletion failed, we need to restore address index consistency
-        // This should never happen due to LMDB transaction atomicity, but we check for safety
         if !deleted {
-            // Restore address index entry
             self.utxos_by_address.put(
                 rwtxn,
                 &(filled_output.address, *outpoint),
                 &(),
             )?;
-            // Restore cache value
             if matches!(outpoint, OutPoint::Deposit(_)) {
-                let current_value = self.cached_deposit_utxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+                let current_value = self
+                    .cached_deposit_utxo_value
+                    .try_get(rwtxn, &())?
+                    .unwrap_or(0);
                 let bitcoin_value = filled_output.get_bitcoin_value().to_sat();
-                let restored_value = current_value.saturating_add(bitcoin_value);
-                self.cached_deposit_utxo_value.put(rwtxn, &(), &restored_value)?;
+                let restored_value =
+                    current_value.saturating_add(bitcoin_value);
+                self.cached_deposit_utxo_value.put(
+                    rwtxn,
+                    &(),
+                    &restored_value,
+                )?;
+            }
+            if let crate::types::FilledOutputContent::Votecoin(amount) =
+                &filled_output.content
+            {
+                let current_balance = self
+                    .votecoin_balances
+                    .try_get(rwtxn, &filled_output.address)?
+                    .unwrap_or(0);
+                let restored_balance = current_balance.saturating_add(*amount);
+                self.votecoin_balances.put(
+                    rwtxn,
+                    &filled_output.address,
+                    &restored_balance,
+                )?;
+
+                let current_supply = self
+                    .cached_votecoin_supply
+                    .try_get(rwtxn, &())?
+                    .unwrap_or(0);
+                let restored_supply = current_supply.saturating_add(*amount);
+                self.cached_votecoin_supply.put(
+                    rwtxn,
+                    &(),
+                    &restored_supply,
+                )?;
             }
             return Ok(false);
         }
@@ -497,33 +510,113 @@ impl UtxoManager for State {
         &self,
         rwtxn: &mut RwTxn,
     ) -> Result<(), Error> {
-        // Clear both databases atomically
         self.utxos.clear(rwtxn)?;
         self.utxos_by_address.clear(rwtxn)?;
 
-        // Reset cached values to zero
         self.cached_deposit_utxo_value.put(rwtxn, &(), &0u64)?;
         self.cached_deposit_stxo_value.put(rwtxn, &(), &0u64)?;
         self.cached_withdrawal_stxo_value.put(rwtxn, &(), &0u64)?;
 
+        self.votecoin_balances.clear(rwtxn)?;
+        self.cached_votecoin_supply.put(rwtxn, &(), &0u32)?;
+
         Ok(())
+    }
+
+    fn insert_utxo_supply_neutral(
+        &self,
+        rwtxn: &mut RwTxn,
+        outpoint: &OutPoint,
+        filled_output: &FilledOutput,
+    ) -> Result<(), Error> {
+        self.utxos.put(rwtxn, outpoint, filled_output)?;
+
+        self.utxos_by_address.put(
+            rwtxn,
+            &(filled_output.address, *outpoint),
+            &(),
+        )?;
+
+        // Update per-address balance but NOT total supply (for redistribution)
+        if let crate::types::FilledOutputContent::Votecoin(amount) =
+            &filled_output.content
+        {
+            let current_balance = self
+                .votecoin_balances
+                .try_get(rwtxn, &filled_output.address)?
+                .unwrap_or(0);
+            let new_balance = current_balance.saturating_add(*amount);
+            self.votecoin_balances.put(
+                rwtxn,
+                &filled_output.address,
+                &new_balance,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn delete_utxo_supply_neutral(
+        &self,
+        rwtxn: &mut RwTxn,
+        outpoint: &OutPoint,
+    ) -> Result<bool, Error> {
+        let filled_output =
+            if let Some(output) = self.utxos.try_get(rwtxn, outpoint)? {
+                output
+            } else {
+                return Ok(false);
+            };
+
+        // Update per-address balance but NOT total supply (for redistribution)
+        if let crate::types::FilledOutputContent::Votecoin(amount) =
+            &filled_output.content
+        {
+            let current_balance = self
+                .votecoin_balances
+                .try_get(rwtxn, &filled_output.address)?
+                .unwrap_or(0);
+            let new_balance = current_balance.saturating_sub(*amount);
+            self.votecoin_balances.put(
+                rwtxn,
+                &filled_output.address,
+                &new_balance,
+            )?;
+        }
+
+        self.utxos_by_address
+            .delete(rwtxn, &(filled_output.address, *outpoint))?;
+
+        let deleted = self.utxos.delete(rwtxn, outpoint)?;
+
+        if !deleted {
+            // Restore state if deletion failed
+            self.utxos_by_address.put(
+                rwtxn,
+                &(filled_output.address, *outpoint),
+                &(),
+            )?;
+            if let crate::types::FilledOutputContent::Votecoin(amount) =
+                &filled_output.content
+            {
+                let current_balance = self
+                    .votecoin_balances
+                    .try_get(rwtxn, &filled_output.address)?
+                    .unwrap_or(0);
+                let restored_balance = current_balance.saturating_add(*amount);
+                self.votecoin_balances.put(
+                    rwtxn,
+                    &filled_output.address,
+                    &restored_balance,
+                )?;
+            }
+        }
+
+        Ok(deleted)
     }
 }
 
 impl State {
-    /// Update cached STXO values when adding a spent output
-    ///
-    /// This method maintains the cached counters for deposit STXOs and withdrawal STXOs
-    /// to enable O(1) sidechain wealth calculation per Bitcoin Hivemind specifications.
-    ///
-    /// # Arguments
-    /// * `rwtxn` - Mutable database transaction
-    /// * `outpoint` - OutPoint being spent
-    /// * `spent_output` - SpentOutput being added
-    ///
-    /// # ACID Compliance
-    /// Updates are performed within the same transaction as STXO insertion
-    /// to ensure atomicity per Bitcoin Hivemind sidechain requirements.
     pub fn update_stxo_caches(
         &self,
         rwtxn: &mut RwTxn,
@@ -532,32 +625,28 @@ impl State {
     ) -> Result<(), Error> {
         let bitcoin_value = spent_output.output.get_bitcoin_value().to_sat();
 
-        // Update deposit STXO cache if this is a deposit
         if matches!(outpoint, OutPoint::Deposit(_)) {
-            let current_value = self.cached_deposit_stxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+            let current_value = self
+                .cached_deposit_stxo_value
+                .try_get(rwtxn, &())?
+                .unwrap_or(0);
             let new_value = current_value.saturating_add(bitcoin_value);
             self.cached_deposit_stxo_value.put(rwtxn, &(), &new_value)?;
         }
 
-        // Update withdrawal STXO cache if this is a withdrawal
         if matches!(spent_output.inpoint, InPoint::Withdrawal { .. }) {
-            let current_value = self.cached_withdrawal_stxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+            let current_value = self
+                .cached_withdrawal_stxo_value
+                .try_get(rwtxn, &())?
+                .unwrap_or(0);
             let new_value = current_value.saturating_add(bitcoin_value);
-            self.cached_withdrawal_stxo_value.put(rwtxn, &(), &new_value)?;
+            self.cached_withdrawal_stxo_value
+                .put(rwtxn, &(), &new_value)?;
         }
 
         Ok(())
     }
 
-    /// Remove cached STXO values when removing a spent output
-    ///
-    /// This method decrements the cached counters for deposit STXOs and withdrawal STXOs
-    /// to maintain consistency during STXO removal operations.
-    ///
-    /// # Arguments
-    /// * `rwtxn` - Mutable database transaction
-    /// * `outpoint` - OutPoint being unspent
-    /// * `spent_output` - SpentOutput being removed
     pub fn remove_stxo_caches(
         &self,
         rwtxn: &mut RwTxn,
@@ -566,34 +655,36 @@ impl State {
     ) -> Result<(), Error> {
         let bitcoin_value = spent_output.output.get_bitcoin_value().to_sat();
 
-        // Update deposit STXO cache if this is a deposit
         if matches!(outpoint, OutPoint::Deposit(_)) {
-            let current_value = self.cached_deposit_stxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+            let current_value = self
+                .cached_deposit_stxo_value
+                .try_get(rwtxn, &())?
+                .unwrap_or(0);
             let new_value = current_value.saturating_sub(bitcoin_value);
             self.cached_deposit_stxo_value.put(rwtxn, &(), &new_value)?;
         }
 
-        // Update withdrawal STXO cache if this is a withdrawal
         if matches!(spent_output.inpoint, InPoint::Withdrawal { .. }) {
-            let current_value = self.cached_withdrawal_stxo_value.try_get(rwtxn, &())?.unwrap_or(0);
+            let current_value = self
+                .cached_withdrawal_stxo_value
+                .try_get(rwtxn, &())?
+                .unwrap_or(0);
             let new_value = current_value.saturating_sub(bitcoin_value);
-            self.cached_withdrawal_stxo_value.put(rwtxn, &(), &new_value)?;
+            self.cached_withdrawal_stxo_value
+                .put(rwtxn, &(), &new_value)?;
         }
 
         Ok(())
     }
 
-    /// Get mempool-adjusted shares for a market (for real-time price updates)
     pub fn get_mempool_shares(
         &self,
         rotxn: &RoTxn,
         market_id: &crate::state::markets::MarketId,
     ) -> Result<Option<ndarray::Array1<f64>>, Error> {
-        // Use the markets database to store mempool shares temporarily
         self.markets.get_mempool_shares(rotxn, market_id)
     }
 
-    /// Store mempool-adjusted shares for a market
     pub fn put_mempool_shares(
         &self,
         rwtxn: &mut RwTxn,
@@ -603,7 +694,6 @@ impl State {
         self.markets.put_mempool_shares(rwtxn, market_id, shares)
     }
 
-    /// Clear mempool shares after block confirmation
     pub fn clear_mempool_shares(
         &self,
         rwtxn: &mut RwTxn,
@@ -612,7 +702,6 @@ impl State {
         self.markets.clear_mempool_shares(rwtxn, market_id)
     }
 
-    /// Get the latest failed withdrawal bundle, and the height at which it failed
     pub fn get_latest_failed_withdrawal_bundle(
         &self,
         rotxn: &RoTxn,
@@ -649,7 +738,6 @@ impl State {
         })
     }
 
-    /// Fill a transaction that has already been applied
     pub fn fill_transaction_from_stxos(
         &self,
         rotxn: &RoTxn,
@@ -657,7 +745,6 @@ impl State {
     ) -> Result<FilledTransaction, Error> {
         let txid = tx.txid();
         let mut spent_utxos = vec![];
-        // fill inputs last-to-first
         for (vin, input) in tx.inputs.iter().enumerate().rev() {
             let stxo = self
                 .stxos
@@ -693,7 +780,6 @@ impl State {
         })
     }
 
-    /// Get pending withdrawal bundle and block height
     pub fn get_pending_withdrawal_bundle(
         &self,
         txn: &RoTxn,
@@ -701,18 +787,12 @@ impl State {
         Ok(self.pending_withdrawal_bundle.try_get(txn, &())?)
     }
 
-    /** Check Votecoin balance constraints for prediction market operations.
-     *  Since Votecoin has a fixed supply and no registration/reservation system,
-     *  validation is much simpler than the old Truthcoin system.
-     *  Special case: Allow Votecoin creation in genesis block (height 0).
-     * */
     pub fn validate_votecoin(
         &self,
         rotxn: &RoTxn,
         tx: &FilledTransaction,
         override_height: Option<u32>,
     ) -> Result<(), Error> {
-        // Get total Votecoin in inputs and outputs
         let votecoin_inputs: u32 = tx
             .spent_votecoin()
             .filter_map(|(_, output)| output.votecoin())
@@ -730,9 +810,6 @@ impl State {
             })
             .sum();
 
-        // Use override height if provided, otherwise get the node's current height
-        // This is critical for proper validation during Initial Block Download (IBD)
-        // when the node is syncing from peers and validating historical blocks
         let block_height = match override_height {
             Some(height) => height,
             None => self.try_get_height(rotxn)?.unwrap_or(0),
@@ -740,11 +817,8 @@ impl State {
         let is_genesis = block_height == 0;
 
         if is_genesis {
-            // In genesis block, allow Votecoin creation (inputs can be 0, outputs > 0)
-            // No validation needed as this is the initial supply distribution
             Ok(())
         } else {
-            // In all other blocks, enforce strict conservation: total in == total out
             if votecoin_inputs != votecoin_outputs {
                 return Err(Error::UnbalancedVotecoin {
                     inputs: votecoin_inputs,
@@ -755,39 +829,12 @@ impl State {
         }
     }
 
-    /// Validate decision slot claim transaction
-    ///
-    /// This method serves as the entry point for slot claim validation,
-    /// delegating to the centralized validation logic in the validation module.
-    ///
-    /// # Validation Flow Architecture
-    /// 1. **Mempool Path**: `validate_filled_transaction` → `validate_decision_slot_claim` →
-    ///    `SlotValidator::validate_complete_decision_slot_claim` → `slots::Dbs::validate_slot_claim`
-    ///
-    /// 2. **Block Application Path**: `apply_claim_decision_slot` → `slots::Dbs::claim_slot` →
-    ///    `slots::Dbs::validate_slot_claim` (same validation logic)
-    ///
-    /// This ensures a single source of truth for validation logic while allowing
-    /// different entry points for mempool validation vs block application.
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only database transaction
-    /// * `tx` - Filled transaction containing slot claim data
-    /// * `override_height` - Optional height override for validation context
-    ///
-    /// # Returns
-    /// * `Ok(())` - Valid slot claim meeting all Hivemind requirements
-    /// * `Err(Error)` - Invalid claim with detailed error information
-    ///
-    /// # Specification Reference
-    /// Bitcoin Hivemind whitepaper sections on decision slot validation
     pub fn validate_decision_slot_claim(
         &self,
         rotxn: &RoTxn,
         tx: &FilledTransaction,
         override_height: Option<u32>,
     ) -> Result<(), Error> {
-        // Delegate to centralized validation logic in validation module
         SlotValidator::validate_complete_decision_slot_claim(
             self,
             rotxn,
@@ -796,82 +843,37 @@ impl State {
         )
     }
 
-    /// Validate market creation transaction.
-    ///
-    /// Delegates to centralized validation logic in validation module for
-    /// single source of truth following the pattern established for slots and voting.
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only database transaction
-    /// * `tx` - Filled transaction containing market creation data
-    /// * `override_height` - Optional height override for validation context
-    ///
-    /// # Returns
-    /// * `Ok(())` - Valid market creation meeting all Hivemind requirements
-    /// * `Err(Error)` - Invalid creation with detailed error information
-    ///
-    /// # Specification Reference
-    /// Bitcoin Hivemind whitepaper sections on market creation
     pub fn validate_market_creation(
         &self,
         rotxn: &RoTxn,
         tx: &FilledTransaction,
         override_height: Option<u32>,
     ) -> Result<(), Error> {
-        // Delegate to centralized validation logic in validation module
-        MarketValidator::validate_market_creation(self, rotxn, tx, override_height)
+        MarketValidator::validate_market_creation(
+            self,
+            rotxn,
+            tx,
+            override_height,
+        )
     }
 
-    /// Validate share purchase transaction.
-    ///
-    /// Delegates to centralized validation logic in validation module for
-    /// single source of truth following the pattern established for slots and voting.
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only database transaction
-    /// * `tx` - Filled transaction containing buy shares data
-    /// * `override_height` - Optional height override for validation context
-    ///
-    /// # Returns
-    /// * `Ok(())` - Valid share purchase meeting all Hivemind requirements
-    /// * `Err(Error)` - Invalid trade with detailed error information
-    ///
-    /// # Specification Reference
-    /// Bitcoin Hivemind whitepaper sections on LMSR trading
     pub fn validate_buy_shares(
         &self,
         rotxn: &RoTxn,
         tx: &FilledTransaction,
         override_height: Option<u32>,
     ) -> Result<(), Error> {
-        // Delegate to centralized validation logic in validation module
         MarketValidator::validate_buy_shares(self, rotxn, tx, override_height)
     }
 
-    /// Validate share redemption transaction
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Implements redemption validation per whitepaper section 4:
-    /// - Market must be in Resolved state
-    /// - User must hold sufficient shares
-    /// - Payout calculated from final_prices array
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `tx` - Filled transaction to validate
-    ///
-    /// # Returns
-    /// Ok(()) if redemption is valid, Error otherwise
     pub fn validate_share_redemption(
         &self,
         rotxn: &RoTxn,
         tx: &FilledTransaction,
     ) -> Result<(), Error> {
-        // Delegate to centralized validation logic in validation module
         MarketValidator::validate_share_redemption(self, rotxn, tx)
     }
 
-    /// Validates a filled transaction, and returns the fee
     pub fn validate_filled_transaction(
         &self,
         rotxn: &RoTxn,
@@ -882,17 +884,14 @@ impl State {
 
         let () = self.validate_votecoin(rotxn, tx, override_height)?;
 
-        // Validate decision slot claims
         if tx.is_claim_decision_slot() {
             self.validate_decision_slot_claim(rotxn, tx, override_height)?;
         }
 
-        // Validate market creation
         if tx.is_create_market() {
             self.validate_market_creation(rotxn, tx, override_height)?;
         }
 
-        // Validate buy shares transactions
         if tx
             .transaction
             .data
@@ -902,37 +901,44 @@ impl State {
             self.validate_buy_shares(rotxn, tx, override_height)?;
         }
 
-        // Validate vote submissions
         if tx.is_submit_vote() {
-            VoteValidator::validate_vote_submission(self, rotxn, tx, override_height)?;
+            VoteValidator::validate_vote_submission(
+                self,
+                rotxn,
+                tx,
+                override_height,
+            )?;
         }
 
-        // Validate batch vote submissions
         if tx.is_submit_vote_batch() {
-            VoteValidator::validate_vote_batch(self, rotxn, tx, override_height)?;
+            VoteValidator::validate_vote_batch(
+                self,
+                rotxn,
+                tx,
+                override_height,
+            )?;
         }
 
-        // Validate voter registration
         if tx.is_register_voter() {
-            // Registration validation is minimal - just check for Votecoin balance
-            // The actual registration happens during block application
             let voter_address = tx
                 .spent_utxos
                 .first()
                 .ok_or_else(|| Error::InvalidTransaction {
-                    reason: "Voter registration transaction must have inputs".to_string(),
+                    reason: "Voter registration transaction must have inputs"
+                        .to_string(),
                 })?
                 .address;
 
-            let votecoin_balance = self.get_votecoin_balance(rotxn, &voter_address)?;
+            let votecoin_balance =
+                self.get_votecoin_balance(rotxn, &voter_address)?;
             if votecoin_balance == 0 {
                 return Err(Error::InvalidTransaction {
-                    reason: "Voter registration requires Votecoin balance".to_string(),
+                    reason: "Voter registration requires Votecoin balance"
+                        .to_string(),
                 });
             }
         }
 
-        // Validate share redemption
         if tx
             .transaction
             .data
@@ -991,39 +997,30 @@ impl State {
         Ok(block_hash)
     }
 
-    /// Get total sidechain wealth in Bitcoin using O(1) cached values
-    ///
-    /// This optimized implementation uses cached counters maintained during UTXO/STXO
-    /// operations to achieve O(1) performance instead of the previous O(n) iteration.
-    ///
-    /// # Performance Improvement
-    /// - Previous: O(n) where n = total UTXOs + STXOs (could be millions)
-    /// - Current: O(1) constant time lookup from cached values
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Calculation follows the Bitcoin Hivemind whitepaper specification:
-    /// **Sidechain Wealth = Deposit UTXOs + Deposit STXOs - Withdrawal STXOs**
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only database transaction
-    ///
-    /// # Returns
-    /// Total sidechain wealth in Bitcoin satoshis with overflow protection
     pub fn sidechain_wealth(
         &self,
         rotxn: &RoTxn,
     ) -> Result<bitcoin::Amount, Error> {
-        // O(1) cache lookups instead of O(n) iteration
-        let deposit_utxo_value = self.cached_deposit_utxo_value.try_get(rotxn, &())?.unwrap_or(0);
-        let deposit_stxo_value = self.cached_deposit_stxo_value.try_get(rotxn, &())?.unwrap_or(0);
-        let withdrawal_stxo_value = self.cached_withdrawal_stxo_value.try_get(rotxn, &())?.unwrap_or(0);
+        let deposit_utxo_value = self
+            .cached_deposit_utxo_value
+            .try_get(rotxn, &())?
+            .unwrap_or(0);
+        let deposit_stxo_value = self
+            .cached_deposit_stxo_value
+            .try_get(rotxn, &())?
+            .unwrap_or(0);
+        let withdrawal_stxo_value = self
+            .cached_withdrawal_stxo_value
+            .try_get(rotxn, &())?
+            .unwrap_or(0);
 
-        // Convert to bitcoin::Amount with overflow protection
-        let total_deposit_utxo_value = bitcoin::Amount::from_sat(deposit_utxo_value);
-        let total_deposit_stxo_value = bitcoin::Amount::from_sat(deposit_stxo_value);
-        let total_withdrawal_stxo_value = bitcoin::Amount::from_sat(withdrawal_stxo_value);
+        let total_deposit_utxo_value =
+            bitcoin::Amount::from_sat(deposit_utxo_value);
+        let total_deposit_stxo_value =
+            bitcoin::Amount::from_sat(deposit_stxo_value);
+        let total_withdrawal_stxo_value =
+            bitcoin::Amount::from_sat(withdrawal_stxo_value);
 
-        // Consolidated calculation with overflow protection
         let total_wealth = total_deposit_utxo_value
             .checked_add(total_deposit_stxo_value)
             .and_then(|sum| sum.checked_sub(total_withdrawal_stxo_value))
@@ -1127,11 +1124,7 @@ impl State {
         rotxn: &RoTxn,
         slot_id: crate::state::slots::SlotId,
     ) -> Result<bool, Error> {
-        let current_ts = self.try_get_mainchain_timestamp(rotxn)?.unwrap_or(0);
-        let current_height = self.try_get_height(rotxn)?;
-        Ok(self
-            .slots
-            .is_slot_in_voting(slot_id, current_ts, current_height))
+        self.slots.is_slot_in_voting(rotxn, slot_id)
     }
 
     pub fn get_voting_periods(
@@ -1163,9 +1156,7 @@ impl State {
             .get_claimed_slot_count_in_period(rotxn, period_index)
     }
 
-    // ================================================================================
     // Votecoin Balance Queries for Voting System Integration
-    // ================================================================================
 
     /// Get Votecoin balance for a specific address
     ///
@@ -1184,123 +1175,43 @@ impl State {
     /// According to the Bitcoin Hivemind whitepaper, voting weight is calculated as:
     /// **Final Voting Weight = Base Reputation × Votecoin Holdings Proportion**
     /// This method provides the Votecoin holdings component of that calculation.
+    ///
+    /// # Performance
+    /// O(1) lookup using cached balance database, updated atomically with UTXO operations
     pub fn get_votecoin_balance(
         &self,
         rotxn: &RoTxn,
         address: &Address,
     ) -> Result<u32, Error> {
-        let mut addresses = HashSet::new();
-        addresses.insert(*address);
-
-        let utxos = self.get_utxos_by_addresses(rotxn, &addresses)?;
-        let mut total_votecoin = 0u32;
-
-        for (_, filled_output) in utxos {
-            if let crate::types::FilledOutputContent::Votecoin(amount) =
-                &filled_output.content
-            {
-                total_votecoin = total_votecoin.saturating_add(*amount);
-            }
-        }
-
-        Ok(total_votecoin)
+        Ok(self.votecoin_balances.try_get(rotxn, address)?.unwrap_or(0))
     }
 
-    /// Get Votecoin balances for multiple addresses efficiently
-    ///
-    /// This method performs batch querying of Votecoin balances for multiple
-    /// addresses simultaneously, which is more efficient than individual queries
-    /// when calculating voting weights for all participants in a voting period.
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only database transaction
-    /// * `addresses` - Set of addresses to query balances for
-    ///
-    /// # Returns
-    /// HashMap mapping Address to Votecoin balance (u32)
-    ///
-    /// # Performance
-    /// - Time Complexity: O(k) where k = total UTXOs for all addresses
-    /// - Leverages the existing address index for efficient lookups
     pub fn get_votecoin_balances_batch(
         &self,
         rotxn: &RoTxn,
         addresses: &HashSet<Address>,
     ) -> Result<HashMap<Address, u32>, Error> {
-        let utxos = self.get_utxos_by_addresses(rotxn, addresses)?;
-        let mut balances = HashMap::new();
-
-        // Initialize all addresses with zero balance
+        let mut balances = HashMap::with_capacity(addresses.len());
         for &address in addresses {
-            balances.insert(address, 0u32);
+            let balance = self
+                .votecoin_balances
+                .try_get(rotxn, &address)?
+                .unwrap_or(0);
+            balances.insert(address, balance);
         }
-
-        // Sum Votecoin amounts for each address
-        for (_, filled_output) in utxos {
-            if let crate::types::FilledOutputContent::Votecoin(amount) =
-                &filled_output.content
-            {
-                let current_balance =
-                    balances.get(&filled_output.address).unwrap_or(&0);
-                balances.insert(
-                    filled_output.address,
-                    current_balance.saturating_add(*amount),
-                );
-            }
-        }
-
         Ok(balances)
     }
 
-    /// Get total Votecoin supply currently in circulation
-    ///
-    /// This method calculates the total amount of Votecoin currently held in UTXOs,
-    /// which should equal the fixed supply of 1,000,000 unless some coins are
-    /// permanently lost (spent to invalid outputs).
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only database transaction
-    ///
-    /// # Returns
-    /// Total Votecoin supply in circulation
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Used for calculating proportional voting weights as specified in the whitepaper.
-    /// Each voter's Votecoin proportion = voter_votecoin_balance / total_supply
     pub fn get_total_votecoin_supply(
         &self,
         rotxn: &RoTxn,
     ) -> Result<u32, Error> {
-        let utxos = self.get_utxos(rotxn)?;
-        let mut total_supply = 0u32;
-
-        for (_, filled_output) in utxos {
-            if let crate::types::FilledOutputContent::Votecoin(amount) =
-                &filled_output.content
-            {
-                total_supply = total_supply.saturating_add(*amount);
-            }
-        }
-
-        Ok(total_supply)
+        Ok(self
+            .cached_votecoin_supply
+            .try_get(rotxn, &())?
+            .unwrap_or(0))
     }
 
-    /// Get Votecoin holdings proportion for an address
-    ///
-    /// This method calculates the proportional Votecoin holdings for an address
-    /// relative to the total supply, which is used directly in the Bitcoin Hivemind
-    /// voting weight calculation.
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only database transaction
-    /// * `address` - Address to calculate proportion for
-    ///
-    /// # Returns
-    /// Proportion of total Votecoin supply held by address (0.0 to 1.0)
-    ///
-    /// # Bitcoin Hivemind Specification
-    /// This implements the Votecoin Holdings Proportion component of:
-    /// **Final Voting Weight = Base Reputation × Votecoin Holdings Proportion**
     pub fn get_votecoin_proportion(
         &self,
         rotxn: &RoTxn,
@@ -1308,26 +1219,12 @@ impl State {
     ) -> Result<f64, Error> {
         let balance = self.get_votecoin_balance(rotxn, address)?;
         let total_supply = self.get_total_votecoin_supply(rotxn)?;
-
         if total_supply == 0 {
             return Ok(0.0);
         }
-
         Ok(balance as f64 / total_supply as f64)
     }
 
-    /// Get Votecoin proportions for multiple addresses efficiently
-    ///
-    /// Batch calculation of Votecoin proportions for multiple addresses.
-    /// This is optimized for voting weight calculations across all participants
-    /// in a voting period.
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only database transaction
-    /// * `addresses` - Set of addresses to calculate proportions for
-    ///
-    /// # Returns
-    /// HashMap mapping Address to Votecoin proportion (0.0 to 1.0)
     pub fn get_votecoin_proportions_batch(
         &self,
         rotxn: &RoTxn,
@@ -1336,28 +1233,22 @@ impl State {
         let balances = self.get_votecoin_balances_batch(rotxn, addresses)?;
         let total_supply = self.get_total_votecoin_supply(rotxn)?;
         let mut proportions = HashMap::new();
-
         if total_supply == 0 {
-            // No Votecoin in circulation - all proportions are 0.0
             for &address in addresses {
                 proportions.insert(address, 0.0);
             }
             return Ok(proportions);
         }
-
         for (&address, &balance) in &balances {
             let proportion = balance as f64 / total_supply as f64;
             proportions.insert(address, proportion);
         }
-
         Ok(proportions)
     }
 }
 
 impl Watchable<()> for State {
     type WatchStream = impl Stream<Item = ()>;
-
-    /// Get a signal that notifies whenever the tip changes
     fn watch(&self) -> Self::WatchStream {
         tokio_stream::wrappers::WatchStream::new(self.tip.watch().clone())
     }

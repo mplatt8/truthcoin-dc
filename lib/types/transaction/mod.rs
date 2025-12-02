@@ -98,6 +98,8 @@ pub enum InPoint {
     Withdrawal {
         m6id: M6id,
     },
+    /// Consumed by votecoin redistribution during consensus
+    Redistribution,
 }
 
 pub type TxInputs = Vec<OutPoint>;
@@ -216,6 +218,11 @@ pub enum TransactionData {
         /// The voting period these votes belong to
         voting_period: u32,
     },
+    /// Claim accumulated trading fees as market author
+    ClaimAuthorFees {
+        /// Market ID to claim fees from
+        market_id: MarketId,
+    },
 }
 
 pub type TxData = TransactionData;
@@ -259,6 +266,11 @@ impl TxData {
     /// `true` if the tx data corresponds to submitting a batch of votes
     pub fn is_submit_vote_batch(&self) -> bool {
         matches!(self, Self::SubmitVoteBatch { .. })
+    }
+
+    /// `true` if the tx data corresponds to claiming author fees
+    pub fn is_claim_author_fees(&self) -> bool {
+        matches!(self, Self::ClaimAuthorFees { .. })
     }
 }
 
@@ -366,6 +378,13 @@ pub struct SubmitVoteBatch {
     pub votes: Vec<VoteBatchItem>,
     /// The voting period these votes belong to
     pub voting_period: u32,
+}
+
+/// Struct describing a claim of trading fees by market author
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClaimAuthorFees {
+    /// Market ID to claim fees from
+    pub market_id: MarketId,
 }
 
 #[derive(
@@ -608,11 +627,11 @@ impl FilledTransaction {
     /// If the tx is a voter registration, returns the corresponding [`RegisterVoter`].
     pub fn register_voter(&self) -> Option<RegisterVoter> {
         match &self.transaction.data {
-            Some(TransactionData::RegisterVoter {
-                initial_data,
-            }) => Some(RegisterVoter {
-                initial_data: *initial_data,
-            }),
+            Some(TransactionData::RegisterVoter { initial_data }) => {
+                Some(RegisterVoter {
+                    initial_data: *initial_data,
+                })
+            }
             _ => None,
         }
     }
@@ -627,6 +646,18 @@ impl FilledTransaction {
                 votes: votes.clone(),
                 voting_period: *voting_period,
             }),
+            _ => None,
+        }
+    }
+
+    /// If the tx is a claim author fees, returns the corresponding [`ClaimAuthorFees`].
+    pub fn claim_author_fees(&self) -> Option<ClaimAuthorFees> {
+        match &self.transaction.data {
+            Some(TransactionData::ClaimAuthorFees { market_id }) => {
+                Some(ClaimAuthorFees {
+                    market_id: market_id.clone(),
+                })
+            }
             _ => None,
         }
     }
@@ -794,7 +825,8 @@ impl FilledTransaction {
                         FilledOutputContent::Votecoin(value)
                     }
                     OutputContent::Bitcoin(value) => {
-                        let new_max = output_bitcoin_max_value.checked_sub(value.0);
+                        let new_max =
+                            output_bitcoin_max_value.checked_sub(value.0);
                         if new_max.is_none() {
                             return None;
                         }

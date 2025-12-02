@@ -690,6 +690,62 @@ impl MarketValidator {
 
         Ok(())
     }
+
+    /// Validate a claim author fees transaction.
+    ///
+    /// # Validation Rules
+    /// 1. Transaction must contain ClaimAuthorFees data
+    /// 2. Market must exist
+    /// 3. Caller must be the market creator/author
+    /// 4. Market must have non-zero collected fees
+    ///
+    /// # Specification Reference
+    /// Bitcoin Hivemind whitepaper: "Authors (who bear the economic cost of
+    /// Market-Creation) are rewarded with a slice of transaction volume."
+    pub fn validate_claim_author_fees(
+        state: &crate::state::State,
+        rotxn: &RoTxn,
+        tx: &FilledTransaction,
+    ) -> Result<u64, Error> {
+        let claim_data =
+            tx.claim_author_fees()
+                .ok_or_else(|| Error::InvalidTransaction {
+                    reason: "Not a claim author fees transaction".to_string(),
+                })?;
+
+        // Validate market exists
+        let market = state
+            .markets()
+            .get_market(rotxn, &claim_data.market_id)?
+            .ok_or_else(|| Error::InvalidTransaction {
+                reason: format!(
+                    "Market {:?} does not exist",
+                    claim_data.market_id
+                ),
+            })?;
+
+        // Validate caller is the market creator
+        let caller_address = Self::validate_market_maker_authorization(tx)?;
+
+        if caller_address != market.creator_address {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "Only market creator can claim fees. Expected {}, got {}",
+                    market.creator_address, caller_address
+                ),
+            });
+        }
+
+        // Validate there are fees to claim
+        let collected_fees = market.collected_fees();
+        if collected_fees == 0 {
+            return Err(Error::InvalidTransaction {
+                reason: "No fees available to claim".to_string(),
+            });
+        }
+
+        Ok(collected_fees)
+    }
 }
 
 /// D-function validation utilities for market constraints.
@@ -983,62 +1039,6 @@ impl MarketStateValidator {
         market_slots
             .iter()
             .all(|slot_id| slot_states.get(slot_id).copied().unwrap_or(false))
-    }
-
-    /// Validate a claim author fees transaction.
-    ///
-    /// # Validation Rules
-    /// 1. Transaction must contain ClaimAuthorFees data
-    /// 2. Market must exist
-    /// 3. Caller must be the market creator/author
-    /// 4. Market must have non-zero collected fees
-    ///
-    /// # Specification Reference
-    /// Bitcoin Hivemind whitepaper: "Authors (who bear the economic cost of
-    /// Market-Creation) are rewarded with a slice of transaction volume."
-    pub fn validate_claim_author_fees(
-        state: &crate::state::State,
-        rotxn: &RoTxn,
-        tx: &FilledTransaction,
-    ) -> Result<u64, Error> {
-        let claim_data =
-            tx.claim_author_fees()
-                .ok_or_else(|| Error::InvalidTransaction {
-                    reason: "Not a claim author fees transaction".to_string(),
-                })?;
-
-        // Validate market exists
-        let market = state
-            .markets()
-            .get_market(rotxn, &claim_data.market_id)?
-            .ok_or_else(|| Error::InvalidTransaction {
-                reason: format!(
-                    "Market {:?} does not exist",
-                    claim_data.market_id
-                ),
-            })?;
-
-        // Validate caller is the market creator
-        let caller_address = Self::validate_market_maker_authorization(tx)?;
-
-        if caller_address != market.creator_address {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Only market creator can claim fees. Expected {}, got {}",
-                    market.creator_address, caller_address
-                ),
-            });
-        }
-
-        // Validate there are fees to claim
-        let collected_fees = market.collected_fees();
-        if collected_fees == 0 {
-            return Err(Error::InvalidTransaction {
-                reason: "No fees available to claim".to_string(),
-            });
-        }
-
-        Ok(collected_fees)
     }
 }
 

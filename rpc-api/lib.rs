@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use truthcoin_dc::{
     authorization::{Dst, Signature},
     net::{Peer, PeerConnectionStatus},
-    state::voting::types::{VoterId, VotingPeriodId},
     types::{
         Address, AssetId, Authorization, BitcoinOutputContent, Block,
         BlockHash, Body, EncryptionPubKey, FilledOutputContent, Header,
@@ -77,6 +76,19 @@ pub struct VotingPeriodInfo {
     pub period: u32,
     pub claimed_slots: u64,
     pub total_slots: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct RedistributionInfo {
+    pub period_id: u32,
+    pub total_redistributed: u64,
+    pub winners_count: u32,
+    pub losers_count: u32,
+    pub unchanged_count: u32,
+    pub conservation_check: i64,
+    pub block_height: u64,
+    pub is_applied: bool,
+    pub slots_affected: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -303,7 +315,7 @@ pub struct VotingConsensusResults {
     CreateMarketRequest, EncryptionPubKey, FilledOutputContent, Header,
     InitialLiquidityCalculation, MarketData, MarketOutcome, MarketSummary,
     MerkleRoot, OutPoint, Output, OutputContent,
-    PeerConnectionStatus, RegisterVoterRequest, ReputationUpdate, SharePosition, Signature, SlotInfo, SlotStatus,
+    PeerConnectionStatus, RedistributionInfo, RegisterVoterRequest, ReputationUpdate, SharePosition, Signature, SlotInfo, SlotStatus,
     SubmitVoteRequest, SubmitVoteBatchRequest, Transaction, TxData, Txid, TxIn, UserHoldings,
     VoteBatchItem, VoteInfo, VoterInfo, VoterParticipation, VotingConsensusResults,
     VotingPeriodDetails, VotingPeriodInfo, WithdrawalOutputContent, VerifyingKey,
@@ -832,5 +844,17 @@ pub trait Rpc {
     /// Get the status of a voting period
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "get_voting_period_status")]
-    async fn get_voting_period_status(&self, period_id: u32) -> RpcResult<String>;
+    async fn get_voting_period_status(
+        &self,
+        period_id: u32,
+    ) -> RpcResult<String>;
+
+    /// Get redistribution summary for a specific voting period
+    /// Returns detailed information about VoteCoin redistribution including winners, losers, and conservation checks
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "get_redistribution_summary")]
+    async fn get_redistribution_summary(
+        &self,
+        period_id: u32,
+    ) -> RpcResult<Option<RedistributionInfo>>;
 }

@@ -382,53 +382,6 @@ where
     /// Market transactions are processed only during block construction/connection.
     /// This method is kept for potential future use but currently does nothing.
     ///
-    /// The correct flow is:
-    /// 1. Transactions enter mempool (no state changes)
-    /// 2. Block construction processes market transactions and updates state
-    /// 3. Block connection finalizes the state changes
-    #[allow(dead_code)]
-    fn process_mempool_market_transaction(
-        &self,
-        _rwtxn: &mut RwTxn,
-        transaction: &AuthorizedTransaction,
-    ) -> Result<(), Error> {
-        // Just log market transactions entering mempool for monitoring
-        if let Some(data) = transaction.transaction.data.as_ref() {
-            match data {
-                crate::types::TxData::BuyShares {
-                    market_id,
-                    outcome_index,
-                    shares_to_buy,
-                    ..
-                } => {
-                    tracing::info!(
-                        "BuyShares transaction added to mempool: market={}, outcome={}, shares={}",
-                        hex::encode(market_id),
-                        outcome_index,
-                        shares_to_buy
-                    );
-                }
-                crate::types::TxData::CreateMarket { title, .. } => {
-                    tracing::info!(
-                        "CreateMarket transaction added to mempool: title={}",
-                        title
-                    );
-                }
-                crate::types::TxData::CreateMarketDimensional {
-                    title, ..
-                } => {
-                    tracing::info!(
-                        "CreateMarketDimensional transaction added to mempool: title={}",
-                        title
-                    );
-                }
-                _ => {
-                    // Non-market transactions
-                }
-            }
-        }
-        Ok(())
-    }
 
     /// Get mempool-adjusted shares for a market (for real-time price updates)
     pub fn get_mempool_shares(
@@ -462,10 +415,7 @@ where
             .get_market(rwtxn, &market_id)?
             .ok_or_else(|| {
                 Error::State(Box::new(state::Error::InvalidSlotId {
-                    reason: format!(
-                        "Market {:?} does not exist",
-                        market_id
-                    ),
+                    reason: format!("Market {:?} does not exist", market_id),
                 }))
             })?;
 
@@ -499,14 +449,15 @@ where
         new_shares[outcome_index as usize] += shares_to_buy;
 
         // Validate the new shares using centralized LMSR service
-        LmsrService::validate_lmsr_parameters(market.b(), &new_shares).map_err(|e| {
-            Error::State(Box::new(state::Error::InvalidSlotId {
-                reason: format!(
-                    "Invalid LMSR state after mempool update: {:?}",
-                    e
-                ),
-            }))
-        })?;
+        LmsrService::validate_lmsr_parameters(market.b(), &new_shares)
+            .map_err(|e| {
+                Error::State(Box::new(state::Error::InvalidSlotId {
+                    reason: format!(
+                        "Invalid LMSR state after mempool update: {:?}",
+                        e
+                    ),
+                }))
+            })?;
 
         // Store updated mempool shares
         self.state
@@ -1148,6 +1099,25 @@ where
         Ok(self.state.markets().get_all_markets(&rotxn)?)
     }
 
+    /// Get all markets with their computed states
+    /// Uses SlotStateHistory to determine actual market state
+    pub fn get_all_markets_with_states(
+        &self,
+    ) -> Result<Vec<(crate::state::Market, crate::state::MarketState)>, Error>
+    {
+        let rotxn = self.env.read_txn()?;
+        let markets = self.state.markets().get_all_markets(&rotxn)?;
+
+        let mut result = Vec::with_capacity(markets.len());
+        for market in markets {
+            let computed_state =
+                market.compute_state(self.state.slots(), &rotxn)?;
+            result.push((market, computed_state));
+        }
+
+        Ok(result)
+    }
+
     /// Get markets by state (Trading, Voting, Resolved, etc.)
     pub fn get_markets_by_state(
         &self,
@@ -1164,6 +1134,25 @@ where
     ) -> Result<Option<crate::state::Market>, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self.state.markets().get_market(&rotxn, market_id)?)
+    }
+
+    /// Get a specific market by its ID with computed state
+    /// Uses SlotStateHistory to determine actual market state
+    pub fn get_market_by_id_with_state(
+        &self,
+        market_id: &crate::state::MarketId,
+    ) -> Result<Option<(crate::state::Market, crate::state::MarketState)>, Error>
+    {
+        let rotxn = self.env.read_txn()?;
+        if let Some(market) =
+            self.state.markets().get_market(&rotxn, market_id)?
+        {
+            let computed_state =
+                market.compute_state(self.state.slots(), &rotxn)?;
+            Ok(Some((market, computed_state)))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Get multiple markets by their IDs in batch operation
@@ -1231,9 +1220,7 @@ where
             .get_market_user_positions(&rotxn, address, market_id)?)
     }
 
-    // ================================================================================
     // Voting RPC Accessor Methods
-    // ================================================================================
 
     /// Create read transaction for RPC queries
     ///
@@ -1281,10 +1268,11 @@ where
 
     /// Get current tip block height from the archive
     pub fn get_tip_height(&self) -> Result<u32, Error> {
-        self.try_get_tip_height()?
-            .ok_or_else(|| Error::State(Box::new(state::Error::InvalidTransaction {
-                reason: "No tip height found".to_string()
-            })))
+        self.try_get_tip_height()?.ok_or_else(|| {
+            Error::State(Box::new(state::Error::InvalidTransaction {
+                reason: "No tip height found".to_string(),
+            }))
+        })
     }
 
     /// Get the last block timestamp
@@ -1292,11 +1280,12 @@ where
         // For now, use the current system time as a placeholder
         // This should be replaced with the actual block timestamp when available
         use std::time::{SystemTime, UNIX_EPOCH};
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| Error::State(Box::new(state::Error::InvalidTransaction {
-                reason: format!("Failed to get current time: {}", e)
-            })))?;
+        let timestamp =
+            SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| {
+                Error::State(Box::new(state::Error::InvalidTransaction {
+                    reason: format!("Failed to get current time: {}", e),
+                }))
+            })?;
         Ok(timestamp.as_secs())
     }
 
@@ -1304,11 +1293,15 @@ where
     ///
     /// This method performs consensus calculation for a voting period:
     /// 1. Snapshots Votecoin proportions for all voters (cached for performance)
-    /// 2. Calculates and stores consensus outcomes
+    /// 2. Returns consensus outcomes if already calculated
     ///
-    /// # Performance Optimization
-    /// The Votecoin proportion snapshot reduces consensus resolution complexity
-    /// from O(N×U) to O(N) by caching proportions once at period close time.
+    /// # PROTOCOL ONLY - READ-ONLY OPERATION
+    /// This function is READ-ONLY and will NOT trigger consensus calculation.
+    /// Consensus and redistribution MUST be calculated by the protocol during
+    /// block connection, NEVER via RPC calls.
+    ///
+    /// Returns Error::ConsensusNotYetCalculated if consensus hasn't been
+    /// calculated by the protocol yet.
     ///
     /// # Bitcoin Hivemind Compliance
     /// Periods are calculated on-demand from slots, not stored in database.
@@ -1320,20 +1313,12 @@ where
         let current_timestamp = self.get_last_block_timestamp()?;
         let current_height = self.get_tip_height()?;
 
-        // First, snapshot Votecoin proportions for all voters
-        // This is a performance optimization to avoid O(N×U) recalculation
-        self.state.voting().snapshot_votecoin_proportions(
-            &mut rwtxn,
-            period_id,
-            &self.state,
-            current_height as u64,
-        )?;
-
         // Get slot configuration and database references
         let config = self.state.slots().get_config();
         let slots_db = self.state.slots();
 
-        // Resolve period decisions using the new signature with config and slots_db
+        // PROTOCOL ONLY: This is now a read-only query
+        // Consensus must be calculated during block connection
         let outcomes = self.state.voting().resolve_period_decisions(
             &mut rwtxn,
             period_id,
@@ -1344,7 +1329,8 @@ where
             slots_db,
         )?;
 
-        rwtxn.commit()
+        rwtxn
+            .commit()
             .map_err(|e| Error::DbWrite(RwTxnError::Commit(e)))?;
         Ok(outcomes)
     }
@@ -1353,7 +1339,10 @@ where
     pub fn get_consensus_outcomes(
         &self,
         period_id: crate::state::voting::types::VotingPeriodId,
-    ) -> Result<std::collections::HashMap<crate::state::slots::SlotId, f64>, Error> {
+    ) -> Result<
+        std::collections::HashMap<crate::state::slots::SlotId, f64>,
+        Error,
+    > {
         let rotxn = self.env.read_txn()?;
         self.state
             .voting()

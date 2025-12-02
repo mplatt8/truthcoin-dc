@@ -1,5 +1,5 @@
-use crate::state::slots::SlotId;
 use crate::state::rollback::{RollBack, TxidStamped};
+use crate::state::slots::SlotId;
 use crate::types::{Address, Txid, hashes};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,6 +15,7 @@ use std::collections::HashMap;
     Ord,
     Deserialize,
     Serialize,
+    utoipa::ToSchema,
 )]
 pub struct VotingPeriodId(pub u32);
 
@@ -51,31 +52,14 @@ pub struct VotingPeriod {
     pub end_timestamp: u64,
     pub status: VotingPeriodStatus,
     pub decision_slots: Vec<SlotId>,
-    /// DEPRECATED: This field is not used for calculated periods (will be removed in future)
-    /// For backwards compatibility with old stored periods, defaults to 0 for new instances
-    #[serde(default)]
-    pub created_at_height: u64,
 }
 
 impl VotingPeriod {
-    /// Create a calculated voting period (standard constructor)
-    ///
-    /// # Arguments
-    /// * `id` - Period identifier
-    /// * `start_timestamp` - Period start time
-    /// * `end_timestamp` - Period end time
-    /// * `decision_slots` - Slots to be voted on in this period
-    /// * `created_at_height` - DEPRECATED, use 0 for calculated periods
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Periods are calculated on-demand from slots. The created_at_height field
-    /// is deprecated and will be removed in future versions.
     pub fn new(
         id: VotingPeriodId,
         start_timestamp: u64,
         end_timestamp: u64,
         decision_slots: Vec<SlotId>,
-        created_at_height: u64,
     ) -> Self {
         Self {
             id,
@@ -83,7 +67,6 @@ impl VotingPeriod {
             end_timestamp,
             status: VotingPeriodStatus::Pending,
             decision_slots,
-            created_at_height,
         }
     }
 
@@ -102,64 +85,14 @@ impl VotingPeriod {
     }
 }
 
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    Hash,
-    PartialEq,
-    PartialOrd,
-    Ord,
-    Deserialize,
-    Serialize,
-)]
-pub struct VoterId([u8; 20]);
-
-impl VoterId {
-    pub fn from_address(address: &Address) -> Self {
-        Self(address.0)
-    }
-
-    pub fn from_bytes(bytes: [u8; 20]) -> Self {
-        Self(bytes)
-    }
-
-    pub fn as_bytes(&self) -> &[u8; 20] {
-        &self.0
-    }
-
-    /// Convert to Address for compatibility
-    pub fn to_address(&self) -> Address {
-        Address(self.0)
-    }
-}
-
-/// Vote value type supporting both binary and scalar decisions
-///
-/// Bitcoin Hivemind supports two types of decisions:
-/// - Binary: Yes/No questions with values 0.0 or 1.0
-/// - Scalar: Continuous values within a defined range [min, max]
-///
-/// # Specification Reference
-/// Bitcoin Hivemind whitepaper Section 2.2: "Decision Types"
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum VoteValue {
-    /// Binary vote: false (0.0) or true (1.0)
     Binary(bool),
-    /// Scalar vote: value within decision's [min, max] range
     Scalar(f64),
-    /// Abstain from voting on this decision
     Abstain,
 }
 
 impl VoteValue {
-    /// Convert vote value to f64 for mathematical operations
-    ///
-    /// # Returns
-    /// - Binary: 0.0 for false, 1.0 for true
-    /// - Scalar: the scalar value
-    /// - Abstain: f64::NAN to indicate missing data
     pub fn to_f64(&self) -> f64 {
         match self {
             VoteValue::Binary(false) => 0.0,
@@ -169,66 +102,37 @@ impl VoteValue {
         }
     }
 
-    /// Check if this vote represents an abstention
     pub fn is_abstain(&self) -> bool {
         matches!(self, VoteValue::Abstain)
     }
 
-    /// Create a binary vote
     pub fn binary(value: bool) -> Self {
         VoteValue::Binary(value)
     }
 
-    /// Create a scalar vote
     pub fn scalar(value: f64) -> Self {
         VoteValue::Scalar(value)
     }
 
-    /// Create an abstention
     pub fn abstain() -> Self {
         VoteValue::Abstain
     }
 }
 
-/// Individual vote cast by a voter on a specific decision
-///
-/// Votes are the atomic units of the Bitcoin Hivemind consensus mechanism.
-/// Each vote links a voter to a decision with a specific value, and all votes
-/// are aggregated using the consensus algorithm to determine outcomes.
-///
-/// # Specification Reference
-/// Bitcoin Hivemind whitepaper Section 3.3: "Vote Structure"
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Vote {
-    /// Unique identifier for the voter
-    pub voter_id: VoterId,
-    /// Voting period when this vote was cast
+    pub voter_address: Address,
     pub period_id: VotingPeriodId,
-    /// Decision slot being voted on
     pub decision_id: SlotId,
-    /// Vote value (binary, scalar, or abstain)
     pub value: VoteValue,
-    /// L1 timestamp when vote was cast
     pub timestamp: u64,
-    /// L2 block height when vote was included
     pub block_height: u64,
-    /// Hash of the transaction containing this vote
     pub tx_hash: [u8; 32],
 }
 
 impl Vote {
-    /// Create a new vote
-    ///
-    /// # Arguments
-    /// * `voter_id` - ID of the voter casting this vote
-    /// * `period_id` - Voting period this vote belongs to
-    /// * `decision_id` - Decision slot being voted on
-    /// * `value` - Vote value (binary, scalar, or abstain)
-    /// * `timestamp` - L1 timestamp when vote was cast
-    /// * `block_height` - L2 block height when vote was included
-    /// * `tx_hash` - Hash of transaction containing this vote
     pub fn new(
-        voter_id: VoterId,
+        voter_address: Address,
         period_id: VotingPeriodId,
         decision_id: SlotId,
         value: VoteValue,
@@ -237,7 +141,7 @@ impl Vote {
         tx_hash: [u8; 32],
     ) -> Self {
         Self {
-            voter_id,
+            voter_address,
             period_id,
             decision_id,
             value,
@@ -247,13 +151,9 @@ impl Vote {
         }
     }
 
-    /// Compute a unique hash for this vote for deduplication
-    ///
-    /// The hash is computed from the voter, period, and decision to ensure
-    /// each voter can only cast one vote per decision per period.
     pub fn compute_hash(&self) -> [u8; 32] {
         let vote_data = (
-            self.voter_id.as_bytes(),
+            &self.voter_address.0,
             self.period_id.as_bytes(),
             self.decision_id.as_bytes(),
         );
@@ -261,66 +161,24 @@ impl Vote {
     }
 }
 
-/// Voter reputation and weighting for consensus algorithm with Votecoin integration
-///
-/// Reputation represents a voter's historical accuracy and influence in the
-/// consensus process, now enhanced with Votecoin holdings to implement the
-/// complete Bitcoin Hivemind voting weight formula.
-///
-/// # Bitcoin Hivemind Voting Weight Formula
-/// **Final Voting Weight = Base Reputation × Votecoin Holdings Proportion**
-///
-/// This structure maintains both components:
-/// - Base Reputation: Historical accuracy-based weighting
-/// - Votecoin Holdings: Economic stake-based weighting
-///
-/// # Specification Reference
-/// Bitcoin Hivemind whitepaper Section 4.2: "Reputation System" and Section 5: "Economics"
+/// Voter reputation with Votecoin integration.
+/// Final Voting Weight = Base Reputation × Votecoin Holdings Proportion
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoterReputation {
-    /// Voter this reputation data belongs to
-    pub voter_id: VoterId,
-    /// Current base reputation score (0.0 to 1.0) based on historical accuracy
+    pub address: Address,
     pub reputation: f64,
-    /// Cached Votecoin holdings proportion (0.0 to 1.0) of total supply
-    /// This is updated when voting weights are calculated to avoid repeated UTXO queries
     pub votecoin_proportion: f64,
-    /// Total number of decisions this voter has participated in
     pub total_decisions: u64,
-    /// Number of decisions where voter was in consensus
     pub correct_decisions: u64,
-    /// Timestamp of last reputation update
     pub last_updated: u64,
-    /// Voting period when reputation was last calculated
     pub last_period: VotingPeriodId,
-    /// Block height when Votecoin proportion was last updated
-    /// Used to determine when to refresh cached proportion data
     pub votecoin_updated_height: Option<u64>,
-    /// Reputation history for rollback support during blockchain reorganizations
-    ///
-    /// This enables safe reversion of reputation updates when blocks are disconnected,
-    /// maintaining consensus correctness across reorgs as required by Bitcoin Hivemind.
-    ///
-    /// # Specification Reference
-    /// Bitcoin Hivemind whitepaper Section 6: "Blockchain Security" - Reorg handling
     pub reputation_history: RollBack<TxidStamped<f64>>,
 }
 
 impl VoterReputation {
-    /// Create initial reputation for a new voter with Bitcoin Hivemind integration
-    ///
-    /// # Arguments
-    /// * `voter_id` - ID of the voter
-    /// * `initial_reputation` - Starting base reputation (typically 0.5)
-    /// * `timestamp` - Current timestamp
-    /// * `period_id` - Current voting period
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// New voters start with neutral base reputation to prevent gaming through
-    /// multiple identity creation. Votecoin proportion is initialized to 0.0
-    /// and must be updated with actual holdings before voting weight calculation.
     pub fn new(
-        voter_id: VoterId,
+        address: Address,
         initial_reputation: f64,
         timestamp: u64,
         period_id: VotingPeriodId,
@@ -330,15 +188,14 @@ impl VoterReputation {
             crate::math::voting::constants::REPUTATION_MAX,
         );
 
-        // Initialize reputation history with genesis/initial transaction
-        // Uses a zero txid to represent the initial state
         let initial_txid = Txid([0u8; 32]);
-        let reputation_history = RollBack::<TxidStamped<f64>>::new(reputation, initial_txid, 0);
+        let reputation_history =
+            RollBack::<TxidStamped<f64>>::new(reputation, initial_txid, 0);
 
         Self {
-            voter_id,
+            address,
             reputation,
-            votecoin_proportion: 0.0, // Must be updated with actual holdings
+            votecoin_proportion: 0.0,
             total_decisions: 0,
             correct_decisions: 0,
             last_updated: timestamp,
@@ -348,54 +205,19 @@ impl VoterReputation {
         }
     }
 
-    /// Create initial reputation with default neutral value
-    ///
-    /// # Arguments
-    /// * `voter_id` - ID of the voter
-    /// * `timestamp` - Current timestamp
-    /// * `period_id` - Current voting period
-    ///
-    /// # Returns
-    /// VoterReputation initialized with neutral starting reputation (0.5)
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// This is the preferred method for creating new voter reputations.
-    /// Uses BITCOIN_HIVEMIND_NEUTRAL_VALUE constant to ensure consistency
-    /// across all initialization points.
-    ///
-    /// # Single Source of Truth
-    /// All code creating new voter reputations MUST use this method instead
-    /// of calling new() with hard-coded 0.5 to maintain architectural consistency.
     pub fn new_default(
-        voter_id: VoterId,
+        address: Address,
         timestamp: u64,
         period_id: VotingPeriodId,
     ) -> Self {
         Self::new(
-            voter_id,
+            address,
             crate::math::voting::constants::BITCOIN_HIVEMIND_NEUTRAL_VALUE,
             timestamp,
             period_id,
         )
     }
 
-    /// Update base reputation based on voting performance
-    ///
-    /// # Arguments
-    /// * `was_correct` - Whether voter was in consensus on recent decisions
-    /// * `timestamp` - Current timestamp
-    /// * `period_id` - Voting period being processed
-    /// * `txid` - Transaction ID of the reputation update
-    /// * `height` - Block height of the reputation update
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Updates only the base reputation component. Final voting weight is
-    /// recalculated by multiplying updated reputation with Votecoin proportion.
-    /// This follows the incentive mechanism to reward accurate reporting.
-    ///
-    /// # Rollback Support
-    /// Pushes current reputation to history before updating, enabling safe
-    /// reversion during blockchain reorganizations.
     pub fn update(
         &mut self,
         was_correct: bool,
@@ -404,7 +226,6 @@ impl VoterReputation {
         txid: Txid,
         height: u32,
     ) {
-        // Push current reputation to history before updating
         self.reputation_history.push(self.reputation, txid, height);
 
         self.total_decisions += 1;
@@ -412,7 +233,6 @@ impl VoterReputation {
             self.correct_decisions += 1;
         }
 
-        // Update base reputation (can be enhanced with more sophisticated algorithms)
         let accuracy_rate = if self.total_decisions > 0 {
             self.correct_decisions as f64 / self.total_decisions as f64
         } else {
@@ -423,38 +243,17 @@ impl VoterReputation {
         self.last_period = period_id;
     }
 
-    /// Rollback the most recent reputation update
-    ///
-    /// # Returns
-    /// Previous reputation value if available, None if at initial state
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Enables safe blockchain reorganizations by reverting reputation to
-    /// previous state when blocks are disconnected.
     pub fn rollback_update(&mut self) -> Option<f64> {
         if let Some(previous) = self.reputation_history.pop() {
             let previous_reputation = previous.data;
             self.reputation = previous_reputation;
-
-            // Decrement counters (note: this is approximate as we don't track
-            // individual decision correctness in history)
             self.total_decisions = self.total_decisions.saturating_sub(1);
-
             Some(previous_reputation)
         } else {
             None
         }
     }
 
-    /// Update Votecoin holdings proportion and recalculate voting weight
-    ///
-    /// # Arguments
-    /// * `votecoin_proportion` - New Votecoin proportion (0.0 to 1.0)
-    /// * `current_height` - Current block height for caching
-    ///
-    /// # Bitcoin Hivemind Specification
-    /// This implements the Votecoin Holdings Proportion component of:
-    /// **Final Voting Weight = Base Reputation × Votecoin Holdings Proportion**
     pub fn update_votecoin_proportion(
         &mut self,
         votecoin_proportion: f64,
@@ -464,47 +263,18 @@ impl VoterReputation {
         self.votecoin_updated_height = Some(current_height);
     }
 
-    /// Calculate the final voting weight for consensus calculations on-demand
-    ///
-    /// # Returns
-    /// Final voting weight incorporating both reputation and Votecoin holdings
-    ///
-    /// # Bitcoin Hivemind Formula
-    /// **Final Voting Weight = Base Reputation × Votecoin Holdings Proportion**
-    ///
-    /// This is calculated on-demand rather than stored to:
-    /// - Reduce redundancy (derived from stored fields)
-    /// - Prevent inconsistency if fields update separately
-    /// - Save memory (one less f64 field per voter)
     pub fn get_voting_weight(&self) -> f64 {
         self.reputation * self.votecoin_proportion
     }
 
-    /// Get base reputation score (without Votecoin weighting)
-    ///
-    /// # Returns
-    /// Base reputation score for historical tracking
     pub fn get_base_reputation(&self) -> f64 {
         self.reputation
     }
 
-    /// Get Votecoin holdings proportion
-    ///
-    /// # Returns
-    /// Cached Votecoin proportion (may need refresh if UTXO set changed)
     pub fn get_votecoin_proportion(&self) -> f64 {
         self.votecoin_proportion
     }
 
-    /// Calculate accuracy rate on-demand
-    ///
-    /// # Returns
-    /// Running average of voter accuracy (correct_decisions / total_decisions)
-    ///
-    /// This is calculated on-demand rather than stored to:
-    /// - Reduce redundancy (derived from correct_decisions and total_decisions)
-    /// - Prevent inconsistency if counters update separately
-    /// - Save memory (one less f64 field per voter)
     pub fn get_accuracy_rate(&self) -> f64 {
         if self.total_decisions > 0 {
             self.correct_decisions as f64 / self.total_decisions as f64
@@ -513,21 +283,13 @@ impl VoterReputation {
         }
     }
 
-    /// Check if Votecoin proportion needs refresh based on block height
-    ///
-    /// # Arguments
-    /// * `current_height` - Current block height
-    /// * `max_staleness` - Maximum blocks before refresh needed
-    ///
-    /// # Returns
-    /// True if proportion should be refreshed from UTXO set
     pub fn needs_votecoin_refresh(
         &self,
         current_height: u64,
         max_staleness: u64,
     ) -> bool {
         match self.votecoin_updated_height {
-            None => true, // Never updated
+            None => true,
             Some(last_height) => {
                 current_height.saturating_sub(last_height) > max_staleness
             }
@@ -535,33 +297,20 @@ impl VoterReputation {
     }
 }
 
-/// Final outcome of a resolved decision
-///
-/// Status of decision resolution process
-///
-/// Tracks the current state of a decision through the resolution process
-/// as defined in the Bitcoin Hivemind specification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecisionResolutionStatus {
-    /// Decision is available for voting
     Pending,
-    /// Voting period has ended, awaiting consensus calculation
     AwaitingResolution,
-    /// Decision has been resolved through consensus
     Resolved,
-    /// Decision was defaulted due to insufficient participation
     Defaulted,
-    /// Decision was cancelled or invalidated
     Cancelled,
 }
 
 impl DecisionResolutionStatus {
-    /// Check if decision accepts new votes
     pub fn accepts_votes(&self) -> bool {
         matches!(self, DecisionResolutionStatus::Pending)
     }
 
-    /// Check if decision is finalized
     pub fn is_finalized(&self) -> bool {
         matches!(
             self,
@@ -572,36 +321,21 @@ impl DecisionResolutionStatus {
     }
 }
 
-/// Decision resolution state tracking
-///
-/// Maintains the state of a decision through the resolution process,
-/// including when state changes occur and why.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DecisionResolution {
-    /// Decision being tracked
     pub decision_id: SlotId,
-    /// Voting period this decision belongs to
     pub period_id: VotingPeriodId,
-    /// Current resolution status
     pub status: DecisionResolutionStatus,
-    /// When this status was set
     pub status_changed_at: u64,
-    /// Block height when status changed
     pub status_changed_height: u64,
-    /// Number of votes received so far
     pub vote_count: u32,
-    /// Required minimum votes for consensus
     pub min_votes_required: u32,
-    /// Deadline for voting (L1 timestamp)
     pub voting_deadline: u64,
-    /// Whether this decision has outcome ready for consensus
     pub outcome_ready: bool,
-    /// Optional reason for status change
     pub reason: Option<String>,
 }
 
 impl DecisionResolution {
-    /// Create new decision resolution tracking
     pub fn new(
         decision_id: SlotId,
         period_id: VotingPeriodId,
@@ -624,7 +358,6 @@ impl DecisionResolution {
         }
     }
 
-    /// Update resolution status
     pub fn update_status(
         &mut self,
         new_status: DecisionResolutionStatus,
@@ -638,85 +371,48 @@ impl DecisionResolution {
         self.reason = reason;
     }
 
-    /// Add a vote to this decision
     pub fn add_vote(&mut self) {
         if self.status.accepts_votes() {
             self.vote_count += 1;
         }
     }
 
-    /// Check if voting period has expired
     pub fn is_voting_expired(&self, current_timestamp: u64) -> bool {
         current_timestamp >= self.voting_deadline
     }
 
-    /// Check if decision has minimum votes for consensus
     pub fn has_minimum_votes(&self) -> bool {
         self.vote_count >= self.min_votes_required
     }
 
-    /// Check if decision is ready for consensus calculation
     pub fn is_ready_for_consensus(&self, current_timestamp: u64) -> bool {
         matches!(self.status, DecisionResolutionStatus::Pending)
             && (self.is_voting_expired(current_timestamp)
                 || self.has_minimum_votes())
     }
 
-    /// Mark outcome as ready
     pub fn mark_outcome_ready(&mut self) {
         self.outcome_ready = true;
     }
 }
 
-/// After voting closes and consensus is reached, each decision receives
-/// a final outcome that is used for market resolution and payout calculation.
-///
-/// # Specification Reference
-/// Bitcoin Hivemind whitepaper Section 4.3: "Outcome Determination"
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DecisionOutcome {
-    /// Decision slot this outcome applies to
     pub decision_id: SlotId,
-    /// Voting period when this outcome was determined
     pub period_id: VotingPeriodId,
-    /// Final consensus value for this decision
     pub outcome_value: f64,
-    /// Minimum possible value for this decision (for scalar decisions)
     pub min: f64,
-    /// Maximum possible value for this decision (for scalar decisions)
     pub max: f64,
-    /// Confidence level in this outcome (0.0 to 1.0)
     pub confidence: f64,
-    /// Total number of votes cast on this decision
     pub total_votes: u64,
-    /// Total reputation weight of all voters
     pub total_reputation_weight: f64,
-    /// L1 timestamp when outcome was finalized
     pub finalized_at: u64,
-    /// L2 block height when outcome was recorded
     pub block_height: u64,
-    /// Whether this outcome was reached through consensus or default
     pub is_consensus: bool,
-    /// Resolution status and tracking information
     pub resolution: DecisionResolution,
 }
 
 impl DecisionOutcome {
-    /// Create a new decision outcome
-    ///
-    /// # Arguments
-    /// * `decision_id` - Decision slot this outcome applies to
-    /// * `period_id` - Voting period when outcome was determined
-    /// * `outcome_value` - Final consensus value
-    /// * `min` - Minimum possible value for this decision
-    /// * `max` - Maximum possible value for this decision
-    /// * `confidence` - Confidence level in outcome
-    /// * `total_votes` - Number of votes cast
-    /// * `total_reputation_weight` - Sum of voter reputation weights
-    /// * `finalized_at` - Timestamp when outcome was finalized
-    /// * `block_height` - Block height when outcome was recorded
-    /// * `is_consensus` - Whether outcome represents true consensus
-    /// * `resolution` - Resolution tracking information
     pub fn new(
         decision_id: SlotId,
         period_id: VotingPeriodId,
@@ -747,7 +443,6 @@ impl DecisionOutcome {
         }
     }
 
-    /// Create outcome with resolved status
     pub fn new_resolved(
         decision_id: SlotId,
         period_id: VotingPeriodId,
@@ -764,7 +459,7 @@ impl DecisionOutcome {
             decision_id,
             period_id,
             finalized_at,
-            1, // min_votes_required
+            1,
             finalized_at,
             block_height,
         );
@@ -793,13 +488,6 @@ impl DecisionOutcome {
     }
 }
 
-/// Matrix key for efficient vote storage and retrieval
-///
-/// The matrix key combines voter and decision identifiers to create
-/// a unique key for each vote in the sparse vote matrix structure.
-///
-/// # Specification Reference
-/// Bitcoin Hivemind whitepaper Section 4.4: "Vote Matrix Structure"
 #[derive(
     Clone,
     Copy,
@@ -813,49 +501,33 @@ impl DecisionOutcome {
     Deserialize,
 )]
 pub struct VoteMatrixKey {
-    /// Voting period this key belongs to
     pub period_id: VotingPeriodId,
-    /// Voter casting the vote
-    pub voter_id: VoterId,
-    /// Decision being voted on
+    pub voter_address: Address,
     pub decision_id: SlotId,
 }
 
 impl VoteMatrixKey {
-    /// Create a new vote matrix key
     pub fn new(
         period_id: VotingPeriodId,
-        voter_id: VoterId,
+        voter_address: Address,
         decision_id: SlotId,
     ) -> Self {
         Self {
             period_id,
-            voter_id,
+            voter_address,
             decision_id,
         }
     }
 }
 
-/// Vote matrix entry storing vote data efficiently
-///
-/// The vote matrix is the core data structure for the Bitcoin Hivemind
-/// consensus algorithm. It stores votes in a sparse matrix format optimized
-/// for the mathematical operations required by the consensus algorithm.
-///
-/// # Specification Reference
-/// Bitcoin Hivemind whitepaper Section 4: "Consensus Algorithm"
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoteMatrixEntry {
-    /// The vote value
     pub value: VoteValue,
-    /// Timestamp when vote was cast
     pub timestamp: u64,
-    /// Block height when vote was included
     pub block_height: u64,
 }
 
 impl VoteMatrixEntry {
-    /// Create a new vote matrix entry
     pub fn new(value: VoteValue, timestamp: u64, block_height: u64) -> Self {
         Self {
             value,
@@ -864,31 +536,20 @@ impl VoteMatrixEntry {
         }
     }
 
-    /// Convert to f64 for mathematical operations
     pub fn to_f64(&self) -> f64 {
         self.value.to_f64()
     }
 }
 
-/// Batch of votes for efficient database operations
-///
-/// Vote batches allow multiple votes to be processed atomically,
-/// improving performance for bulk operations and ensuring consistency
-/// during vote ingestion.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoteBatch {
-    /// Voting period these votes belong to
     pub period_id: VotingPeriodId,
-    /// Collection of votes in this batch
     pub votes: Vec<Vote>,
-    /// Timestamp when batch was created
     pub created_at: u64,
-    /// Block height when batch was processed
     pub block_height: u64,
 }
 
 impl VoteBatch {
-    /// Create a new vote batch
     pub fn new(
         period_id: VotingPeriodId,
         created_at: u64,
@@ -902,57 +563,36 @@ impl VoteBatch {
         }
     }
 
-    /// Add a vote to this batch
     pub fn add_vote(&mut self, vote: Vote) {
         self.votes.push(vote);
     }
 
-    /// Get the number of votes in this batch
     pub fn len(&self) -> usize {
         self.votes.len()
     }
 
-    /// Check if batch is empty
     pub fn is_empty(&self) -> bool {
         self.votes.is_empty()
     }
 }
 
-/// Statistics about a voting period
-///
-/// Period statistics provide insights into voter participation,
-/// consensus quality, and overall health of the voting process.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VotingPeriodStats {
-    /// Period these statistics apply to
     pub period_id: VotingPeriodId,
-    /// Total number of unique voters who participated
     pub total_voters: u64,
-    /// Total number of votes cast across all decisions
     pub total_votes: u64,
-    /// Number of decisions available for voting
     pub total_decisions: u64,
-    /// Average participation rate across all decisions
     pub avg_participation_rate: f64,
-    /// Total reputation weight of all participants
     pub total_reputation_weight: f64,
-    /// Number of decisions that reached consensus
     pub consensus_decisions: u64,
-    /// Timestamp when statistics were calculated
     pub calculated_at: u64,
-    /// First principal component from SVD (only populated after consensus)
     pub first_loading: Option<Vec<f64>>,
-    /// Variance explained by the first component (0.0 to 1.0, only after consensus)
     pub explained_variance: Option<f64>,
-    /// Average certainty score across all decisions (0.0 to 1.0, only after consensus)
     pub certainty: Option<f64>,
-    /// Reputation changes from consensus: maps VoterId to (old_reputation, new_reputation)
-    /// This is populated during consensus calculation to track reputation updates
-    pub reputation_changes: Option<HashMap<VoterId, (f64, f64)>>,
+    pub reputation_changes: Option<HashMap<Address, (f64, f64)>>,
 }
 
 impl VotingPeriodStats {
-    /// Create new period statistics
     pub fn new(period_id: VotingPeriodId, calculated_at: u64) -> Self {
         Self {
             period_id,
@@ -970,7 +610,6 @@ impl VotingPeriodStats {
         }
     }
 
-    /// Calculate participation rate
     pub fn participation_rate(&self) -> f64 {
         if self.total_decisions > 0 && self.total_voters > 0 {
             self.total_votes as f64
@@ -980,7 +619,6 @@ impl VotingPeriodStats {
         }
     }
 
-    /// Calculate consensus rate
     pub fn consensus_rate(&self) -> f64 {
         if self.total_decisions > 0 {
             self.consensus_decisions as f64 / self.total_decisions as f64
@@ -1006,13 +644,6 @@ mod tests {
     }
 
     #[test]
-    fn test_voter_id() {
-        let address = Address([1u8; 20]);
-        let voter_id = VoterId::from_address(&address);
-        assert_eq!(voter_id.to_address(), address);
-    }
-
-    #[test]
     fn test_vote_value() {
         let binary_true = VoteValue::binary(true);
         assert_eq!(binary_true.to_f64(), 1.0);
@@ -1034,31 +665,43 @@ mod tests {
         let start = 1000;
         let end = 2000;
         let period =
-            VotingPeriod::new(VotingPeriodId::new(1), start, end, vec![], 100);
+            VotingPeriod::new(VotingPeriodId::new(1), start, end, vec![]);
 
         assert_eq!(period.duration_seconds(), 1000);
-        assert!(!period.is_active(500)); // Before start
-        assert!(!period.is_active(2500)); // After end
+        assert!(!period.is_active(500));
+        assert!(!period.is_active(2500));
         assert!(period.has_ended(2500));
         assert!(!period.has_ended(500));
     }
 
     #[test]
     fn test_voter_reputation() {
-        let voter_id = VoterId::from_bytes([1u8; 20]);
+        let address = Address([1u8; 20]);
         let mut reputation =
-            VoterReputation::new(voter_id, 0.5, 1000, VotingPeriodId::new(1));
+            VoterReputation::new(address, 0.5, 1000, VotingPeriodId::new(1));
 
         assert_eq!(reputation.reputation, 0.5);
         assert_eq!(reputation.total_decisions, 0);
 
-        reputation.update(true, 1100, VotingPeriodId::new(2), Txid([1u8; 32]), 1);
+        reputation.update(
+            true,
+            1100,
+            VotingPeriodId::new(2),
+            Txid([1u8; 32]),
+            1,
+        );
         assert_eq!(reputation.total_decisions, 1);
         assert_eq!(reputation.correct_decisions, 1);
         assert_eq!(reputation.get_accuracy_rate(), 1.0);
         assert_eq!(reputation.reputation, 1.0);
 
-        reputation.update(false, 1200, VotingPeriodId::new(3), Txid([2u8; 32]), 2);
+        reputation.update(
+            false,
+            1200,
+            VotingPeriodId::new(3),
+            Txid([2u8; 32]),
+            2,
+        );
         assert_eq!(reputation.total_decisions, 2);
         assert_eq!(reputation.correct_decisions, 1);
         assert_eq!(reputation.get_accuracy_rate(), 0.5);
@@ -1074,7 +717,7 @@ mod tests {
         assert_eq!(batch.len(), 0);
 
         let vote = Vote::new(
-            VoterId::from_bytes([1u8; 20]),
+            Address([1u8; 20]),
             period_id,
             SlotId::new(1, 0).unwrap(),
             VoteValue::binary(true),

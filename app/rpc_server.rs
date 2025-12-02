@@ -111,10 +111,7 @@ impl RpcServerImpl {
 #[async_trait]
 impl RpcServer for RpcServerImpl {
     async fn get_block(&self, block_hash: BlockHash) -> RpcResult<Block> {
-        let block = self
-            .node()
-            .get_block(block_hash)
-            .map_err(custom_err)?;
+        let block = self.node().get_block(block_hash).map_err(custom_err)?;
         Ok(block)
     }
 
@@ -458,8 +455,7 @@ impl RpcServer for RpcServerImpl {
     async fn slots_list_all(
         &self,
     ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::SlotInfo>> {
-        let slots =
-            self.node().get_all_slot_quarters().map_err(custom_err)?;
+        let slots = self.node().get_all_slot_quarters().map_err(custom_err)?;
         let result = slots
             .into_iter()
             .map(|(period, slots)| truthcoin_dc_app_rpc_api::SlotInfo {
@@ -508,8 +504,7 @@ impl RpcServer for RpcServerImpl {
             Self::timestamp_to_period(current_timestamp)
         };
 
-        let current_period_name =
-            Self::period_to_name(current_period);
+        let current_period_name = Self::period_to_name(current_period);
 
         Ok(truthcoin_dc_app_rpc_api::SlotStatus {
             is_testing_mode,
@@ -531,8 +526,7 @@ impl RpcServer for RpcServerImpl {
         &self,
         block_height: u32,
     ) -> RpcResult<u32> {
-        let testing_blocks_per_period =
-            self.node().get_slots_testing_config();
+        let testing_blocks_per_period = self.node().get_slots_testing_config();
         Ok(Self::block_height_to_testing_period(
             block_height,
             testing_blocks_per_period,
@@ -763,38 +757,17 @@ impl RpcServer for RpcServerImpl {
     async fn list_markets(
         &self,
     ) -> RpcResult<Vec<truthcoin_dc_app_rpc_api::MarketSummary>> {
-        let markets = self
+        // Get markets with computed states from SlotStateHistory (single source of truth)
+        let markets_with_states = self
             .app
             .node
-            .get_all_markets()
+            .get_all_markets_with_states()
             .map_err(custom_err)?;
 
-        let is_testing_mode = self.node().is_slots_testing_mode();
-        let current_period = if is_testing_mode {
-            let tip_height = self
-                .app
-                .node
-                .try_get_tip_height()
-                .map_err(custom_err)?
-                .unwrap_or(0);
-            let testing_blocks_per_period = self.node().get_slots_testing_config();
-            Self::block_height_to_testing_period(
-                tip_height,
-                testing_blocks_per_period,
-            )
-        } else {
-            let current_timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e| custom_err_msg(format!("System time error: {}", e)))?
-                .as_secs();
-            Self::timestamp_to_period(current_timestamp)
-        };
-
-        let market_summaries = markets
+        let market_summaries = markets_with_states
             .into_iter()
-            .map(|market| {
+            .map(|(market, computed_state)| {
                 let market_id_hex = hex::encode(market.id.as_bytes());
-                let computed_state = market.compute_state(current_period);
 
                 truthcoin_dc_app_rpc_api::MarketSummary {
                     market_id: market_id_hex,
@@ -821,13 +794,14 @@ impl RpcServer for RpcServerImpl {
     ) -> RpcResult<Option<truthcoin_dc_app_rpc_api::MarketData>> {
         let market_id_struct = parse_market_id(&market_id)?;
 
-        let market = match self
+        // Get market with computed state from SlotStateHistory (single source of truth)
+        let (market, computed_state) = match self
             .app
             .node
-            .get_market_by_id(&market_id_struct)
+            .get_market_by_id_with_state(&market_id_struct)
             .map_err(custom_err)?
         {
-            Some(market) => market,
+            Some((market, computed_state)) => (market, computed_state),
             None => return Ok(None),
         };
 
@@ -836,27 +810,6 @@ impl RpcServer for RpcServerImpl {
             .node
             .get_market_decisions(&market)
             .map_err(custom_err)?;
-
-        let is_testing_mode = self.node().is_slots_testing_mode();
-        let current_period = if is_testing_mode {
-            let tip_height = self
-                .app
-                .node
-                .try_get_tip_height()
-                .map_err(custom_err)?
-                .unwrap_or(0);
-            let testing_blocks_per_period = self.node().get_slots_testing_config();
-            Self::block_height_to_testing_period(
-                tip_height,
-                testing_blocks_per_period,
-            )
-        } else {
-            let current_timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e| custom_err_msg(format!("System time error: {}", e)))?
-                .as_secs();
-            Self::timestamp_to_period(current_timestamp)
-        };
 
         let mut outcomes = Vec::new();
         let valid_state_combos = market.get_valid_state_combos();
@@ -916,7 +869,7 @@ impl RpcServer for RpcServerImpl {
             .map(|slot_id| slot_id.to_hex())
             .collect();
 
-        let computed_state = market.compute_state(current_period);
+        // computed_state already obtained above from SlotStateHistory
 
         let market_data = truthcoin_dc_app_rpc_api::MarketData {
             market_id,
@@ -1070,7 +1023,7 @@ impl RpcServer for RpcServerImpl {
                     )
                 }
                 "dimensional" => {
-                    if let Some(ref dims) = request.dimensions {
+                    if let Some(ref _dims) = request.dimensions {
                         let estimated_outcomes = decision_slots.len() * 2;
                         (
                             estimated_outcomes,
@@ -1402,11 +1355,7 @@ impl RpcServer for RpcServerImpl {
     ) -> RpcResult<String> {
         let fee = bitcoin::Amount::from_sat(request.fee_sats);
 
-        let tx = self
-            .app
-            .wallet
-            .register_voter(fee)
-            .map_err(custom_err)?;
+        let tx = self.app.wallet.register_voter(fee).map_err(custom_err)?;
 
         let txid = tx.txid();
 
@@ -1422,8 +1371,11 @@ impl RpcServer for RpcServerImpl {
         use truthcoin_dc::validation::SlotValidator;
 
         // Parse decision ID from hex string
-        let slot_id = SlotValidator::parse_slot_id_from_hex(&request.decision_id)
-            .map_err(|e| custom_err_msg(format!("Invalid decision ID: {}", e)))?;
+        let slot_id =
+            SlotValidator::parse_slot_id_from_hex(&request.decision_id)
+                .map_err(|e| {
+                    custom_err_msg(format!("Invalid decision ID: {}", e))
+                })?;
 
         let fee = bitcoin::Amount::from_sat(request.fee_sats);
 
@@ -1452,7 +1404,6 @@ impl RpcServer for RpcServerImpl {
         use truthcoin_dc::types::VoteBatchItem;
         use truthcoin_dc::validation::SlotValidator;
 
-
         if request.votes.is_empty() {
             return Err(custom_err_msg("Batch cannot be empty"));
         }
@@ -1460,9 +1411,11 @@ impl RpcServer for RpcServerImpl {
         // Parse and convert all vote items
         let mut batch_items = Vec::new();
         for vote in request.votes {
-            let slot_id = SlotValidator::parse_slot_id_from_hex(&vote.decision_id)
-                .map_err(|e| custom_err_msg(format!("Invalid decision ID: {}", e)))?;
-
+            let slot_id =
+                SlotValidator::parse_slot_id_from_hex(&vote.decision_id)
+                    .map_err(|e| {
+                        custom_err_msg(format!("Invalid decision ID: {}", e))
+                    })?;
 
             batch_items.push(VoteBatchItem {
                 slot_id_bytes: slot_id.as_bytes(),
@@ -1472,7 +1425,6 @@ impl RpcServer for RpcServerImpl {
 
         let fee = bitcoin::Amount::from_sat(request.fee_sats);
 
-
         let tx = self
             .app
             .wallet
@@ -1481,9 +1433,7 @@ impl RpcServer for RpcServerImpl {
 
         let txid = tx.txid();
 
-
         self.app.sign_and_send(tx).map_err(custom_err)?;
-
 
         Ok(format!("{}", txid))
     }
@@ -1492,10 +1442,7 @@ impl RpcServer for RpcServerImpl {
         &self,
         address: Address,
     ) -> RpcResult<Option<VoterInfo>> {
-        use truthcoin_dc::state::voting::types::VoterId;
-
         let rotxn = self.node().read_txn().map_err(custom_err)?;
-        let voter_id = VoterId::from_address(&address);
 
         // Get reputation
         let reputation_opt = self
@@ -1503,7 +1450,7 @@ impl RpcServer for RpcServerImpl {
             .node
             .voting_state()
             .databases()
-            .get_voter_reputation(&rotxn, voter_id)
+            .get_voter_reputation(&rotxn, address)
             .map_err(custom_err)?;
 
         let Some(reputation) = reputation_opt else {
@@ -1516,7 +1463,7 @@ impl RpcServer for RpcServerImpl {
             .node
             .voting_state()
             .databases()
-            .get_votes_by_voter(&rotxn, voter_id)
+            .get_votes_by_voter(&rotxn, address)
             .map_err(custom_err)?;
 
         Ok(Some(VoterInfo {
@@ -1540,7 +1487,8 @@ impl RpcServer for RpcServerImpl {
 
         let voting_period_id = VotingPeriodId::new(period_id);
 
-        let current_timestamp = self.node().get_last_block_timestamp().map_err(custom_err)?;
+        let current_timestamp =
+            self.node().get_last_block_timestamp().map_err(custom_err)?;
 
         let config = self.node().get_slot_config();
         let slots_db = self.node().get_slots_db();
@@ -1586,10 +1534,8 @@ impl RpcServer for RpcServerImpl {
             .get_votes_for_period(&rotxn, voting_period_id)
             .map_err(custom_err)?;
 
-        let active_voters: std::collections::HashSet<_> = votes
-            .keys()
-            .map(|k| k.voter_id)
-            .collect();
+        let active_voters: std::collections::HashSet<_> =
+            votes.keys().map(|k| k.voter_address).collect();
 
         let consensus_reached = period.status == truthcoin_dc::state::voting::types::VotingPeriodStatus::Resolved
             || period.status == truthcoin_dc::state::voting::types::VotingPeriodStatus::Closed;
@@ -1600,7 +1546,7 @@ impl RpcServer for RpcServerImpl {
             end_time: period.end_timestamp,
             status: format!("{:?}", period.status),
             decision_slots,
-            created_at_height: period.created_at_height,
+            created_at_height: 0, // Deprecated field, periods are calculated not stored
             total_voters,
             active_voters: active_voters.len() as u64,
             total_votes,
@@ -1613,10 +1559,9 @@ impl RpcServer for RpcServerImpl {
         address: Address,
         period_id: Option<u32>,
     ) -> RpcResult<Vec<VoteInfo>> {
-        use truthcoin_dc::state::voting::types::{VoterId, VotingPeriodId};
+        use truthcoin_dc::state::voting::types::VotingPeriodId;
 
         let rotxn = self.node().read_txn().map_err(custom_err)?;
-        let voter_id = VoterId::from_address(&address);
 
         // Get all votes by this voter
         let all_votes = self
@@ -1624,7 +1569,7 @@ impl RpcServer for RpcServerImpl {
             .node
             .voting_state()
             .databases()
-            .get_votes_by_voter(&rotxn, voter_id)
+            .get_votes_by_voter(&rotxn, address)
             .map_err(custom_err)?;
 
         let mut vote_infos = Vec::new();
@@ -1659,7 +1604,9 @@ impl RpcServer for RpcServerImpl {
         let rotxn = self.node().read_txn().map_err(custom_err)?;
 
         let slot_id = SlotValidator::parse_slot_id_from_hex(&decision_id)
-            .map_err(|e| custom_err_msg(format!("Invalid decision ID: {}", e)))?;
+            .map_err(|e| {
+                custom_err_msg(format!("Invalid decision ID: {}", e))
+            })?;
 
         let votes = self
             .app
@@ -1672,10 +1619,8 @@ impl RpcServer for RpcServerImpl {
         let mut vote_infos = Vec::new();
 
         for (vote_key, vote_entry) in votes {
-            let voter_address = vote_key.voter_id.to_address();
-
             vote_infos.push(VoteInfo {
-                voter_address: voter_address.to_string(),
+                voter_address: vote_key.voter_address.to_string(),
                 decision_id: decision_id.clone(),
                 vote_value: vote_entry.to_f64(),
                 period_id: vote_key.period_id.as_u32(),
@@ -1693,13 +1638,13 @@ impl RpcServer for RpcServerImpl {
         address: Address,
         period_id: u32,
     ) -> RpcResult<Option<VoterParticipation>> {
-        use truthcoin_dc::state::voting::types::{VoterId, VotingPeriodId};
+        use truthcoin_dc::state::voting::types::VotingPeriodId;
 
         let rotxn = self.node().read_txn().map_err(custom_err)?;
-        let voter_id = VoterId::from_address(&address);
         let voting_period_id = VotingPeriodId::new(period_id);
 
-        let current_timestamp = self.node().get_last_block_timestamp().map_err(custom_err)?;
+        let current_timestamp =
+            self.node().get_last_block_timestamp().map_err(custom_err)?;
 
         let config = self.node().get_slot_config();
         let slots_db = self.node().get_slots_db();
@@ -1729,7 +1674,7 @@ impl RpcServer for RpcServerImpl {
             .node
             .voting_state()
             .databases()
-            .get_votes_by_voter(&rotxn, voter_id)
+            .get_votes_by_voter(&rotxn, address)
             .map_err(custom_err)?;
 
         let period_votes: Vec<_> = all_votes
@@ -1751,7 +1696,7 @@ impl RpcServer for RpcServerImpl {
             .node
             .voting_state()
             .databases()
-            .get_voter_reputation(&rotxn, voter_id)
+            .get_voter_reputation(&rotxn, address)
             .map_err(custom_err)?;
 
         let participated_in_consensus = reputation_opt
@@ -1782,14 +1727,14 @@ impl RpcServer for RpcServerImpl {
 
         let mut voter_infos = Vec::new();
 
-        for voter_id in all_voters {
+        for voter_address in all_voters {
             // Get reputation
             let reputation_opt = self
                 .app
                 .node
                 .voting_state()
                 .databases()
-                .get_voter_reputation(&rotxn, voter_id)
+                .get_voter_reputation(&rotxn, voter_address)
                 .map_err(custom_err)?;
 
             let Some(reputation) = reputation_opt else {
@@ -1802,13 +1747,11 @@ impl RpcServer for RpcServerImpl {
                 .node
                 .voting_state()
                 .databases()
-                .get_votes_by_voter(&rotxn, voter_id)
+                .get_votes_by_voter(&rotxn, voter_address)
                 .map_err(custom_err)?;
 
-            let address = voter_id.to_address();
-
             voter_infos.push(VoterInfo {
-                address: address.to_string(),
+                address: voter_address.to_string(),
                 reputation: reputation.reputation,
                 total_votes: votes.len() as u64,
                 periods_active: reputation.total_decisions as u32,
@@ -1822,10 +1765,7 @@ impl RpcServer for RpcServerImpl {
     }
 
     async fn is_registered_voter(&self, address: Address) -> RpcResult<bool> {
-        use truthcoin_dc::state::voting::types::VoterId;
-
         let rotxn = self.node().read_txn().map_err(custom_err)?;
-        let voter_id = VoterId::from_address(&address);
 
         // Check if voter has reputation (indicates registration)
         let reputation_opt = self
@@ -1833,7 +1773,7 @@ impl RpcServer for RpcServerImpl {
             .node
             .voting_state()
             .databases()
-            .get_voter_reputation(&rotxn, voter_id)
+            .get_voter_reputation(&rotxn, address)
             .map_err(custom_err)?;
 
         Ok(reputation_opt.is_some())
@@ -1860,7 +1800,9 @@ impl RpcServer for RpcServerImpl {
 
             let current_timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e| custom_err_msg(format!("System time error: {}", e)))?
+                .map_err(|e| {
+                    custom_err_msg(format!("System time error: {}", e))
+                })?
                 .as_secs();
 
             let config = self.node().get_slot_config();
@@ -1895,13 +1837,17 @@ impl RpcServer for RpcServerImpl {
 
         let voting_period_id = VotingPeriodId(period_id);
 
-
-        let outcomes = self.node().resolve_voting_period(voting_period_id)
+        let outcomes = self
+            .node()
+            .resolve_voting_period(voting_period_id)
             .map_err(|e| {
-                tracing::error!("Failed to resolve voting period {}: {:?}", period_id, e);
+                tracing::error!(
+                    "Failed to resolve voting period {}: {:?}",
+                    period_id,
+                    e
+                );
                 custom_err(e)
             })?;
-
 
         if outcomes.is_empty() {
             return Err(custom_err_msg(format!(
@@ -1911,7 +1857,10 @@ impl RpcServer for RpcServerImpl {
         }
 
         let rotxn = self.node().read_txn().map_err(custom_err)?;
-        let outcomes_map = self.node().voting_state().databases()
+        let outcomes_map = self
+            .node()
+            .voting_state()
+            .databases()
             .get_consensus_outcomes_for_period(&rotxn, voting_period_id)
             .map_err(custom_err)?;
 
@@ -1920,63 +1869,83 @@ impl RpcServer for RpcServerImpl {
             outcomes.insert(slot_id.to_hex(), outcome);
         }
 
-        let votes = self.node().voting_state().databases()
+        let votes = self
+            .node()
+            .voting_state()
+            .databases()
             .get_votes_for_period(&rotxn, voting_period_id)
             .map_err(custom_err)?;
 
         let mut unique_voters = std::collections::HashSet::new();
         let mut unique_decisions = std::collections::HashSet::new();
         for (key, _) in &votes {
-            unique_voters.insert(key.voter_id);
+            unique_voters.insert(key.voter_address);
             unique_decisions.insert(key.decision_id);
         }
 
-        let period_stats = self.node().voting_state().databases()
+        let period_stats = self
+            .node()
+            .voting_state()
+            .databases()
             .get_period_stats(&rotxn, voting_period_id)
             .map_err(custom_err)?;
 
         let mut reputation_updates = std::collections::HashMap::new();
 
-        let (first_loading, explained_variance, certainty) = if let Some(ref stats) = period_stats {
-            if let Some(ref rep_changes) = stats.reputation_changes {
-                for (voter_id, (old_rep, new_rep)) in rep_changes {
-                    if let Some(reputation) = self.node().voting_state().databases()
-                        .get_voter_reputation(&rotxn, *voter_id)
-                        .map_err(custom_err)?
-                    {
-                        let rep_update = truthcoin_dc_app_rpc_api::ReputationUpdate {
-                            old_reputation: *old_rep,
-                            new_reputation: *new_rep,
-                            votecoin_proportion: reputation.votecoin_proportion,
-                            compliance_score: 0.0,
-                        };
-                        reputation_updates.insert(hex::encode(voter_id.as_bytes()), rep_update);
+        let (first_loading, explained_variance, certainty) =
+            if let Some(ref stats) = period_stats {
+                if let Some(ref rep_changes) = stats.reputation_changes {
+                    for (voter_id, (old_rep, new_rep)) in rep_changes {
+                        if let Some(reputation) = self
+                            .node()
+                            .voting_state()
+                            .databases()
+                            .get_voter_reputation(&rotxn, *voter_id)
+                            .map_err(custom_err)?
+                        {
+                            let rep_update =
+                                truthcoin_dc_app_rpc_api::ReputationUpdate {
+                                    old_reputation: *old_rep,
+                                    new_reputation: *new_rep,
+                                    votecoin_proportion: reputation
+                                        .votecoin_proportion,
+                                    compliance_score: 0.0,
+                                };
+                            reputation_updates
+                                .insert(voter_id.to_string(), rep_update);
+                        }
                     }
                 }
-            }
 
-            (
-                stats.first_loading.clone().unwrap_or_else(|| vec![0.0; unique_voters.len()]),
-                stats.explained_variance.unwrap_or(0.0),
-                stats.certainty.unwrap_or(0.0),
-            )
-        } else {
-            (vec![0.0; unique_voters.len()], 0.0, 0.0)
-        };
+                (
+                    stats
+                        .first_loading
+                        .clone()
+                        .unwrap_or_else(|| vec![0.0; unique_voters.len()]),
+                    stats.explained_variance.unwrap_or(0.0),
+                    stats.certainty.unwrap_or(0.0),
+                )
+            } else {
+                (vec![0.0; unique_voters.len()], 0.0, 0.0)
+            };
 
         if reputation_updates.is_empty() {
             for voter_id in &unique_voters {
-                if let Some(reputation) = self.node().voting_state().databases()
+                if let Some(reputation) = self
+                    .node()
+                    .voting_state()
+                    .databases()
                     .get_voter_reputation(&rotxn, *voter_id)
                     .map_err(custom_err)?
                 {
-                    let rep_update = truthcoin_dc_app_rpc_api::ReputationUpdate {
-                        old_reputation: reputation.reputation,
-                        new_reputation: reputation.reputation,
-                        votecoin_proportion: reputation.votecoin_proportion,
-                        compliance_score: 0.0,
-                    };
-                    reputation_updates.insert(hex::encode(voter_id.as_bytes()), rep_update);
+                    let rep_update =
+                        truthcoin_dc_app_rpc_api::ReputationUpdate {
+                            old_reputation: reputation.reputation,
+                            new_reputation: reputation.reputation,
+                            votecoin_proportion: reputation.votecoin_proportion,
+                            compliance_score: 0.0,
+                        };
+                    reputation_updates.insert(voter_id.to_string(), rep_update);
                 }
             }
         }
@@ -1990,54 +1959,61 @@ impl RpcServer for RpcServerImpl {
             certainty,
             reputation_updates,
             outliers: Vec::new(),
-            vote_matrix_dimensions: (unique_voters.len(), unique_decisions.len()),
+            vote_matrix_dimensions: (
+                unique_voters.len(),
+                unique_decisions.len(),
+            ),
             algorithm_version: "SVD-PCA-v1.0".to_string(),
         })
     }
 
-    async fn get_voter_reputation(&self, voter_id: String) -> RpcResult<f64> {
-        use truthcoin_dc::state::voting::types::VoterId;
-
+    async fn get_voter_reputation(
+        &self,
+        voter_address: String,
+    ) -> RpcResult<f64> {
         let rotxn = self.node().read_txn().map_err(custom_err)?;
 
-        let voter_id_bytes = hex::decode(&voter_id).map_err(|e| {
-            custom_err(anyhow::anyhow!("Invalid voter ID hex: {}", e))
-        })?;
+        let address: truthcoin_dc::types::Address =
+            voter_address.parse().map_err(|e| {
+                custom_err(anyhow::anyhow!("Invalid voter address: {}", e))
+            })?;
 
-        if voter_id_bytes.len() != 20 {
-            return Err(custom_err(anyhow::anyhow!(
-                "Invalid voter ID: expected 20 bytes, got {}",
-                voter_id_bytes.len()
-            )));
-        }
-
-        let mut voter_id_array = [0u8; 20];
-        voter_id_array.copy_from_slice(&voter_id_bytes);
-        let voter_id = VoterId::from_bytes(voter_id_array);
-
-        let reputation = self.node().voting_state().databases()
-            .get_voter_reputation(&rotxn, voter_id)
+        let reputation = self
+            .node()
+            .voting_state()
+            .databases()
+            .get_voter_reputation(&rotxn, address)
             .map_err(custom_err)?
             .ok_or_else(|| custom_err(anyhow::anyhow!("Voter not found")))?;
 
         Ok(reputation.reputation)
     }
 
-    async fn get_voting_period_status(&self, period_id: u32) -> RpcResult<String> {
+    async fn get_voting_period_status(
+        &self,
+        period_id: u32,
+    ) -> RpcResult<String> {
         use truthcoin_dc::state::voting::types::VotingPeriodId;
 
         let rotxn = self.node().read_txn().map_err(custom_err)?;
         let voting_period_id = VotingPeriodId(period_id);
 
-        if self.node().voting_state().databases()
+        if self
+            .node()
+            .voting_state()
+            .databases()
             .get_consensus_outcomes_for_period(&rotxn, voting_period_id)
             .map_err(custom_err)?
-            .len() > 0
+            .len()
+            > 0
         {
             return Ok("Resolved".to_string());
         }
 
-        let votes = self.node().voting_state().databases()
+        let votes = self
+            .node()
+            .voting_state()
+            .databases()
             .get_votes_for_period(&rotxn, voting_period_id)
             .map_err(custom_err)?;
 
@@ -2045,7 +2021,8 @@ impl RpcServer for RpcServerImpl {
             return Ok("Active".to_string());
         }
 
-        let slots = self.node()
+        let slots = self
+            .node()
             .get_claimed_slots_in_period(voting_period_id)
             .map_err(custom_err)?;
 
@@ -2054,6 +2031,54 @@ impl RpcServer for RpcServerImpl {
         }
 
         Ok("NotFound".to_string())
+    }
+
+    async fn get_redistribution_summary(
+        &self,
+        period_id: u32,
+    ) -> RpcResult<Option<truthcoin_dc_app_rpc_api::RedistributionInfo>> {
+        use truthcoin_dc::state::voting::types::VotingPeriodId;
+
+        let rotxn = self.node().read_txn().map_err(custom_err)?;
+        let voting_period_id = VotingPeriodId(period_id);
+
+        // Get the redistribution data for this period
+        let period_redist = self
+            .node()
+            .voting_state()
+            .databases()
+            .get_pending_redistribution(&rotxn, voting_period_id)
+            .map_err(custom_err)?;
+
+        let Some(redist) = period_redist else {
+            return Ok(None);
+        };
+
+        // Convert slot IDs to hex strings
+        let slots_affected: Vec<String> = redist
+            .slots_pending_redistribution
+            .iter()
+            .map(|slot_id| slot_id.to_hex())
+            .collect();
+
+        // Build the response
+        let info = truthcoin_dc_app_rpc_api::RedistributionInfo {
+            period_id: period_id,
+            total_redistributed: redist
+                .redistribution_summary
+                .total_redistributed,
+            winners_count: redist.redistribution_summary.winners_count,
+            losers_count: redist.redistribution_summary.losers_count,
+            unchanged_count: redist.redistribution_summary.unchanged_count,
+            conservation_check: redist
+                .redistribution_summary
+                .conservation_check,
+            block_height: redist.calculated_at_height,
+            is_applied: redist.applied,
+            slots_affected,
+        };
+
+        Ok(Some(info))
     }
 }
 

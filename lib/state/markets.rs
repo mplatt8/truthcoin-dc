@@ -3331,6 +3331,7 @@ mod tests {
             b: 10.0,
             trading_fee: 0.01,
             treasury: 1000.0,
+            collected_fees: 0,
         };
 
         let trade = BatchedMarketTrade {

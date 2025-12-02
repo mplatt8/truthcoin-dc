@@ -699,6 +699,14 @@ pub fn connect(
                     height,
                 )?;
             }
+            Some(TxData::ClaimAuthorFees { .. }) => {
+                apply_claim_author_fees(
+                    state,
+                    rwtxn,
+                    &filled_tx,
+                    height,
+                )?;
+            }
             Some(TxData::RegisterVoter { .. }) => {}
             None => {}
         }
@@ -773,6 +781,9 @@ pub fn disconnect_tip(
             }
             Some(TxData::SubmitVoteBatch { .. }) => {
                 let () = revert_submit_vote_batch(state, rwtxn, &filled_tx)?;
+            }
+            Some(TxData::ClaimAuthorFees { .. }) => {
+                let () = revert_claim_author_fees(state, rwtxn, &filled_tx)?;
             }
             Some(TxData::RegisterVoter { .. }) => {}
         }
@@ -1625,6 +1636,109 @@ fn revert_submit_vote_batch(
             decision_id,
         )?;
     }
+
+    Ok(())
+}
+
+/// Apply a claim author fees transaction.
+///
+/// This claims all accumulated trading fees for the market author,
+/// resetting the collected_fees counter to 0.
+fn apply_claim_author_fees(
+    state: &State,
+    rwtxn: &mut RwTxn,
+    filled_tx: &FilledTransaction,
+    height: u32,
+) -> Result<(), Error> {
+    let claim_data =
+        filled_tx
+            .claim_author_fees()
+            .ok_or_else(|| Error::InvalidTransaction {
+                reason: "Not a claim author fees transaction".to_string(),
+            })?;
+
+    let mut market = state
+        .markets()
+        .get_market(rwtxn, &claim_data.market_id)?
+        .ok_or_else(|| Error::InvalidSlotId {
+            reason: format!("Market {:?} does not exist", claim_data.market_id),
+        })?;
+
+    // Validate caller is the market creator
+    let caller_address = filled_tx
+        .spent_utxos
+        .first()
+        .ok_or_else(|| Error::InvalidTransaction {
+            reason: "Claim fees transaction must have inputs".to_string(),
+        })?
+        .address;
+
+    if caller_address != market.creator_address {
+        return Err(Error::InvalidTransaction {
+            reason: format!(
+                "Only market creator can claim fees. Expected {}, got {}",
+                market.creator_address, caller_address
+            ),
+        });
+    }
+
+    // Claim the fees (resets collected_fees to 0)
+    let fees_claimed = market
+        .claim_collected_fees(Some(filled_tx.transaction.txid().0), height as u64)
+        .map_err(|e| Error::InvalidSlotId {
+            reason: format!("Failed to claim fees: {:?}", e),
+        })?;
+
+    // Update market in database
+    state.markets().update_market(rwtxn, &market)?;
+
+    tracing::info!(
+        "Market author {} claimed {} sats in fees from market {}",
+        caller_address,
+        fees_claimed,
+        claim_data.market_id
+    );
+
+    Ok(())
+}
+
+/// Revert a claim author fees transaction.
+///
+/// This restores the collected_fees that were claimed by reverting
+/// to the previous market state version.
+fn revert_claim_author_fees(
+    state: &State,
+    rwtxn: &mut RwTxn,
+    filled_tx: &FilledTransaction,
+) -> Result<(), Error> {
+    let claim_data =
+        filled_tx
+            .claim_author_fees()
+            .ok_or_else(|| Error::InvalidTransaction {
+                reason: "Not a claim author fees transaction".to_string(),
+            })?;
+
+    let mut market = state
+        .markets()
+        .get_market(rwtxn, &claim_data.market_id)?
+        .ok_or_else(|| Error::InvalidSlotId {
+            reason: format!("Market {:?} does not exist", claim_data.market_id),
+        })?;
+
+    // Revert by removing the last state version
+    if market.state_history.len() > 1 {
+        market.state_history.pop();
+        if let Some(last_state) = market.state_history.last() {
+            market.current_state_hash = last_state.state_hash.clone();
+        }
+    }
+
+    state.markets().update_market(rwtxn, &market)?;
+
+    tracing::info!(
+        "Reverted claim author fees for market {}",
+        claim_data.market_id
+    );
 
     Ok(())
 }

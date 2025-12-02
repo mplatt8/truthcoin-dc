@@ -6,18 +6,17 @@
 
 use super::*;
 use crate::state::slots::SlotId;
-use crate::state::voting::types::VoterId;
 use crate::types::Address;
 use approx::assert_relative_eq;
 use std::collections::HashMap;
 
 // Helper functions for creating test data
-fn create_test_voter_ids(count: usize) -> Vec<VoterId> {
+fn create_test_voter_ids(count: usize) -> Vec<Address> {
     (0..count)
         .map(|i| {
             let mut addr_bytes = [0u8; 20];
             addr_bytes[0] = i as u8;
-            VoterId::from_address(&Address(addr_bytes))
+            Address(addr_bytes)
         })
         .collect()
 }
@@ -93,7 +92,7 @@ fn test_sparse_vote_matrix_errors() {
     let mut matrix = SparseVoteMatrix::new(voters.clone(), decisions.clone());
 
     // Test invalid voter
-    let invalid_voter = VoterId::from_address(&Address([99u8; 20]));
+    let invalid_voter = Address([99u8; 20]);
     let result = matrix.set_vote(invalid_voter, decisions[0], 1.0);
     assert!(result.is_err());
     if let Err(VotingMathError::InvalidReputation { reason }) = result {
@@ -206,7 +205,7 @@ fn test_reputation_vector_basic_operations() {
     assert_eq!(reputation.get_reputation(voters[2]), 0.4);
 
     // Test default reputation for unknown voter (should be 0.0 per Bitcoin Hivemind spec)
-    let unknown_voter = VoterId::from_address(&Address([99u8; 20]));
+    let unknown_voter = Address([99u8; 20]);
     assert_eq!(reputation.get_reputation(unknown_voter), 0.0);
 
     // Test total weight (with floating point tolerance)

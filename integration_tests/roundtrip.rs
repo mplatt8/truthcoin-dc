@@ -1069,7 +1069,6 @@ async fn roundtrip_task(
 
         let batch_request = SubmitVoteBatchRequest {
             votes: vote_items,
-            period_id: voting_period_id,
             fee_sats: 1000,
         };
 
@@ -1151,8 +1150,8 @@ async fn roundtrip_task(
 
     let period_id = voting_period_id;
 
+    // Mine blocks to close the voting period
     let blocks_to_mine = 10;
-
     for _ in 1..=blocks_to_mine {
         truthcoin_nodes
             .issuer
@@ -1163,25 +1162,27 @@ async fn roundtrip_task(
 
     tracing::info!("✓ Phase 7: Voting period closed");
 
-    let period_details = truthcoin_nodes
-        .issuer
-        .rpc_client
-        .get_voting_period_details(period_id)
-        .await?;
+    // ==========================================================================
+    // Phase 8: Period Resolution (Consensus + Redistribution + Market Redemption)
+    // ==========================================================================
+    // All of the following happen atomically in a single block during connect_block:
+    // 1. Consensus calculation via SVD-based PCA
+    // 2. VoteCoin redistribution based on voting accuracy
+    // 3. Market ossification and automatic share redemption payouts
+    // ==========================================================================
 
-    if period_details.is_none() {
-        return Err(anyhow::anyhow!("Voting period does not exist"));
-    }
+    tracing::info!("\n=== Phase 8: Period Resolution (Consensus + Redistribution + Redemption) ===");
+    tracing::info!("Mining block to trigger atomic period resolution...");
 
-    // Mine one more block to trigger automatic protocol-level consensus resolution
-    tracing::info!("Mining block to trigger automatic consensus resolution...");
     truthcoin_nodes
         .issuer
         .bmm_single(&mut enforcer_post_setup)
         .await?;
     sleep(std::time::Duration::from_millis(100)).await;
 
-    // Now query the consensus results (should be calculated automatically by the protocol)
+    // --- 8.1: Verify Consensus Results ---
+    tracing::info!("\n--- 8.1: Consensus Results ---");
+
     let consensus_results = match truthcoin_nodes
         .issuer
         .rpc_client
@@ -1249,9 +1250,8 @@ async fn roundtrip_task(
 
     anyhow::ensure!(reputation_updates_count == 7);
 
-    tracing::info!("\n=== Consensus Results ===");
     tracing::info!("Period: {} ({})", period_id, consensus_results.status);
-    tracing::info!("\nDecision Outcomes:");
+    tracing::info!("Decision Outcomes:");
     tracing::info!(
         "  D1: {:.2}",
         consensus_results
@@ -1280,13 +1280,13 @@ async fn roundtrip_task(
             .get(&decision_slot_ids[3])
             .unwrap_or(&0.0)
     );
-    tracing::info!("\nSVD Analysis:");
+    tracing::info!("SVD Analysis:");
     tracing::info!(
         "  Explained Variance: {:.4}",
         consensus_results.explained_variance
     );
     tracing::info!("  Certainty Score: {:.4}", consensus_results.certainty);
-    tracing::info!("\nReputation Updates:");
+    tracing::info!("Reputation Updates:");
     for (voter_idx, old_rep, new_rep, delta) in &reputation_changes {
         tracing::info!(
             "  V{}: {:.4} → {:.4} (Δ={:+.4})",
@@ -1297,12 +1297,11 @@ async fn roundtrip_task(
         );
     }
     if !consensus_results.outliers.is_empty() {
-        tracing::info!("\nOutliers:");
+        tracing::info!("Outliers:");
         for outlier in &consensus_results.outliers {
             tracing::info!("  - {}", outlier);
         }
     }
-    tracing::info!("");
 
     let expected_outcomes = vec![1.0, 0.5, 0.0, 0.0];
 
@@ -1315,22 +1314,8 @@ async fn roundtrip_task(
         anyhow::ensure!((actual - expected).abs() < tolerance);
     }
 
-    tracing::info!(
-        "✓ Phase 8: Consensus resolution completed (automatic protocol-level)\n"
-    );
-
-    // Note: VoteCoin redistribution is now atomic with consensus calculation.
-    // When consensus is calculated, redistribution is applied immediately in
-    // the same database transaction. This eliminates the one-block window of
-    // inconsistent state.
-
-    tracing::info!("Verifying atomic consensus + redistribution...");
-    sleep(std::time::Duration::from_secs(2)).await;
-
-    // Phase 9: Verify redistribution calculation
-    tracing::info!(
-        "=== Phase 9: Verifying VoteCoin Redistribution Calculation ==="
-    );
+    // --- 8.2: Verify VoteCoin Redistribution ---
+    tracing::info!("\n--- 8.2: VoteCoin Redistribution ---");
 
     let redistribution_info = truthcoin_nodes
         .issuer
@@ -1346,10 +1331,8 @@ async fn roundtrip_task(
 
     let redist = redistribution_info.unwrap();
 
-    tracing::info!("\n=== Redistribution Calculation Results ===");
-    tracing::info!("Period: {}", redist.period_id);
-    tracing::info!("Calculated at Block: {}", redist.block_height);
-    tracing::info!("\nVoteCoin Flow:");
+    tracing::info!("Period: {}, Calculated at Block: {}", redist.period_id, redist.block_height);
+    tracing::info!("VoteCoin Flow:");
     tracing::info!(
         "  Total Redistributed: {} VoteCoin",
         redist.total_redistributed
@@ -1360,42 +1343,27 @@ async fn roundtrip_task(
     );
     tracing::info!("  Losers: {} voters lost VoteCoin", redist.losers_count);
     tracing::info!("  Unchanged: {} voters", redist.unchanged_count);
-    tracing::info!("\nValidation:");
     tracing::info!(
-        "  Conservation: {} (✓ sum is zero)",
+        "  Conservation: {} (sum is zero)",
         redist.conservation_check
     );
     tracing::info!(
         "  Slots affected: {} (matches our 4 decisions)",
         redist.slots_affected.len()
     );
-    tracing::info!(
-        "\nNote: Redistribution is applied atomically with consensus calculation."
-    );
-    tracing::info!(
-        "      No additional block mining needed - already applied!"
-    );
-    tracing::info!("");
 
-    // Verify conservation - the most critical property
     anyhow::ensure!(
         redist.conservation_check == 0,
         "VoteCoin conservation violated: sum = {} (expected 0)",
         redist.conservation_check
     );
 
-    // With atomic redistribution, the redistribution is already applied when
-    // consensus is calculated. The redistribution record is marked as applied
-    // at the same height where consensus was reached.
-
-    // Verify we have the correct number of slots (should match our 4 decisions)
     anyhow::ensure!(
         redist.slots_affected.len() == 4,
         "Expected 4 slots affected, got {}",
         redist.slots_affected.len()
     );
 
-    // Verify that there were winners and losers (reputation changed)
     anyhow::ensure!(
         redist.winners_count > 0,
         "Expected at least some winners in redistribution"
@@ -1405,7 +1373,6 @@ async fn roundtrip_task(
         "Expected at least some losers in redistribution"
     );
 
-    // Verify total accounts for all voters
     let total_categorized =
         redist.winners_count + redist.losers_count + redist.unchanged_count;
     anyhow::ensure!(
@@ -1414,13 +1381,64 @@ async fn roundtrip_task(
         total_categorized
     );
 
-    tracing::info!("✓ Phase 9: VoteCoin redistribution calculated and applied atomically\n");
+    // --- 8.3: Verify Market Ossification & Share Redemption ---
+    tracing::info!("\n--- 8.3: Market Ossification & Share Redemption ---");
 
-    // No need to mine another block - redistribution was applied atomically with consensus
-    // Just wait a moment for any async operations to settle
-    sleep(std::time::Duration::from_secs(1)).await;
+    let ossified_markets = truthcoin_nodes.issuer.rpc_client.list_markets().await?;
+    anyhow::ensure!(
+        ossified_markets.len() == 4,
+        "Expected 4 markets, got {}",
+        ossified_markets.len()
+    );
 
-    // Refresh all wallets to see the redistribution
+    for market_summary in &ossified_markets {
+        let market_data = truthcoin_nodes
+            .issuer
+            .rpc_client
+            .view_market(market_summary.market_id.clone())
+            .await?;
+
+        anyhow::ensure!(
+            market_data.is_some(),
+            "Market {} not found after period resolution",
+            market_summary.market_id
+        );
+
+        let market = market_data.unwrap();
+
+        anyhow::ensure!(
+            market.state == "Ossified",
+            "Expected market {} to be Ossified, got {}",
+            market_summary.market_id,
+            market.state
+        );
+
+        anyhow::ensure!(
+            market.treasury == 0.0,
+            "Expected market {} treasury to be 0 (distributed to shareholders), got {}",
+            market_summary.market_id,
+            market.treasury
+        );
+
+        anyhow::ensure!(
+            market.resolution.is_some(),
+            "Expected market {} to have resolution info",
+            market_summary.market_id
+        );
+
+        let resolution = market.resolution.unwrap();
+        tracing::info!(
+            "  Market {}: {} - {}",
+            &market_summary.market_id[..12],
+            market.state,
+            resolution.summary
+        );
+    }
+
+    // --- 8.4: Verify VoteCoin Conservation in Wallets ---
+    tracing::info!("\n--- 8.4: VoteCoin Conservation ---");
+
+    // Refresh all wallets to see the new UTXOs
     for voter in [
         &truthcoin_nodes.voter_0,
         &truthcoin_nodes.voter_1,
@@ -1432,10 +1450,8 @@ async fn roundtrip_task(
     ] {
         voter.rpc_client.refresh_wallet().await?;
     }
-    sleep(std::time::Duration::from_secs(1)).await;
+    sleep(std::time::Duration::from_millis(500)).await;
 
-    // Take a snapshot of VoteCoin balances for ALL wallets after redistribution
-    tracing::info!("\n=== VoteCoin Snapshot (Post-Redistribution) ===");
     let mut total_votecoin_snapshot = 0u32;
 
     // Include issuer wallet (which has VoteCoin change from transfers)
@@ -1465,7 +1481,6 @@ async fn roundtrip_task(
     {
         let voter_addr_str = voter_addr.to_string();
 
-        // Get ALL VoteCoin across all addresses in this voter's wallet
         let wallet_utxos = voter_node.rpc_client.get_wallet_utxos().await?;
         let balance: u32 = wallet_utxos
             .iter()
@@ -1474,7 +1489,6 @@ async fn roundtrip_task(
 
         total_votecoin_snapshot += balance;
 
-        // Get reputation for context
         let reputation = truthcoin_nodes
             .issuer
             .rpc_client
@@ -1490,18 +1504,17 @@ async fn roundtrip_task(
         );
     }
 
-    tracing::info!("\n  Total VoteCoin: {}", total_votecoin_snapshot);
     tracing::info!(
-        "  Initial Supply: {} (conservation check: {})\n",
+        "  Total VoteCoin: {} (Initial: {}, Conservation: {})",
+        total_votecoin_snapshot,
         INITIAL_VOTECOIN_SUPPLY,
         if total_votecoin_snapshot == INITIAL_VOTECOIN_SUPPLY {
-            "✓ PASS"
+            "PASS"
         } else {
-            "✗ FAIL"
+            "FAIL"
         }
     );
 
-    // Verify VoteCoin conservation
     anyhow::ensure!(
         total_votecoin_snapshot == INITIAL_VOTECOIN_SUPPLY,
         "VoteCoin supply changed! Expected {}, got {}",
@@ -1510,7 +1523,7 @@ async fn roundtrip_task(
     );
 
     tracing::info!(
-        "✓ Phase 10: VoteCoin redistribution applied and verified\n"
+        "\n✓ Phase 8: Period resolution completed (consensus + redistribution + redemption)\n"
     );
 
     tracing::info!("=== Test Summary ===");
@@ -1522,9 +1535,7 @@ async fn roundtrip_task(
     tracing::info!("  5. Voting period transition");
     tracing::info!("  6. Vote submission");
     tracing::info!("  7. Period closure");
-    tracing::info!("  8. Consensus resolution");
-    tracing::info!("  9. VoteCoin redistribution calculation");
-    tracing::info!(" 10. VoteCoin redistribution application & verification\n");
+    tracing::info!("  8. Period resolution (consensus + redistribution + redemption)\n");
 
     // Cleanup
     {

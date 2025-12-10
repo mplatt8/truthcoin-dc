@@ -866,14 +866,6 @@ impl State {
         MarketValidator::validate_buy_shares(self, rotxn, tx, override_height)
     }
 
-    pub fn validate_share_redemption(
-        &self,
-        rotxn: &RoTxn,
-        tx: &FilledTransaction,
-    ) -> Result<(), Error> {
-        MarketValidator::validate_share_redemption(self, rotxn, tx)
-    }
-
     pub fn validate_filled_transaction(
         &self,
         rotxn: &RoTxn,
@@ -943,9 +935,11 @@ impl State {
             .transaction
             .data
             .as_ref()
-            .map_or(false, |data| data.is_redeem_shares())
+            .map_or(false, |data| data.is_claim_author_fees())
         {
-            self.validate_share_redemption(rotxn, tx)?;
+            crate::validation::MarketValidator::validate_claim_author_fees(
+                self, rotxn, tx,
+            )?;
         }
 
         tx.bitcoin_fee()?.ok_or(Error::NotEnoughValueIn)

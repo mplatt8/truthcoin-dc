@@ -1099,22 +1099,19 @@ where
         Ok(self.state.markets().get_all_markets(&rotxn)?)
     }
 
-    /// Get all markets with their computed states
-    /// Uses SlotStateHistory to determine actual market state
     pub fn get_all_markets_with_states(
         &self,
     ) -> Result<Vec<(crate::state::Market, crate::state::MarketState)>, Error>
     {
         let rotxn = self.env.read_txn()?;
         let markets = self.state.markets().get_all_markets(&rotxn)?;
-
-        let mut result = Vec::with_capacity(markets.len());
-        for market in markets {
-            let computed_state =
-                market.compute_state(self.state.slots(), &rotxn)?;
-            result.push((market, computed_state));
-        }
-
+        let result = markets
+            .into_iter()
+            .map(|market| {
+                let state = market.state();
+                (market, state)
+            })
+            .collect();
         Ok(result)
     }
 
@@ -1136,8 +1133,6 @@ where
         Ok(self.state.markets().get_market(&rotxn, market_id)?)
     }
 
-    /// Get a specific market by its ID with computed state
-    /// Uses SlotStateHistory to determine actual market state
     pub fn get_market_by_id_with_state(
         &self,
         market_id: &crate::state::MarketId,
@@ -1147,9 +1142,8 @@ where
         if let Some(market) =
             self.state.markets().get_market(&rotxn, market_id)?
         {
-            let computed_state =
-                market.compute_state(self.state.slots(), &rotxn)?;
-            Ok(Some((market, computed_state)))
+            let state = market.state();
+            Ok(Some((market, state)))
         } else {
             Ok(None)
         }
@@ -1218,6 +1212,15 @@ where
             .state
             .markets()
             .get_market_user_positions(&rotxn, address, market_id)?)
+    }
+
+    /// Get all share accounts from the database (for debugging)
+    /// Returns Vec of (Address, Vec<(MarketId, outcome_index, shares)>)
+    pub fn get_all_share_accounts(
+        &self,
+    ) -> Result<Vec<(crate::types::Address, Vec<(crate::state::MarketId, u32, f64)>)>, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self.state.markets().get_all_share_accounts(&rotxn)?)
     }
 
     // Voting RPC Accessor Methods

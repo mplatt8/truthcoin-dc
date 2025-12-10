@@ -76,28 +76,37 @@ pub fn get_decision_slots_for_period(
 pub fn calculate_voting_period(
     rotxn: &RoTxn,
     period_id: VotingPeriodId,
+    current_height: u32,
     current_timestamp: u64,
     config: &SlotConfig,
     slots_db: &SlotsDbs,
     has_outcomes: bool,
 ) -> Result<VotingPeriod, Error> {
-    let (start_timestamp, end_timestamp) =
+    let (start_boundary, end_boundary) =
         calculate_period_boundaries(period_id.as_u32(), config);
 
     let decision_slots =
         get_decision_slots_for_period(rotxn, period_id, slots_db)?;
 
+    // In testing mode, boundaries are block heights, so compare against current_height.
+    // In production mode, boundaries are timestamps, so compare against current_timestamp.
+    let effective_current = if config.testing_mode {
+        current_height as u64
+    } else {
+        current_timestamp
+    };
+
     let status = calculate_period_status(
-        start_timestamp,
-        end_timestamp,
-        current_timestamp,
+        start_boundary,
+        end_boundary,
+        effective_current,
         has_outcomes,
     );
 
     let mut period = VotingPeriod::new(
         period_id,
-        start_timestamp,
-        end_timestamp,
+        start_boundary,
+        end_boundary,
         decision_slots,
     );
 
@@ -111,6 +120,7 @@ pub fn get_all_active_periods(
     slots_db: &SlotsDbs,
     config: &SlotConfig,
     current_timestamp: u64,
+    current_height: u32,
     voting_db: &crate::state::voting::database::VotingDatabases,
 ) -> Result<HashMap<VotingPeriodId, VotingPeriod>, Error> {
     let all_slots = slots_db.get_all_claimed_slots(rotxn)?;
@@ -129,20 +139,28 @@ pub fn get_all_active_periods(
         let period_id = VotingPeriodId::new(period_index);
         let has_outcomes = voting_db.has_consensus(rotxn, period_id)?;
 
-        let (start_timestamp, end_timestamp) =
+        let (start_boundary, end_boundary) =
             calculate_period_boundaries(period_index, config);
 
+        // In testing mode, boundaries are block heights, so compare against current_height.
+        // In production mode, boundaries are timestamps, so compare against current_timestamp.
+        let effective_current = if config.testing_mode {
+            current_height as u64
+        } else {
+            current_timestamp
+        };
+
         let status = calculate_period_status(
-            start_timestamp,
-            end_timestamp,
-            current_timestamp,
+            start_boundary,
+            end_boundary,
+            effective_current,
             has_outcomes,
         );
 
         let period = VotingPeriod {
             id: period_id,
-            start_timestamp,
-            end_timestamp,
+            start_timestamp: start_boundary,
+            end_timestamp: end_boundary,
             status,
             decision_slots,
         };

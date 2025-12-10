@@ -871,6 +871,45 @@ impl RpcServer for RpcServerImpl {
 
         // computed_state already obtained above from SlotStateHistory
 
+        // Build resolution info for ossified markets
+        let resolution = if computed_state == truthcoin_dc::state::markets::MarketState::Ossified {
+            let final_prices = market.final_prices();
+            let mut winning_outcomes = Vec::new();
+
+            for (i, (state_idx, _combo)) in valid_state_combos.iter().enumerate() {
+                let final_price = final_prices[*state_idx];
+                if final_price > 0.0 {
+                    let name = match market.describe_outcome_by_state(*state_idx, &decisions) {
+                        Ok(description) => description,
+                        Err(_) => format!("Outcome {}", state_idx),
+                    };
+                    winning_outcomes.push(truthcoin_dc_app_rpc_api::WinningOutcome {
+                        outcome_index: i,
+                        outcome_name: name,
+                        final_price,
+                    });
+                }
+            }
+
+            let summary = if winning_outcomes.len() == 1 {
+                format!("Resolved: {}", winning_outcomes[0].outcome_name)
+            } else if winning_outcomes.is_empty() {
+                "No winning outcome".to_string()
+            } else {
+                let names: Vec<String> = winning_outcomes.iter()
+                    .map(|w| format!("{} ({:.1}%)", w.outcome_name, w.final_price * 100.0))
+                    .collect();
+                format!("Resolved: {}", names.join(", "))
+            };
+
+            Some(truthcoin_dc_app_rpc_api::MarketResolution {
+                winning_outcomes,
+                summary,
+            })
+        } else {
+            None
+        };
+
         let market_data = truthcoin_dc_app_rpc_api::MarketData {
             market_id,
             title: market.title.clone(),
@@ -887,35 +926,56 @@ impl RpcServer for RpcServerImpl {
             total_volume,
             liquidity: market.treasury(),
             decision_slots,
+            resolution,
         };
 
         Ok(Some(market_data))
     }
 
-    async fn redeem_shares(
+    async fn debug_market_shares(
         &self,
         market_id: String,
-        outcome_index: usize,
-        shares_amount: f64,
-        fee_sats: u64,
-    ) -> RpcResult<String> {
+    ) -> RpcResult<Option<Vec<f64>>> {
         let market_id_struct = parse_market_id(&market_id)?;
 
-        let tx = self
+        let market = match self
             .app
-            .wallet
-            .redeem_shares(
-                market_id_struct,
-                outcome_index,
-                shares_amount,
-                bitcoin::Amount::from_sat(fee_sats),
-            )
+            .node
+            .get_market_by_id(&market_id_struct)
+            .map_err(custom_err)?
+        {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+
+        let shares: Vec<f64> = market.shares().to_vec();
+        Ok(Some(shares))
+    }
+
+    async fn debug_all_share_accounts(&self) -> RpcResult<String> {
+        let all_accounts = self
+            .app
+            .node
+            .get_all_share_accounts()
             .map_err(custom_err)?;
 
-        let txid = tx.txid();
-        self.app.sign_and_send(tx).map_err(custom_err)?;
+        if all_accounts.is_empty() {
+            return Ok("No share accounts found.".to_string());
+        }
 
-        Ok(format!("{}", txid))
+        let mut output = format!("Share Accounts ({} total):\n", all_accounts.len());
+        output.push_str("=====================================\n\n");
+        for (address, positions) in all_accounts {
+            output.push_str(&format!("Address: {}\n", address));
+            for (market_id, outcome, shares) in positions {
+                output.push_str(&format!(
+                    "  Market: {} | Outcome: {} | Shares: {:.4}\n",
+                    market_id, outcome, shares
+                ));
+            }
+            output.push_str("\n");
+        }
+        Ok(output)
     }
 
     async fn create_market(
@@ -948,10 +1008,7 @@ impl RpcServer for RpcServerImpl {
 
         self.app.sign_and_send(tx).map_err(custom_err)?;
 
-        let market_id_bytes = &txid.as_slice()[..6];
-        let market_id_hex = hex::encode(market_id_bytes);
-
-        Ok(market_id_hex)
+        Ok(txid.to_string())
     }
 
     async fn calculate_initial_liquidity(
@@ -1377,6 +1434,9 @@ impl RpcServer for RpcServerImpl {
                     custom_err_msg(format!("Invalid decision ID: {}", e))
                 })?;
 
+        // Extract voting period from slot ID (period is encoded in decision_id)
+        let period_id = slot_id.voting_period();
+
         let fee = bitcoin::Amount::from_sat(request.fee_sats);
 
         let tx = self
@@ -1385,7 +1445,7 @@ impl RpcServer for RpcServerImpl {
             .submit_vote(
                 slot_id.as_bytes(),
                 request.vote_value,
-                request.period_id,
+                period_id,
                 fee,
             )
             .map_err(custom_err)?;
@@ -1408,8 +1468,10 @@ impl RpcServer for RpcServerImpl {
             return Err(custom_err_msg("Batch cannot be empty"));
         }
 
-        // Parse and convert all vote items
+        // Parse and convert all vote items, extracting period from first vote
         let mut batch_items = Vec::new();
+        let mut period_id: Option<u32> = None;
+
         for vote in request.votes {
             let slot_id =
                 SlotValidator::parse_slot_id_from_hex(&vote.decision_id)
@@ -1417,18 +1479,33 @@ impl RpcServer for RpcServerImpl {
                         custom_err_msg(format!("Invalid decision ID: {}", e))
                     })?;
 
+            let vote_period = slot_id.voting_period();
+
+            // Verify all votes are for the same voting period
+            match period_id {
+                None => period_id = Some(vote_period),
+                Some(p) if p != vote_period => {
+                    return Err(custom_err_msg(format!(
+                        "All votes in batch must be for same period. Expected {}, got {} for decision {}",
+                        p, vote_period, vote.decision_id
+                    )));
+                }
+                _ => {}
+            }
+
             batch_items.push(VoteBatchItem {
                 slot_id_bytes: slot_id.as_bytes(),
                 vote_value: vote.vote_value,
             });
         }
 
+        let period_id = period_id.unwrap(); // Safe: we checked votes is not empty
         let fee = bitcoin::Amount::from_sat(request.fee_sats);
 
         let tx = self
             .app
             .wallet
-            .submit_vote_batch(batch_items, request.period_id, fee)
+            .submit_vote_batch(batch_items, period_id, fee)
             .map_err(custom_err)?;
 
         let txid = tx.txid();
@@ -1487,6 +1564,8 @@ impl RpcServer for RpcServerImpl {
 
         let voting_period_id = VotingPeriodId::new(period_id);
 
+        let current_height =
+            self.node().try_get_tip_height().map_err(custom_err)?.unwrap_or(0);
         let current_timestamp =
             self.node().get_last_block_timestamp().map_err(custom_err)?;
 
@@ -1504,6 +1583,7 @@ impl RpcServer for RpcServerImpl {
         let period = match truthcoin_dc::state::voting::period_calculator::calculate_voting_period(
             &rotxn,
             voting_period_id,
+            current_height,
             current_timestamp,
             config,
             slots_db,
@@ -1643,6 +1723,8 @@ impl RpcServer for RpcServerImpl {
         let rotxn = self.node().read_txn().map_err(custom_err)?;
         let voting_period_id = VotingPeriodId::new(period_id);
 
+        let current_height =
+            self.node().try_get_tip_height().map_err(custom_err)?.unwrap_or(0);
         let current_timestamp =
             self.node().get_last_block_timestamp().map_err(custom_err)?;
 
@@ -1660,6 +1742,7 @@ impl RpcServer for RpcServerImpl {
         let period = match truthcoin_dc::state::voting::period_calculator::calculate_voting_period(
             &rotxn,
             voting_period_id,
+            current_height,
             current_timestamp,
             config,
             slots_db,
@@ -1805,6 +1888,7 @@ impl RpcServer for RpcServerImpl {
                 })?
                 .as_secs();
 
+            let current_height = self.node().try_get_tip_height().map_err(custom_err)?.unwrap_or(0);
             let config = self.node().get_slot_config();
             let slots_db = self.node().get_slots_db();
 
@@ -1812,7 +1896,7 @@ impl RpcServer for RpcServerImpl {
                 .app
                 .node
                 .voting_state()
-                .get_active_period(&rotxn, current_timestamp, config, slots_db)
+                .get_active_period(&rotxn, current_timestamp, current_height, config, slots_db)
                 .map_err(custom_err)?;
 
             let Some(period) = active_period_opt else {

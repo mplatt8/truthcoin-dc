@@ -140,6 +140,23 @@ pub struct MarketData {
     pub total_volume: f64,
     pub liquidity: f64,
     pub decision_slots: Vec<String>,
+    /// For ossified markets: the winning outcome(s) with their final prices
+    pub resolution: Option<MarketResolution>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct MarketResolution {
+    /// List of winning outcomes with their payout multipliers
+    pub winning_outcomes: Vec<WinningOutcome>,
+    /// Human-readable summary of the resolution
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct WinningOutcome {
+    pub outcome_index: usize,
+    pub outcome_name: String,
+    pub final_price: f64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -222,7 +239,6 @@ pub struct RegisterVoterRequest {
 pub struct SubmitVoteRequest {
     pub decision_id: String,
     pub vote_value: f64,
-    pub period_id: u32,
     pub fee_sats: u64,
 }
 
@@ -235,7 +251,6 @@ pub struct VoteBatchItem {
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct SubmitVoteBatchRequest {
     pub votes: Vec<VoteBatchItem>,
-    pub period_id: u32,
     pub fee_sats: u64,
 }
 
@@ -667,6 +682,17 @@ pub trait Rpc {
         market_id: String,
     ) -> RpcResult<Option<MarketData>>;
 
+    /// Debug: Get raw market shares array for debugging LMSR calculations
+    #[method(name = "debug_market_shares")]
+    async fn debug_market_shares(
+        &self,
+        market_id: String,
+    ) -> RpcResult<Option<Vec<f64>>>;
+
+    /// Debug: Get all share accounts from the database (returns JSON string)
+    #[method(name = "debug_all_share_accounts")]
+    async fn debug_all_share_accounts(&self) -> RpcResult<String>;
+
     /// Calculate initial liquidity required for market creation based on beta parameter
     /// Uses formula: Initial Liquidity = β × ln(Number of States in the Market)
     /// Helpful for previewing costs and GUI parameter selection
@@ -716,16 +742,6 @@ pub trait Rpc {
         outcome_index: usize,
         shares_amount: f64,
     ) -> RpcResult<u64>; // Returns cost in sats
-
-    /// Redeem shares in a resolved prediction market
-    #[method(name = "redeem_shares")]
-    async fn redeem_shares(
-        &self,
-        market_id: String,
-        outcome_index: usize,
-        shares_amount: f64,
-        fee_sats: u64, // Transaction fee
-    ) -> RpcResult<String>; // Returns transaction ID
 
     /// Register as a voter in the Bitcoin Hivemind voting system
     /// This is a one-time registration that establishes voter identity and reputation bond

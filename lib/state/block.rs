@@ -26,12 +26,12 @@ struct StateUpdate {
 
 struct MarketStateUpdate {
     market_id: MarketId,
-    new_shares: Option<Array<f64, Ix1>>,
+    /// Share delta: (outcome_index, shares_to_add)
+    share_delta: Option<(usize, f64)>,
     new_beta: Option<f64>,
     trader_address: Option<Address>,
     trade_cost: Option<f64>,
     transaction_id: Option<[u8; 32]>,
-    outcome_index: Option<u32>,
     volume_sats: Option<u64>,
     /// Trading fee collected for the market author (in satoshis)
     fee_sats: Option<u64>,
@@ -128,9 +128,12 @@ impl StateUpdate {
         self.verify_internal_consistency()?;
 
         for update in &self.market_updates {
-            if let Some(ref shares) = update.new_shares {
-                if let Some(beta) = update.new_beta {
-                    crate::validation::MarketValidator::validate_lmsr_parameters(beta, shares)?;
+            // Validate beta if provided (share deltas don't need LMSR validation here)
+            if let Some(beta) = update.new_beta {
+                if beta <= 0.0 {
+                    return Err(Error::InvalidSlotId {
+                        reason: "Beta must be positive".to_string(),
+                    });
                 }
             }
 
@@ -203,77 +206,108 @@ impl StateUpdate {
                 })?;
         }
 
+        // Aggregate share deltas per market before applying
+        let mut aggregated_deltas: std::collections::HashMap<
+            MarketId,
+            Vec<(usize, f64, Option<u64>, Option<u64>, Option<[u8; 32]>)>,
+        > = std::collections::HashMap::new();
+
         for update in &self.market_updates {
-            if let Some(ref new_shares) = update.new_shares {
-                let mut market = state
-                    .markets()
-                    .get_market(rwtxn, &update.market_id)?
-                    .ok_or_else(|| Error::InvalidSlotId {
-                        reason: format!(
-                            "Market {:?} not found",
-                            update.market_id
-                        ),
-                    })?;
-
-                let new_treasury =
-                    LmsrService::calculate_treasury(new_shares, market.b())
-                        .map_err(|e| Error::InvalidSlotId {
-                            reason: format!(
-                                "Treasury calculation failed: {:?}",
-                                e
-                            ),
-                        })?;
-
-                // Use create_new_state_version_with_fees to accumulate trading fees for the market author
-                let _new_state_hash = market
-                    .create_new_state_version_with_fees(
-                        update.transaction_id,
-                        height as u64,
-                        None,
-                        None,
-                        None,
-                        Some(new_shares.clone()),
-                        None,
-                        Some(new_treasury),
+            if let Some((outcome_index, delta)) = update.share_delta {
+                aggregated_deltas
+                    .entry(update.market_id.clone())
+                    .or_default()
+                    .push((
+                        outcome_index,
+                        delta,
+                        update.volume_sats,
                         update.fee_sats,
-                    )
-                    .map_err(|e| Error::InvalidSlotId {
-                        reason: format!(
-                            "Failed to create new market state: {:?}",
-                            e
-                        ),
-                    })?;
+                        update.transaction_id,
+                    ));
+            }
+        }
 
-                if let (Some(outcome_index), Some(volume_sats)) =
-                    (update.outcome_index, update.volume_sats)
-                {
+        // Apply aggregated deltas to each market
+        for (market_id, deltas) in aggregated_deltas {
+            let mut market = state
+                .markets()
+                .get_market(rwtxn, &market_id)?
+                .ok_or_else(|| Error::InvalidSlotId {
+                    reason: format!("Market {:?} not found", market_id),
+                })?;
+
+            let mut new_shares = market.shares().clone();
+            let mut total_fee_sats: u64 = 0;
+            let mut last_txid: Option<[u8; 32]> = None;
+
+            // Apply all deltas for this market
+            for (outcome_index, delta, volume_sats, fee_sats, txid) in &deltas {
+                new_shares[*outcome_index] += delta;
+                if let Some(fee) = fee_sats {
+                    total_fee_sats += fee;
+                }
+                if let Some(vol) = volume_sats {
                     market
-                        .update_trading_volume(
-                            outcome_index as usize,
-                            volume_sats,
-                        )
+                        .update_trading_volume(*outcome_index, *vol)
                         .map_err(|e| Error::InvalidSlotId {
                             reason: format!("Failed to update volume: {:?}", e),
                         })?;
                 }
-
-                state.markets().update_market(rwtxn, &market)?;
-
-                state.clear_mempool_shares(rwtxn, &update.market_id)?;
-
-                if let (Some(trader), Some(cost)) =
-                    (&update.trader_address, update.trade_cost)
-                {
-                    let _ = (trader, cost);
-                }
+                last_txid = *txid;
             }
+
+            let new_treasury =
+                LmsrService::calculate_treasury(&new_shares, market.b())
+                    .map_err(|e| Error::InvalidSlotId {
+                        reason: format!("Treasury calculation failed: {:?}", e),
+                    })?;
+
+            let _new_state_hash = market
+                .create_new_state_version_with_fees(
+                    last_txid,
+                    height as u64,
+                    None,
+                    None,
+                    None,
+                    Some(new_shares),
+                    None,
+                    Some(new_treasury),
+                    if total_fee_sats > 0 {
+                        Some(total_fee_sats)
+                    } else {
+                        None
+                    },
+                )
+                .map_err(|e| Error::InvalidSlotId {
+                    reason: format!("Failed to create new market state: {:?}", e),
+                })?;
+
+            state.markets().update_market(rwtxn, &market)?;
+            state.clear_mempool_shares(rwtxn, &market_id)?;
         }
+
+        tracing::info!(
+            "apply_all_changes: Processing {} share account changes",
+            self.share_account_changes.len()
+        );
 
         for ((address, market_id), outcome_changes) in
             &self.share_account_changes
         {
+            tracing::info!(
+                "  Share account change: address={}, market={}, outcomes={:?}",
+                address,
+                market_id,
+                outcome_changes
+            );
             for (&outcome_index, &share_delta) in outcome_changes {
                 if share_delta != 0.0 {
+                    tracing::info!(
+                        "    Adding {} shares for outcome {} to address {}",
+                        share_delta,
+                        outcome_index,
+                        address
+                    );
                     if share_delta > 0.0 {
                         state.markets().add_shares_to_account(
                             rwtxn,
@@ -527,6 +561,7 @@ pub fn connect(
             let period_info = crate::state::voting::period_calculator::calculate_voting_period(
                 rwtxn,
                 crate::state::voting::types::VotingPeriodId(voting_period),
+                height,
                 mainchain_timestamp,
                 state.slots().get_config(),
                 state.slots(),
@@ -551,6 +586,7 @@ pub fn connect(
     let all_periods = state.voting().get_all_periods(
         rwtxn,
         mainchain_timestamp,
+        height,
         state.slots().get_config(),
         state.slots(),
     )?;
@@ -592,6 +628,30 @@ pub fn connect(
                         period_id.0
                     );
                 }
+            }
+        }
+    }
+
+    let current_period = state.slots().block_height_to_testing_period(height);
+
+    {
+        // Automatically transition resolved markets to Ossified with share payouts
+        let payout_results = state.markets().transition_and_payout_resolved_markets(
+            rwtxn,
+            state,
+            state.slots(),
+            height,
+        )?;
+
+        if !payout_results.is_empty() {
+            for (market_id, summary) in &payout_results {
+                tracing::info!(
+                    "Protocol: Market {} auto-ossified with {} sats treasury + {} sats fees distributed to {} shareholders",
+                    market_id,
+                    summary.treasury_distributed,
+                    summary.author_fees_distributed,
+                    summary.shareholder_count
+                );
             }
         }
     }
@@ -655,15 +715,6 @@ pub fn connect(
             }
             Some(TxData::CreateMarketDimensional { .. }) => {
                 apply_dimensional_market(
-                    state,
-                    rwtxn,
-                    &filled_tx,
-                    &mut state_update,
-                    height,
-                )?;
-            }
-            Some(TxData::RedeemShares { .. }) => {
-                apply_share_redemption(
                     state,
                     rwtxn,
                     &filled_tx,
@@ -772,9 +823,6 @@ pub fn disconnect_tip(
             }
             Some(TxData::BuyShares { .. }) => {
                 let () = revert_buy_shares(state, rwtxn, &filled_tx)?;
-            }
-            Some(TxData::RedeemShares { .. }) => {
-                let () = revert_redeem_shares(state, rwtxn, &filled_tx)?;
             }
             Some(TxData::SubmitVote { .. }) => {
                 let () = revert_submit_vote(state, rwtxn, &filled_tx)?;
@@ -986,39 +1034,6 @@ fn revert_create_market_dimensional(
     Ok(())
 }
 
-fn apply_redeem_shares(
-    state: &State,
-    rwtxn: &mut RwTxn,
-    filled_tx: &FilledTransaction,
-    height: u32,
-) -> Result<(), Error> {
-    let redeem_data =
-        filled_tx
-            .redeem_shares()
-            .ok_or_else(|| Error::InvalidSlotId {
-                reason: "Not a redeem shares transaction".to_string(),
-            })?;
-
-    let trader_address = filled_tx
-        .spent_utxos
-        .first()
-        .ok_or_else(|| Error::InvalidSlotId {
-            reason: "Redeem shares transaction must have inputs".to_string(),
-        })?
-        .address;
-
-    state.markets().apply_share_redemption(
-        rwtxn,
-        &trader_address,
-        redeem_data.market_id,
-        redeem_data.outcome_index,
-        redeem_data.shares_to_redeem,
-        height as u64,
-    )?;
-
-    Ok(())
-}
-
 fn revert_buy_shares(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -1045,40 +1060,6 @@ fn revert_buy_shares(
         buy_data.market_id,
         buy_data.outcome_index,
         buy_data.shares_to_buy,
-        height as u64,
-    )?;
-
-    Ok(())
-}
-
-fn revert_redeem_shares(
-    state: &State,
-    rwtxn: &mut RwTxn,
-    filled_tx: &FilledTransaction,
-) -> Result<(), Error> {
-    let redeem_data =
-        filled_tx
-            .redeem_shares()
-            .ok_or_else(|| Error::InvalidSlotId {
-                reason: "Not a redeem shares transaction".to_string(),
-            })?;
-
-    let trader_address = filled_tx
-        .spent_utxos
-        .first()
-        .ok_or_else(|| Error::InvalidSlotId {
-            reason: "Redeem shares transaction must have inputs".to_string(),
-        })?
-        .address;
-
-    let height = state.try_get_height(rwtxn)?.unwrap_or(0);
-
-    state.markets().revert_share_redemption(
-        rwtxn,
-        &trader_address,
-        redeem_data.market_id,
-        redeem_data.outcome_index,
-        redeem_data.shares_to_redeem,
         height as u64,
     )?;
 
@@ -1150,7 +1131,7 @@ fn apply_market_trade(
             reason: format!("Market {:?} does not exist", buy_data.market_id),
         })?;
 
-    let market_state = market.compute_state(state.slots(), rwtxn)?;
+    let market_state = market.state();
     if !market_state.allows_trading() {
         return Err(Error::InvalidSlotId {
             reason: format!(
@@ -1160,8 +1141,12 @@ fn apply_market_trade(
         });
     }
 
+    let outcome_index = buy_data.outcome_index as usize;
+    let shares_to_buy = buy_data.shares_to_buy;
+
+    // Calculate cost based on current market state
     let mut new_shares = market.shares().clone();
-    new_shares[buy_data.outcome_index as usize] += buy_data.shares_to_buy;
+    new_shares[outcome_index] += shares_to_buy;
 
     let base_cost =
         query_update_cost(&market.shares(), &new_shares, market.b()).map_err(
@@ -1196,15 +1181,22 @@ fn apply_market_trade(
 
     state_update.add_market_update(MarketStateUpdate {
         market_id: buy_data.market_id.clone(),
-        new_shares: Some(new_shares),
+        share_delta: Some((outcome_index, shares_to_buy)),
         new_beta: None,
         trader_address: Some(trader_address),
         trade_cost: Some(total_cost),
         transaction_id: Some(filled_tx.transaction.txid().0),
-        outcome_index: Some(buy_data.outcome_index),
         volume_sats: Some(volume_sats),
         fee_sats: Some(fee_sats),
     });
+
+    tracing::info!(
+        "apply_market_trade: Adding share account change - trader={}, market={}, outcome={}, shares={}",
+        trader_address,
+        buy_data.market_id,
+        buy_data.outcome_index,
+        buy_data.shares_to_buy
+    );
 
     state_update.add_share_account_change(
         trader_address,
@@ -1381,15 +1373,6 @@ fn apply_dimensional_market(
     });
 
     Ok(())
-}
-fn apply_share_redemption(
-    state: &State,
-    rwtxn: &mut RwTxn,
-    filled_tx: &FilledTransaction,
-    _state_update: &mut StateUpdate,
-    height: u32,
-) -> Result<(), Error> {
-    apply_redeem_shares(state, rwtxn, filled_tx, height)
 }
 fn apply_slot_claim(
     state: &State,

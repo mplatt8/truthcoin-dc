@@ -221,9 +221,7 @@ pub enum SlotState {
     Created,
     Claimed,
     Voting,
-    Redistribution,
     Resolved,
-    Ossified,
     Invalid,
 }
 
@@ -233,16 +231,14 @@ impl SlotState {
         match (self, new_state) {
             (Created, Claimed) => true,
             (Claimed, Voting) => true,
-            (Voting, Redistribution) => true,
-            (Redistribution, Resolved) => true,
-            (Resolved, Ossified) => true,
+            (Voting, Resolved) => true,
             (_, Invalid) => true,
             _ => false,
         }
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, SlotState::Ossified | SlotState::Invalid)
+        matches!(self, SlotState::Resolved | SlotState::Invalid)
     }
 
     pub fn allows_voting(&self) -> bool {
@@ -250,12 +246,7 @@ impl SlotState {
     }
 
     pub fn has_consensus(&self) -> bool {
-        matches!(
-            self,
-            SlotState::Redistribution
-                | SlotState::Resolved
-                | SlotState::Ossified
-        )
+        matches!(self, SlotState::Resolved)
     }
 }
 
@@ -327,18 +318,15 @@ impl SlotStateHistory {
         Ok(())
     }
 
-    pub fn transition_to_redistribution(
+    pub fn transition_to_resolved(
         &mut self,
         consensus_outcome: f64,
         height: u32,
     ) -> Result<(), Error> {
-        if !self
-            .current_state
-            .can_transition_to(SlotState::Redistribution)
-        {
+        if !self.current_state.can_transition_to(SlotState::Resolved) {
             return Err(Error::InvalidSlotState {
                 reason: format!(
-                    "Cannot transition to Redistribution from {:?}",
+                    "Cannot transition to Resolved from {:?}",
                     self.current_state
                 ),
             });
@@ -353,41 +341,11 @@ impl SlotStateHistory {
             });
         }
 
-        self.current_state = SlotState::Redistribution;
+        self.current_state = SlotState::Resolved;
         self.state_changed_at_height = height;
         self.consensus_outcome =
             Some((consensus_outcome * 10000.0).round() as u16);
-        self.state_history.push((SlotState::Redistribution, height));
-        Ok(())
-    }
-
-    pub fn transition_to_resolved(&mut self, height: u32) -> Result<(), Error> {
-        if !self.current_state.can_transition_to(SlotState::Resolved) {
-            return Err(Error::InvalidSlotState {
-                reason: format!(
-                    "Cannot transition to Resolved from {:?}",
-                    self.current_state
-                ),
-            });
-        }
-        self.current_state = SlotState::Resolved;
-        self.state_changed_at_height = height;
         self.state_history.push((SlotState::Resolved, height));
-        Ok(())
-    }
-
-    pub fn transition_to_ossified(&mut self, height: u32) -> Result<(), Error> {
-        if !self.current_state.can_transition_to(SlotState::Ossified) {
-            return Err(Error::InvalidSlotState {
-                reason: format!(
-                    "Cannot transition to Ossified from {:?}",
-                    self.current_state
-                ),
-            });
-        }
-        self.current_state = SlotState::Ossified;
-        self.state_changed_at_height = height;
-        self.state_history.push((SlotState::Ossified, height));
         Ok(())
     }
 
@@ -458,23 +416,6 @@ impl SlotStateHistory {
         self.transition_to_voting(voting_period, block_height as u32)
     }
 
-    pub fn transition_to_redistribution_with_bool(
-        &mut self,
-        block_height: u64,
-        _timestamp: u64,
-        consensus_outcome: bool,
-    ) -> Result<(), Error> {
-        let outcome_f64 = if consensus_outcome { 1.0 } else { 0.0 };
-        self.transition_to_redistribution(outcome_f64, block_height as u32)
-    }
-
-    pub fn transition_to_resolved_with_timestamp(
-        &mut self,
-        block_height: u64,
-        _timestamp: u64,
-    ) -> Result<(), Error> {
-        self.transition_to_resolved(block_height as u32)
-    }
 }
 
 #[derive(
@@ -1293,57 +1234,14 @@ impl Dbs {
         Ok(())
     }
 
-    /// Transition slot to redistribution state
-    pub fn transition_slot_to_redistribution(
-        &self,
-        rwtxn: &mut RwTxn,
-        slot_id: SlotId,
-        block_height: u64,
-        timestamp: u64,
-        consensus_outcome: bool,
-    ) -> Result<(), Error> {
-        let mut history = self.get_slot_state_history(rwtxn, slot_id)?.ok_or(
-            Error::InvalidSlotId {
-                reason: format!("Slot {:?} has no state history", slot_id),
-            },
-        )?;
-
-        history.transition_to_redistribution_with_bool(
-            block_height,
-            timestamp,
-            consensus_outcome,
-        )?;
-        self.slot_state_histories.put(rwtxn, &slot_id, &history)?;
-        Ok(())
-    }
-
-    /// Transition slot to resolved state
+    /// Transition slot to resolved state with consensus outcome
     pub fn transition_slot_to_resolved(
         &self,
         rwtxn: &mut RwTxn,
         slot_id: SlotId,
         block_height: u64,
-        timestamp: u64,
-    ) -> Result<(), Error> {
-        let mut history = self.get_slot_state_history(rwtxn, slot_id)?.ok_or(
-            Error::InvalidSlotId {
-                reason: format!("Slot {:?} has no state history", slot_id),
-            },
-        )?;
-
-        history
-            .transition_to_resolved_with_timestamp(block_height, timestamp)?;
-        self.slot_state_histories.put(rwtxn, &slot_id, &history)?;
-        Ok(())
-    }
-
-    /// Transition slot to ossified state
-    pub fn transition_slot_to_ossified(
-        &self,
-        rwtxn: &mut RwTxn,
-        slot_id: SlotId,
-        block_height: u64,
         _timestamp: u64,
+        consensus_outcome: f64,
     ) -> Result<(), Error> {
         let mut history = self.get_slot_state_history(rwtxn, slot_id)?.ok_or(
             Error::InvalidSlotId {
@@ -1351,7 +1249,7 @@ impl Dbs {
             },
         )?;
 
-        history.transition_to_ossified(block_height as u32)?;
+        history.transition_to_resolved(consensus_outcome, block_height as u32)?;
         self.slot_state_histories.put(rwtxn, &slot_id, &history)?;
         Ok(())
     }
@@ -1372,28 +1270,6 @@ impl Dbs {
         }
 
         Ok(slots_in_state)
-    }
-
-    /// Get all slots in redistribution state for a specific period
-    pub fn get_slots_pending_redistribution(
-        &self,
-        rotxn: &RoTxn,
-        period: u32,
-    ) -> Result<Vec<SlotId>, Error> {
-        let mut redistribution_slots = Vec::new();
-
-        let mut iter = self.slot_state_histories.iter(rotxn)?;
-        while let Some((slot_id, history)) = iter.next()? {
-            if history.current_state() == SlotState::Redistribution {
-                if let Some(voting_period) = history.get_voting_period() {
-                    if voting_period == period {
-                        redistribution_slots.push(slot_id);
-                    }
-                }
-            }
-        }
-
-        Ok(redistribution_slots)
     }
 
     /// Check if a slot has reached consensus

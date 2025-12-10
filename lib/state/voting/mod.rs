@@ -282,54 +282,28 @@ impl VotingSystem {
             slots_in_period.push(*slot_id);
         }
 
-        // Transition slots through the full lifecycle atomically
-        // Slots with unanimous abstention (None outcome) are handled differently
+        // Transition all slots to Resolved atomically
+        // Slots with no votes resolve to 0.5 (neutral outcome)
         for slot_id in &slots_in_period {
-            let outcome_opt = consensus_result.outcomes.get(slot_id).and_then(|v| *v);
+            let outcome_value = consensus_result
+                .outcomes
+                .get(slot_id)
+                .and_then(|v| *v)
+                .unwrap_or(0.5); // No votes = neutral outcome
 
-            match outcome_opt {
-                Some(outcome_value) => {
-                    // Normal case: slot has consensus outcome
-                    let consensus_outcome = outcome_value > 0.5;
+            slots_db.transition_slot_to_resolved(
+                rwtxn,
+                *slot_id,
+                current_height,
+                current_timestamp,
+                outcome_value,
+            )?;
 
-                    slots_db.transition_slot_to_redistribution(
-                        rwtxn,
-                        *slot_id,
-                        current_height,
-                        current_timestamp,
-                        consensus_outcome,
-                    )?;
-
-                    slots_db.transition_slot_to_resolved(
-                        rwtxn,
-                        *slot_id,
-                        current_height,
-                        current_timestamp,
-                    )?;
-
-                    slots_db.transition_slot_to_ossified(
-                        rwtxn,
-                        *slot_id,
-                        current_height,
-                        current_timestamp,
-                    )?;
-
-                    tracing::debug!(
-                        "Atomically transitioned slot {} through Redistribution -> Resolved -> Ossified with outcome {}",
-                        hex::encode(slot_id.as_bytes()),
-                        consensus_outcome
-                    );
-                }
-                None => {
-                    // Unanimous abstention: mark slot as unresolved
-                    // The slot remains in its current state - no transition occurs
-                    // This allows the market to remain open or be handled by other mechanisms
-                    tracing::warn!(
-                        "Slot {} has unanimous abstention - not transitioning to resolved/ossified",
-                        hex::encode(slot_id.as_bytes())
-                    );
-                }
-            }
+            tracing::debug!(
+                "Slot {} resolved with outcome {:.4}",
+                hex::encode(slot_id.as_bytes()),
+                outcome_value
+            );
         }
 
         // Collect only the slots that were actually resolved (not abstained)
@@ -357,34 +331,13 @@ impl VotingSystem {
         self.databases
             .put_pending_redistribution(rwtxn, &period_redistribution)?;
 
-        // Collect slot outcomes for final_prices calculation in market redemption
-        let slot_outcomes: std::collections::HashMap<SlotId, f64> = consensus_result
-            .outcomes
-            .iter()
-            .filter_map(|(slot_id, opt_outcome)| {
-                opt_outcome.map(|v| (*slot_id, v))
-            })
-            .collect();
-
-        // Update market ossification status (only for resolved slots)
-        let ossified_slot_ids: std::collections::HashSet<_> =
-            resolved_slot_ids.iter().copied().collect();
-        let newly_ossified_markets = state
-            .markets()
-            .update_ossification_status(
-                rwtxn,
-                &ossified_slot_ids,
-                &slot_outcomes,
-                state.slots(),
-            )?;
-
-        if !newly_ossified_markets.is_empty() {
-            tracing::info!(
-                "Atomically transitioned {} markets to Ossified state: {:?}",
-                newly_ossified_markets.len(),
-                newly_ossified_markets
-            );
-        }
+        // Market redemption transitions are now handled in block.rs connect_body
+        // via transition_resolved_markets_to_redemption which checks SlotStateHistory
+        // directly. This ensures a single source of truth for market state transitions.
+        tracing::debug!(
+            "Slots ossified during consensus: {:?}",
+            resolved_slot_ids.iter().map(|s| hex::encode(s.as_bytes())).collect::<Vec<_>>()
+        );
 
         let abstained_count = slots_in_period.len() - resolved_slot_ids.len();
         tracing::info!(
@@ -402,6 +355,7 @@ impl VotingSystem {
         &self,
         rotxn: &RoTxn,
         current_timestamp: u64,
+        current_height: u32,
         config: &crate::state::slots::SlotConfig,
         slots_db: &crate::state::slots::Dbs,
     ) -> Result<HashMap<VotingPeriodId, VotingPeriod>, Error> {
@@ -410,6 +364,7 @@ impl VotingSystem {
             slots_db,
             config,
             current_timestamp,
+            current_height,
             &self.databases,
         )
     }
@@ -418,11 +373,12 @@ impl VotingSystem {
         &self,
         rotxn: &RoTxn,
         current_timestamp: u64,
+        current_height: u32,
         config: &crate::state::slots::SlotConfig,
         slots_db: &crate::state::slots::Dbs,
     ) -> Result<Option<VotingPeriod>, Error> {
         let all_periods =
-            self.get_all_periods(rotxn, current_timestamp, config, slots_db)?;
+            self.get_all_periods(rotxn, current_timestamp, current_height, config, slots_db)?;
 
         for period in all_periods.values() {
             if period.status == VotingPeriodStatus::Active {
@@ -450,6 +406,7 @@ impl VotingSystem {
         let period = period_calculator::calculate_voting_period(
             rwtxn,
             period_id,
+            block_height as u32,
             timestamp,
             config,
             slots_db,
@@ -459,8 +416,8 @@ impl VotingSystem {
         if !period_calculator::can_accept_votes(&period) {
             return Err(Error::InvalidTransaction {
                 reason: format!(
-                    "Period {:?} cannot accept votes (status: {:?}, timestamp: {})",
-                    period_id, period.status, timestamp
+                    "Period {:?} cannot accept votes (status: {:?}, height: {}, timestamp: {})",
+                    period_id, period.status, block_height, timestamp
                 ),
             });
         }
@@ -689,16 +646,24 @@ impl VotingSystem {
         let period = period_calculator::calculate_voting_period(
             rwtxn,
             period_id,
+            block_height as u32,
             current_timestamp,
             config,
             slots_db,
             has_outcomes,
         )?;
 
+        // In testing mode, use block_height for transition validation
+        let effective_time = if config.testing_mode {
+            block_height
+        } else {
+            current_timestamp
+        };
+
         period_calculator::validate_transition(
             &period,
             VotingPeriodStatus::Resolved,
-            current_timestamp,
+            effective_time,
         )?;
 
         let consensus_outcomes = self
@@ -795,6 +760,7 @@ impl VotingSystem {
         &self,
         rotxn: &RoTxn,
         period_id: VotingPeriodId,
+        current_height: u32,
         current_timestamp: u64,
         config: &crate::state::slots::SlotConfig,
         slots_db: &crate::state::slots::Dbs,
@@ -806,6 +772,7 @@ impl VotingSystem {
         let period = period_calculator::calculate_voting_period(
             rotxn,
             period_id,
+            current_height,
             current_timestamp,
             config,
             slots_db,

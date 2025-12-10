@@ -536,6 +536,14 @@ pub enum Command {
     #[command(name = "view-market", alias = "show-market", alias = "info")]
     ViewMarket { market_id: String },
 
+    /// Debug: Get raw market shares array
+    #[command(name = "debug-market-shares")]
+    DebugMarketShares { market_id: String },
+
+    /// Debug: Get all share accounts from the database
+    #[command(name = "debug-all-share-accounts")]
+    DebugAllShareAccounts,
+
     /// Buy shares
     #[command(name = "buy-shares", alias = "buy")]
     BuyShares {
@@ -593,19 +601,6 @@ pub enum Command {
         dimensions: Option<String>,
     },
 
-    /// Redeem shares
-    #[command(name = "redeem-shares", alias = "redeem")]
-    RedeemShares {
-        #[arg(long)]
-        market_id: String,
-        #[arg(long)]
-        outcome_index: usize,
-        #[arg(long)]
-        shares_amount: f64,
-        #[arg(long, default_value = "1000")]
-        fee_sats: u64,
-    },
-
     /// Get user share positions
     #[command(
         name = "get-user-share-positions",
@@ -624,6 +619,193 @@ pub enum Command {
         address: Option<Address>,
         #[arg(long)]
         market_id: String,
+    },
+
+    // === VOTING COMMANDS ===
+    /// Register as a voter in the Bitcoin Hivemind voting system
+    #[command(
+        name = "register-voter",
+        alias = "reg-voter",
+        alias = "voter-register"
+    )]
+    RegisterVoter {
+        /// Reputation bond amount in sats (optional)
+        #[arg(long)]
+        reputation_bond_sats: Option<u64>,
+        /// Transaction fee in sats
+        #[arg(long, default_value = "1000")]
+        fee_sats: u64,
+    },
+
+    /// Submit a single vote for a decision in the current voting period
+    #[command(name = "submit-vote", alias = "vote", alias = "cast-vote")]
+    SubmitVote {
+        /// Decision ID (slot ID) to vote on
+        #[arg(long)]
+        decision_id: String,
+        /// Vote value (0.0-1.0 for binary, scaled for scalar decisions)
+        #[arg(long)]
+        vote_value: f64,
+        /// Transaction fee in sats
+        #[arg(long, default_value = "1000")]
+        fee_sats: u64,
+    },
+
+    /// Submit multiple votes efficiently in a single transaction
+    #[command(
+        name = "submit-vote-batch",
+        alias = "vote-batch",
+        alias = "batch-vote"
+    )]
+    SubmitVoteBatch {
+        /// Votes in format "decision_id:value,decision_id:value,..."
+        #[arg(long)]
+        votes: String,
+        /// Transaction fee in sats
+        #[arg(long, default_value = "1000")]
+        fee_sats: u64,
+    },
+
+    /// Get information about a specific voter
+    #[command(name = "get-voter-info", alias = "voter-info", alias = "voter")]
+    GetVoterInfo {
+        /// Voter address
+        #[arg(long)]
+        address: Address,
+    },
+
+    /// Get detailed information about a specific voting period
+    #[command(
+        name = "get-voting-period-details",
+        alias = "period-details",
+        alias = "voting-details"
+    )]
+    GetVotingPeriodDetails {
+        /// Period ID
+        #[arg(long)]
+        period_id: u32,
+    },
+
+    /// Get all votes cast by a specific voter
+    #[command(name = "get-voter-votes", alias = "voter-votes", alias = "my-votes")]
+    GetVoterVotes {
+        /// Voter address
+        #[arg(long)]
+        address: Address,
+        /// Optional period ID (if not specified, returns votes from all periods)
+        #[arg(long)]
+        period_id: Option<u32>,
+    },
+
+    /// Get all votes cast for a specific decision slot
+    #[command(
+        name = "get-decision-votes",
+        alias = "decision-votes",
+        alias = "slot-votes"
+    )]
+    GetDecisionVotes {
+        /// Decision slot ID
+        #[arg(long)]
+        slot_id: String,
+    },
+
+    /// Get voter participation summary for a specific period
+    #[command(
+        name = "get-voter-participation",
+        alias = "participation",
+        alias = "voter-participation"
+    )]
+    GetVoterParticipation {
+        /// Voter address
+        #[arg(long)]
+        address: Address,
+        /// Period ID
+        #[arg(long)]
+        period_id: u32,
+    },
+
+    /// List all registered voters with their current reputation
+    #[command(name = "list-voters", alias = "voters", alias = "all-voters")]
+    ListVoters,
+
+    /// Check if an address is registered as a voter
+    #[command(
+        name = "is-registered-voter",
+        alias = "check-voter",
+        alias = "is-voter"
+    )]
+    IsRegisteredVoter {
+        /// Address to check
+        #[arg(long)]
+        address: Address,
+    },
+
+    /// Get the Votecoin balance for an address
+    #[command(
+        name = "get-votecoin-balance",
+        alias = "votecoin-balance",
+        alias = "vc-balance"
+    )]
+    GetVotecoinBalance {
+        /// Address to check
+        #[arg(long)]
+        address: Address,
+    },
+
+    /// Get voting statistics for the current active voting period
+    #[command(
+        name = "get-current-voting-stats",
+        alias = "voting-stats",
+        alias = "current-voting"
+    )]
+    GetCurrentVotingStats,
+
+    /// Get the consensus results for a voting period including SVD analysis
+    #[command(
+        name = "get-voting-consensus-results",
+        alias = "consensus-results",
+        alias = "svd-results"
+    )]
+    GetVotingConsensusResults {
+        /// Period ID
+        #[arg(long)]
+        period_id: u32,
+    },
+
+    /// Get the reputation value for a specific voter
+    #[command(
+        name = "get-voter-reputation",
+        alias = "reputation",
+        alias = "voter-rep"
+    )]
+    GetVoterReputation {
+        /// Voter ID (address as string)
+        #[arg(long)]
+        voter_id: String,
+    },
+
+    /// Get the status of a voting period
+    #[command(
+        name = "get-voting-period-status",
+        alias = "period-status",
+        alias = "voting-status"
+    )]
+    GetVotingPeriodStatus {
+        /// Period ID
+        #[arg(long)]
+        period_id: u32,
+    },
+
+    /// Get redistribution summary for a specific voting period
+    #[command(
+        name = "get-redistribution-summary",
+        alias = "redistribution",
+        alias = "redist-summary"
+    )]
+    GetRedistributionSummary {
+        /// Period ID
+        #[arg(long)]
+        period_id: u32,
     },
 }
 
@@ -665,7 +847,6 @@ COMMAND GROUPS:
     list-markets (markets)              List all active markets
     view-market (show-market, info)     View detailed market info
     buy-shares (buy)                    Purchase market shares
-    redeem-shares (redeem)              Redeem winning shares
     calculate-share-cost (cost)         Calculate share purchase cost
     calculate-initial-liquidity (calc-liquidity) Calculate required initial liquidity
     get-user-share-positions (positions) View your market positions
@@ -691,6 +872,17 @@ COMMAND GROUPS:
     sign-arbitrary-msg (sign)           Sign message with key
     verify-signature (verify)           Verify message signature
 
+🗳️  VOTING:
+    register-voter (reg-voter)          Register as a voter
+    submit-vote (vote)                  Submit a single vote
+    submit-vote-batch (vote-batch)      Submit multiple votes at once
+    list-voters (voters)                List all registered voters
+    get-voter-info (voter-info)         View voter details
+    get-votecoin-balance (vc-balance)   Check votecoin balance
+    get-voting-periods (voting)         Show voting periods
+    get-current-voting-stats (voting-stats) Current voting statistics
+    get-voting-consensus-results (svd-results) View SVD consensus results
+    get-redistribution-summary (redistribution) VoteCoin redistribution info
 
 QUICK START:
     truthcoin_dc_app_cli status         # Check if node is running
@@ -1272,10 +1464,10 @@ where
                 fee_sats,
             };
 
-            let result = rpc_client.create_market(request).await?;
+            let txid = rpc_client.create_market(request).await?;
             format!(
-                "Market '{}' created successfully with ID: {}",
-                title, result
+                "Market '{}' submitted successfully.\nTransaction ID: {}\nUse 'list-markets' after confirmation to get the market ID.",
+                title, txid
             )
         }
         Command::CreateYesNoMarket {
@@ -1313,10 +1505,10 @@ where
                 fee_sats,
             };
 
-            let result = rpc_client.create_market(request).await?;
+            let txid = rpc_client.create_market(request).await?;
             format!(
-                "Yes/No market '{}' created successfully with ID: {}",
-                question, result
+                "Yes/No market '{}' submitted successfully.\nTransaction ID: {}\nUse 'list-markets' after confirmation to get the market ID.",
+                question, txid
             )
         }
         Command::ListMarkets => {
@@ -1464,10 +1656,45 @@ where
                         }
                     }
 
+                    // Display resolution info for ossified markets
+                    if let Some(resolution) = &details.resolution {
+                        output.push_str("\n════════════════════════════════════════\n");
+                        output.push_str("  MARKET RESOLUTION\n");
+                        output.push_str("════════════════════════════════════════\n");
+                        output.push_str(&format!("{}\n\n", resolution.summary));
+
+                        if !resolution.winning_outcomes.is_empty() {
+                            output.push_str("Winning Outcomes:\n");
+                            for outcome in &resolution.winning_outcomes {
+                                output.push_str(&format!(
+                                    "  • {} (payout: {:.1}%)\n",
+                                    outcome.outcome_name,
+                                    outcome.final_price * 100.0
+                                ));
+                            }
+                        }
+                    }
+
                     output
                 }
                 None => format!("Market {} not found", market_id),
             }
+        }
+        Command::DebugMarketShares { market_id } => {
+            let shares = rpc_client.debug_market_shares(market_id.clone()).await?;
+            match shares {
+                Some(s) => {
+                    let mut output = format!("Raw shares for market {}:\n", market_id);
+                    for (i, share) in s.iter().enumerate() {
+                        output.push_str(&format!("  [{}]: {:.6}\n", i, share));
+                    }
+                    output
+                }
+                None => format!("Market {} not found", market_id),
+            }
+        }
+        Command::DebugAllShareAccounts => {
+            rpc_client.debug_all_share_accounts().await?
         }
         Command::BuyShares {
             market_id,
@@ -1521,38 +1748,38 @@ where
                 cost_sats as f64 / 100_000_000.0
             )
         }
-        Command::RedeemShares {
-            market_id,
-            outcome_index,
-            shares_amount,
-            fee_sats,
-        } => {
-            let txid = rpc_client
-                .redeem_shares(
-                    market_id.clone(),
-                    outcome_index,
-                    shares_amount,
-                    fee_sats,
-                )
-                .await?;
-            format!(
-                "Successfully submitted redeem shares transaction!\n\
-                Market: {}\n\
-                Outcome Index: {}\n\
-                Shares: {:.4}\n\
-                Transaction ID: {}",
-                market_id, outcome_index, shares_amount, txid
-            )
-        }
         Command::GetUserSharePositions { address } => {
-            // Use provided address or get default wallet address
-            let addr = if let Some(addr) = address {
-                addr
+            // If address provided, query that address. Otherwise query all wallet addresses.
+            let holdings = if let Some(addr) = address {
+                rpc_client.get_user_share_positions(addr).await?
             } else {
-                rpc_client.get_new_address().await?
-            };
+                // Get all wallet addresses and aggregate positions
+                let wallet_addresses = rpc_client.get_wallet_addresses().await?;
+                let mut all_positions = Vec::new();
+                let mut total_value = 0.0;
+                let mut total_cost_basis = 0.0;
+                let mut active_markets = std::collections::HashSet::new();
 
-            let holdings = rpc_client.get_user_share_positions(addr).await?;
+                for addr in wallet_addresses {
+                    let holdings = rpc_client.get_user_share_positions(addr).await?;
+                    for pos in holdings.positions {
+                        active_markets.insert(pos.market_id.clone());
+                        total_value += pos.current_value;
+                        total_cost_basis += pos.cost_basis;
+                        all_positions.push(pos);
+                    }
+                }
+
+                truthcoin_dc_app_rpc_api::UserHoldings {
+                    address: "All Wallet Addresses".to_string(),
+                    positions: all_positions,
+                    total_value,
+                    total_cost_basis,
+                    total_unrealized_pnl: total_value - total_cost_basis,
+                    active_markets: active_markets.len(),
+                    last_updated_height: 0,
+                }
+            };
 
             if holdings.positions.is_empty() {
                 "No share positions found.".to_string()
@@ -1713,6 +1940,459 @@ where
                 result.beta * (result.num_outcomes as f64).ln(),
                 result.initial_liquidity_sats
             )
+        }
+
+        // === VOTING COMMANDS ===
+        Command::RegisterVoter {
+            reputation_bond_sats,
+            fee_sats,
+        } => {
+            use truthcoin_dc_app_rpc_api::RegisterVoterRequest;
+
+            let request = RegisterVoterRequest {
+                reputation_bond_sats,
+                fee_sats,
+            };
+
+            let txid = rpc_client.register_voter(request).await?;
+            format_tx_success("Voter registration", None, &txid)
+        }
+
+        Command::SubmitVote {
+            decision_id,
+            vote_value,
+            fee_sats,
+        } => {
+            use truthcoin_dc_app_rpc_api::SubmitVoteRequest;
+
+            let request = SubmitVoteRequest {
+                decision_id: decision_id.clone(),
+                vote_value,
+                fee_sats,
+            };
+
+            let txid = rpc_client.submit_vote(request).await?;
+            format!(
+                "Vote submitted successfully!\n\
+                Decision: {}\n\
+                Vote Value: {:.4}\n\
+                Transaction ID: {}",
+                decision_id, vote_value, txid
+            )
+        }
+
+        Command::SubmitVoteBatch {
+            votes,
+            fee_sats,
+        } => {
+            use truthcoin_dc_app_rpc_api::{SubmitVoteBatchRequest, VoteBatchItem};
+
+            // Parse votes from "decision_id:value,decision_id:value,..." format
+            let vote_items: Result<Vec<VoteBatchItem>, String> = votes
+                .split(',')
+                .map(|pair| {
+                    let parts: Vec<&str> = pair.trim().split(':').collect();
+                    if parts.len() != 2 {
+                        return Err(format!(
+                            "Invalid vote format '{}'. Expected 'decision_id:value'",
+                            pair
+                        ));
+                    }
+                    let vote_value: f64 = parts[1].parse().map_err(|_| {
+                        format!("Invalid vote value '{}'. Must be a number.", parts[1])
+                    })?;
+                    Ok(VoteBatchItem {
+                        decision_id: parts[0].to_string(),
+                        vote_value,
+                    })
+                })
+                .collect();
+
+            let vote_items = match vote_items {
+                Ok(items) => items,
+                Err(err) => return Ok(err),
+            };
+
+            let vote_count = vote_items.len();
+            let request = SubmitVoteBatchRequest {
+                votes: vote_items,
+                fee_sats,
+            };
+
+            let txid = rpc_client.submit_vote_batch(request).await?;
+            format!(
+                "Vote batch submitted successfully!\n\
+                Votes: {} decisions\n\
+                Transaction ID: {}",
+                vote_count, txid
+            )
+        }
+
+        Command::GetVoterInfo { address } => {
+            let voter_info = rpc_client.get_voter_info(address).await?;
+            match voter_info {
+                Some(info) => {
+                    let mut output = String::new();
+                    output.push_str("Voter Information:\n");
+                    output.push_str("==================\n\n");
+                    output.push_str(&format!("Address: {}\n", info.address));
+                    output.push_str(&format!("Reputation: {:.6}\n", info.reputation));
+                    output.push_str(&format!("Total Votes: {}\n", info.total_votes));
+                    output.push_str(&format!("Periods Active: {}\n", info.periods_active));
+                    output.push_str(&format!(
+                        "Accuracy Score: {:.2}%\n",
+                        info.accuracy_score * 100.0
+                    ));
+                    output.push_str(&format!(
+                        "Registered at Height: {}\n",
+                        info.registered_at_height
+                    ));
+                    output.push_str(&format!(
+                        "Status: {}\n",
+                        if info.is_active { "Active" } else { "Inactive" }
+                    ));
+                    output
+                }
+                None => format!("Voter {} not found", address),
+            }
+        }
+
+        Command::GetVotingPeriodDetails { period_id } => {
+            let details = rpc_client.get_voting_period_details(period_id).await?;
+            match details {
+                Some(info) => {
+                    let mut output = String::new();
+                    output.push_str(&format!("Voting Period {} Details:\n", period_id));
+                    output.push_str("=============================\n\n");
+                    output.push_str(&format!("Status: {}\n", info.status));
+                    output.push_str(&format!("Start Time: {}\n", info.start_time));
+                    output.push_str(&format!("End Time: {}\n", info.end_time));
+                    output.push_str(&format!(
+                        "Created at Height: {}\n",
+                        info.created_at_height
+                    ));
+                    output.push_str(&format!("Total Voters: {}\n", info.total_voters));
+                    output.push_str(&format!("Active Voters: {}\n", info.active_voters));
+                    output.push_str(&format!("Total Votes: {}\n", info.total_votes));
+                    output.push_str(&format!(
+                        "Consensus Reached: {}\n",
+                        if info.consensus_reached { "Yes" } else { "No" }
+                    ));
+                    if !info.decision_slots.is_empty() {
+                        output.push_str(&format!(
+                            "\nDecision Slots ({}):\n",
+                            info.decision_slots.len()
+                        ));
+                        for slot in &info.decision_slots {
+                            output.push_str(&format!("  - {}\n", slot));
+                        }
+                    }
+                    output
+                }
+                None => format!("Voting period {} not found", period_id),
+            }
+        }
+
+        Command::GetVoterVotes { address, period_id } => {
+            let votes = rpc_client.get_voter_votes(address, period_id).await?;
+            if votes.is_empty() {
+                match period_id {
+                    Some(pid) => {
+                        format!("No votes found for {} in period {}", address, pid)
+                    }
+                    None => format!("No votes found for {}", address),
+                }
+            } else {
+                let mut output = String::new();
+                output.push_str(&format!("Votes by {}:\n", address));
+                output.push_str("=====================================\n\n");
+                output.push_str("┌────────────────────┬──────────────┬────────────┬────────────┬──────────┐\n");
+                output.push_str("│ Decision ID        │ Vote Value   │ Period     │ Height     │ Batch    │\n");
+                output.push_str("├────────────────────┼──────────────┼────────────┼────────────┼──────────┤\n");
+
+                for vote in &votes {
+                    let short_decision = if vote.decision_id.len() > 18 {
+                        format!("{}...", &vote.decision_id[..15])
+                    } else {
+                        vote.decision_id.clone()
+                    };
+
+                    output.push_str(&format!(
+                        "│ {:18} │ {:12.4} │ {:10} │ {:10} │ {:8} │\n",
+                        short_decision,
+                        vote.vote_value,
+                        vote.period_id,
+                        vote.block_height,
+                        if vote.is_batch_vote { "Yes" } else { "No" }
+                    ));
+                }
+
+                output.push_str("└────────────────────┴──────────────┴────────────┴────────────┴──────────┘\n");
+                output.push_str(&format!("\nTotal votes: {}", votes.len()));
+                output
+            }
+        }
+
+        Command::GetDecisionVotes { slot_id } => {
+            let votes = rpc_client.get_decision_votes(slot_id.clone()).await?;
+            if votes.is_empty() {
+                format!("No votes found for decision {}", slot_id)
+            } else {
+                let mut output = String::new();
+                output.push_str(&format!("Votes for Decision {}:\n", slot_id));
+                output.push_str("=====================================\n\n");
+                output.push_str("┌────────────────────────────────┬──────────────┬────────────┬────────────┐\n");
+                output.push_str("│ Voter Address                  │ Vote Value   │ Period     │ Height     │\n");
+                output.push_str("├────────────────────────────────┼──────────────┼────────────┼────────────┤\n");
+
+                for vote in &votes {
+                    let short_addr = if vote.voter_address.len() > 30 {
+                        format!("{}...", &vote.voter_address[..27])
+                    } else {
+                        vote.voter_address.clone()
+                    };
+
+                    output.push_str(&format!(
+                        "│ {:30} │ {:12.4} │ {:10} │ {:10} │\n",
+                        short_addr, vote.vote_value, vote.period_id, vote.block_height
+                    ));
+                }
+
+                output.push_str("└────────────────────────────────┴──────────────┴────────────┴────────────┘\n");
+                output.push_str(&format!("\nTotal votes: {}", votes.len()));
+                output
+            }
+        }
+
+        Command::GetVoterParticipation { address, period_id } => {
+            let participation = rpc_client
+                .get_voter_participation(address, period_id)
+                .await?;
+            match participation {
+                Some(info) => {
+                    let mut output = String::new();
+                    output.push_str("Voter Participation Summary:\n");
+                    output.push_str("============================\n\n");
+                    output.push_str(&format!("Address: {}\n", info.address));
+                    output.push_str(&format!("Period: {}\n", info.period_id));
+                    output.push_str(&format!("Votes Cast: {}\n", info.votes_cast));
+                    output.push_str(&format!(
+                        "Decisions Available: {}\n",
+                        info.decisions_available
+                    ));
+                    output.push_str(&format!(
+                        "Participation Rate: {:.1}%\n",
+                        info.participation_rate * 100.0
+                    ));
+                    output.push_str(&format!(
+                        "In Consensus: {}\n",
+                        if info.participated_in_consensus {
+                            "Yes"
+                        } else {
+                            "No"
+                        }
+                    ));
+                    output
+                }
+                None => format!(
+                    "No participation record found for {} in period {}",
+                    address, period_id
+                ),
+            }
+        }
+
+        Command::ListVoters => {
+            let voters = rpc_client.list_voters().await?;
+            if voters.is_empty() {
+                "No registered voters found.".to_string()
+            } else {
+                let mut output = String::new();
+                output.push_str("Registered Voters:\n");
+                output.push_str("==================\n\n");
+                output.push_str("┌────────────────────────────────┬────────────┬────────────┬────────────┬──────────┐\n");
+                output.push_str("│ Address                        │ Reputation │ Votes      │ Periods    │ Active   │\n");
+                output.push_str("├────────────────────────────────┼────────────┼────────────┼────────────┼──────────┤\n");
+
+                for voter in &voters {
+                    let short_addr = if voter.address.len() > 30 {
+                        format!("{}...", &voter.address[..27])
+                    } else {
+                        voter.address.clone()
+                    };
+
+                    output.push_str(&format!(
+                        "│ {:30} │ {:10.4} │ {:10} │ {:10} │ {:8} │\n",
+                        short_addr,
+                        voter.reputation,
+                        voter.total_votes,
+                        voter.periods_active,
+                        if voter.is_active { "Yes" } else { "No" }
+                    ));
+                }
+
+                output.push_str("└────────────────────────────────┴────────────┴────────────┴────────────┴──────────┘\n");
+                output.push_str(&format!("\nTotal voters: {}", voters.len()));
+                output
+            }
+        }
+
+        Command::IsRegisteredVoter { address } => {
+            let is_registered = rpc_client.is_registered_voter(address).await?;
+            if is_registered {
+                format!("Address {} is a registered voter", address)
+            } else {
+                format!("Address {} is NOT a registered voter", address)
+            }
+        }
+
+        Command::GetVotecoinBalance { address } => {
+            let balance = rpc_client.get_votecoin_balance(address).await?;
+            format!("Votecoin balance for {}: {} VTC", address, balance)
+        }
+
+        Command::GetCurrentVotingStats => {
+            let stats = rpc_client.get_current_voting_stats().await?;
+            match stats {
+                Some(info) => {
+                    let mut output = String::new();
+                    output.push_str("Current Voting Period Statistics:\n");
+                    output.push_str("==================================\n\n");
+                    output.push_str(&format!("Period ID: {}\n", info.period_id));
+                    output.push_str(&format!("Status: {}\n", info.status));
+                    output.push_str(&format!("Total Voters: {}\n", info.total_voters));
+                    output.push_str(&format!("Active Voters: {}\n", info.active_voters));
+                    output.push_str(&format!("Total Votes Cast: {}\n", info.total_votes));
+                    output.push_str(&format!(
+                        "Decision Slots: {}\n",
+                        info.decision_slots.len()
+                    ));
+                    output.push_str(&format!(
+                        "Consensus Reached: {}\n",
+                        if info.consensus_reached { "Yes" } else { "No" }
+                    ));
+                    output
+                }
+                None => "No active voting period found.".to_string(),
+            }
+        }
+
+        Command::GetVotingConsensusResults { period_id } => {
+            let results = rpc_client.get_voting_consensus_results(period_id).await?;
+            let mut output = String::new();
+            output.push_str(&format!(
+                "Voting Consensus Results for Period {}:\n",
+                period_id
+            ));
+            output.push_str("==========================================\n\n");
+            output.push_str(&format!("Status: {}\n", results.status));
+            output.push_str(&format!(
+                "Algorithm Version: {}\n",
+                results.algorithm_version
+            ));
+            output.push_str(&format!(
+                "Vote Matrix: {} voters × {} decisions\n",
+                results.vote_matrix_dimensions.0, results.vote_matrix_dimensions.1
+            ));
+            output.push_str(&format!(
+                "Explained Variance: {:.2}%\n",
+                results.explained_variance * 100.0
+            ));
+            output.push_str(&format!("Certainty: {:.4}\n", results.certainty));
+
+            if !results.first_loading.is_empty() {
+                output.push_str("\nFirst Principal Component:\n");
+                for (i, val) in results.first_loading.iter().enumerate() {
+                    output.push_str(&format!("  Decision {}: {:.4}\n", i, val));
+                }
+            }
+
+            if !results.outcomes.is_empty() {
+                output.push_str("\nDecision Outcomes:\n");
+                for (decision_id, outcome) in &results.outcomes {
+                    output.push_str(&format!("  {}: {:.4}\n", decision_id, outcome));
+                }
+            }
+
+            if !results.reputation_updates.is_empty() {
+                output.push_str("\nReputation Updates:\n");
+                for (voter, update) in &results.reputation_updates {
+                    let short_voter = if voter.len() > 20 {
+                        format!("{}...", &voter[..17])
+                    } else {
+                        voter.clone()
+                    };
+                    output.push_str(&format!(
+                        "  {}: {:.4} → {:.4} (compliance: {:.2}%)\n",
+                        short_voter,
+                        update.old_reputation,
+                        update.new_reputation,
+                        update.compliance_score * 100.0
+                    ));
+                }
+            }
+
+            if !results.outliers.is_empty() {
+                output.push_str("\nOutliers Detected:\n");
+                for outlier in &results.outliers {
+                    output.push_str(&format!("  - {}\n", outlier));
+                }
+            }
+
+            output
+        }
+
+        Command::GetVoterReputation { voter_id } => {
+            let reputation = rpc_client.get_voter_reputation(voter_id.clone()).await?;
+            format!("Reputation for {}: {:.6}", voter_id, reputation)
+        }
+
+        Command::GetVotingPeriodStatus { period_id } => {
+            let status = rpc_client.get_voting_period_status(period_id).await?;
+            format!("Voting period {} status: {}", period_id, status)
+        }
+
+        Command::GetRedistributionSummary { period_id } => {
+            let summary = rpc_client.get_redistribution_summary(period_id).await?;
+            match summary {
+                Some(info) => {
+                    let mut output = String::new();
+                    output.push_str(&format!(
+                        "VoteCoin Redistribution Summary for Period {}:\n",
+                        period_id
+                    ));
+                    output.push_str("===============================================\n\n");
+                    output.push_str(&format!(
+                        "Total Redistributed: {} sats\n",
+                        info.total_redistributed
+                    ));
+                    output.push_str(&format!("Winners: {}\n", info.winners_count));
+                    output.push_str(&format!("Losers: {}\n", info.losers_count));
+                    output.push_str(&format!("Unchanged: {}\n", info.unchanged_count));
+                    output.push_str(&format!(
+                        "Conservation Check: {} (should be 0)\n",
+                        info.conservation_check
+                    ));
+                    output.push_str(&format!("Block Height: {}\n", info.block_height));
+                    output.push_str(&format!(
+                        "Applied: {}\n",
+                        if info.is_applied { "Yes" } else { "No" }
+                    ));
+
+                    if !info.slots_affected.is_empty() {
+                        output.push_str(&format!(
+                            "\nSlots Affected ({}):\n",
+                            info.slots_affected.len()
+                        ));
+                        for slot in &info.slots_affected {
+                            output.push_str(&format!("  - {}\n", slot));
+                        }
+                    }
+                    output
+                }
+                None => {
+                    format!("No redistribution summary found for period {}", period_id)
+                }
+            }
         }
     })
 }

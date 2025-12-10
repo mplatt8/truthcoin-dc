@@ -188,15 +188,6 @@ pub enum TransactionData {
         /// Maximum cost willing to pay (in satoshis)
         max_cost: u64,
     },
-    /// Redeem shares after market resolution for Bitcoin payout
-    RedeemShares {
-        /// Market ID standardized across all transaction types per Bitcoin Hivemind specifications
-        market_id: MarketId,
-        /// Outcome index to redeem shares for
-        outcome_index: u32,
-        /// Number of shares to redeem
-        shares_to_redeem: f64,
-    },
     /// Submit a vote for a decision in the current voting period
     SubmitVote {
         /// 3 byte slot ID of the decision being voted on
@@ -246,11 +237,6 @@ impl TxData {
     /// `true` if the tx data corresponds to buying shares
     pub fn is_buy_shares(&self) -> bool {
         matches!(self, Self::BuyShares { .. })
-    }
-
-    /// `true` if the tx data corresponds to redeeming shares
-    pub fn is_redeem_shares(&self) -> bool {
-        matches!(self, Self::RedeemShares { .. })
     }
 
     /// `true` if the tx data corresponds to submitting a vote
@@ -340,17 +326,6 @@ pub struct BuyShares {
     pub shares_to_buy: f64,
     /// Maximum cost willing to pay (in satoshis)
     pub max_cost: u64,
-}
-
-/// Struct describing a share redemption operation after market resolution
-#[derive(Clone, Debug, PartialEq)]
-pub struct RedeemShares {
-    /// Market ID standardized across all transaction types per Bitcoin Hivemind specifications
-    pub market_id: MarketId,
-    /// Outcome index to redeem shares for
-    pub outcome_index: u32,
-    /// Number of shares to redeem
-    pub shares_to_redeem: f64,
 }
 
 /// Struct describing a vote submission
@@ -587,22 +562,6 @@ impl FilledTransaction {
                 outcome_index: *outcome_index,
                 shares_to_buy: *shares_to_buy,
                 max_cost: *max_cost,
-            }),
-            _ => None,
-        }
-    }
-
-    /// If the tx is a share redemption, returns the corresponding [`RedeemShares`].
-    pub fn redeem_shares(&self) -> Option<RedeemShares> {
-        match &self.transaction.data {
-            Some(TransactionData::RedeemShares {
-                market_id,
-                outcome_index,
-                shares_to_redeem,
-            }) => Some(RedeemShares {
-                market_id: market_id.clone(),
-                outcome_index: *outcome_index,
-                shares_to_redeem: *shares_to_redeem,
             }),
             _ => None,
         }

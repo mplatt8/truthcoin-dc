@@ -920,42 +920,6 @@ impl Wallet {
         Ok(tx)
     }
 
-    /// Redeem shares in a resolved prediction market
-    pub fn redeem_shares(
-        &self,
-        market_id: crate::state::markets::MarketId,
-        outcome_index: usize,
-        shares_amount: f64,
-        fee: bitcoin::Amount,
-    ) -> Result<Transaction, Error> {
-        // Select minimal bitcoins to pay the transaction fee only
-        // Payout will be received as new bitcoin outputs based on market resolution
-        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(fee)?;
-        let change = total_bitcoin - fee;
-
-        let inputs = bitcoin_utxos.into_keys().collect();
-        let mut outputs = Vec::new();
-
-        // Add change output if needed
-        if change > bitcoin::Amount::ZERO {
-            outputs.push(Output::new(
-                self.get_new_address()?,
-                OutputContent::Bitcoin(BitcoinOutputContent(change)),
-            ));
-        }
-
-        let mut tx = Transaction::new(inputs, outputs);
-
-        // Set the transaction data
-        tx.data = Some(TxData::RedeemShares {
-            market_id: MarketId::new(*market_id.as_bytes()),
-            outcome_index: outcome_index as u32,
-            shares_to_redeem: shares_amount,
-        });
-
-        Ok(tx)
-    }
-
     pub fn spend_utxos(
         &self,
         spent: &[(OutPoint, InPoint)],

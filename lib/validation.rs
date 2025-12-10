@@ -416,137 +416,6 @@ impl MarketValidator {
         Ok(())
     }
 
-    /// Validate share redemption transaction
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Implements redemption validation per whitepaper section 4:
-    /// - Market must be in Resolved state (voting complete, outcomes determined)
-    /// - User must hold sufficient shares in the specified outcome
-    /// - Payout value calculated from final_prices array
-    /// - Ensures proper economic settlement post-resolution
-    ///
-    /// # Arguments
-    /// * `state` - Blockchain state for validation queries
-    /// * `rotxn` - Read-only transaction
-    /// * `tx` - Filled transaction to validate
-    ///
-    /// # Returns
-    /// * `Ok(())` - Redemption is valid
-    /// * `Err(Error)` - Invalid redemption with detailed reason
-    ///
-    /// # Validation Rules
-    /// 1. Transaction must contain RedeemShares data
-    /// 2. Market must exist
-    /// 3. Market must be in Resolved state (not Trading/Voting)
-    /// 4. Outcome index must be valid for the market
-    /// 5. User must hold sufficient shares for redemption
-    /// 6. Shares amount must be positive
-    ///
-    /// # Bitcoin Hivemind Specification
-    /// Per whitepaper section 4, share redemption occurs after consensus resolution:
-    /// - Shares are redeemed for Bitcoin based on final_prices
-    /// - Payout = shares_redeemed × final_price[outcome_index]
-    /// - Only available in Resolved state to prevent premature redemption
-    pub fn validate_share_redemption(
-        state: &crate::state::State,
-        rotxn: &RoTxn,
-        tx: &FilledTransaction,
-    ) -> Result<(), Error> {
-        use crate::state::markets::MarketState;
-
-        let redeem_data =
-            tx.redeem_shares()
-                .ok_or_else(|| Error::InvalidTransaction {
-                    reason: "Not a share redemption transaction".to_string(),
-                })?;
-
-        // Validate market exists
-        let market = state
-            .markets()
-            .get_market(rotxn, &redeem_data.market_id)?
-            .ok_or_else(|| Error::InvalidTransaction {
-                reason: format!(
-                    "Market {:?} does not exist",
-                    redeem_data.market_id
-                ),
-            })?;
-
-        if !market.state().allows_redemption() {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Market not in Redemption state (current: {:?})",
-                    market.state()
-                ),
-            });
-        }
-
-        // Validate outcome index
-        if redeem_data.outcome_index as usize >= market.shares().len() {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Outcome index {} out of range (market has {} outcomes)",
-                    redeem_data.outcome_index,
-                    market.shares().len()
-                ),
-            });
-        }
-
-        // Validate shares amount is positive
-        if redeem_data.shares_to_redeem <= 0.0 {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Shares to redeem must be positive, got {}",
-                    redeem_data.shares_to_redeem
-                ),
-            });
-        }
-
-        // Get trader address from transaction authorization
-        let trader_address = Self::validate_market_maker_authorization(tx)?;
-
-        // Validate user has sufficient shares
-        let share_account = state
-            .markets()
-            .get_user_share_account(rotxn, &trader_address)?
-            .ok_or_else(|| Error::InvalidTransaction {
-                reason: format!(
-                    "No share account found for address {}",
-                    trader_address
-                ),
-            })?;
-
-        let current_shares = share_account
-            .get_position(&redeem_data.market_id, redeem_data.outcome_index);
-
-        if current_shares < redeem_data.shares_to_redeem {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Insufficient shares for redemption. Has {:.4} shares, trying to redeem {:.4}",
-                    current_shares, redeem_data.shares_to_redeem
-                ),
-            });
-        }
-
-        // Calculate redemption value based on final_prices (for informational purposes)
-        // The actual payout happens during block application
-        let final_price =
-            market.final_prices()[redeem_data.outcome_index as usize];
-        let _redemption_value = redeem_data.shares_to_redeem * final_price;
-
-        // Validate final_prices are populated (should always be true for Resolved state)
-        let final_prices_sum: f64 = market.final_prices().iter().sum();
-        if (final_prices_sum - 1.0).abs() > 1e-6 {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Market final_prices not properly normalized (sum = {:.6}). Market may not be properly resolved.",
-                    final_prices_sum
-                ),
-            });
-        }
-
-        Ok(())
-    }
-
     /// Validate batched market trades for atomic processing.
     ///
     /// Performs validation for a batch of market trades that will be applied atomically.
@@ -958,9 +827,9 @@ impl MarketStateValidator {
     /// Validate market state transition according to Bitcoin Hivemind specification.
     ///
     /// Ensures state transitions follow valid paths per whitepaper requirements:
-    /// - Trading -> Redemption -> Ossified
+    /// - Trading -> Ossified (automatic payout when voting completes)
     /// - Trading -> Cancelled (if no trades occurred)
-    /// - Trading/Redemption -> Invalid (governance action)
+    /// - Trading -> Invalid (governance action)
     ///
     /// # Arguments
     /// * `from_state` - Current market state
@@ -978,11 +847,9 @@ impl MarketStateValidator {
             (a, b) if a == b => true,
 
             // Valid forward transitions
-            (Trading, Redemption) => true,
-            (Trading, Cancelled) => true, // Only if no trades occurred (checked elsewhere)
-            (Trading, Invalid) => true,   // Governance action
-            (Redemption, Ossified) => true,
-            (Redemption, Invalid) => true, // Governance action
+            (Trading, Ossified) => true,   // Direct transition with automatic payout
+            (Trading, Cancelled) => true,  // Only if no trades occurred (checked elsewhere)
+            (Trading, Invalid) => true,    // Governance action
             (Invalid, Ossified) => true,
 
             // All other transitions are invalid

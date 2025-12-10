@@ -6,6 +6,7 @@ use sneed::{DatabaseUnique, Env, RoTxn, RwTxn};
 use std::collections::{HashMap, HashSet};
 
 use crate::state::Error;
+use crate::state::UtxoManager;
 use crate::state::slots::{Decision, SlotId};
 use crate::types::hashes;
 use crate::types::{Address, OutPoint};
@@ -96,7 +97,7 @@ impl MarketStateVersion {
                 .collect::<Vec<_>>()
                 .join(","),
             treasury,
-            collected_fees
+            collected_fees,
         );
 
         let state_hash = MarketStateHash::from_data(&state_data);
@@ -163,7 +164,6 @@ pub enum MarketError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MarketState {
     Trading = 1,
-    Redemption = 2,
     Cancelled = 3,
     Invalid = 4,
     Ossified = 5,
@@ -173,12 +173,9 @@ impl MarketState {
     pub fn can_transition_to(&self, new_state: MarketState) -> bool {
         use MarketState::*;
         match (self, new_state) {
-            (Trading, Redemption) => true,
+            (Trading, Ossified) => true,
             (Trading, Cancelled) => true,
             (Trading, Invalid) => true,
-
-            (Redemption, Ossified) => true,
-            (Redemption, Invalid) => true,
 
             (Invalid, Ossified) => true,
 
@@ -192,10 +189,6 @@ impl MarketState {
 
     pub fn allows_trading(&self) -> bool {
         matches!(self, MarketState::Trading)
-    }
-
-    pub fn allows_redemption(&self) -> bool {
-        matches!(self, MarketState::Redemption)
     }
 
     pub fn is_terminal(&self) -> bool {
@@ -356,7 +349,6 @@ pub struct ShareAccount {
     pub owner_address: Address,
     pub positions: HashMap<(MarketId, u32), f64>,
     pub nonce: u64,
-    pub redemption_nonce: u64,
     pub trade_nonce: u64,
     pub last_updated_height: u64,
 }
@@ -367,7 +359,6 @@ impl ShareAccount {
             owner_address,
             positions: HashMap::new(),
             nonce: 0,
-            redemption_nonce: 0,
             trade_nonce: 0,
             last_updated_height: 0,
         }
@@ -426,11 +417,6 @@ impl ShareAccount {
         self.nonce += 1;
     }
 
-    pub fn increment_redemption_nonce(&mut self) {
-        self.redemption_nonce += 1;
-        self.increment_nonce();
-    }
-
     pub fn increment_trade_nonce(&mut self) {
         self.trade_nonce += 1;
         self.increment_nonce();
@@ -439,6 +425,28 @@ impl ShareAccount {
     pub fn get_all_positions(&self) -> &HashMap<(MarketId, u32), f64> {
         &self.positions
     }
+}
+
+/// Record of a single shareholder's payout from a resolved market
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SharePayoutRecord {
+    pub market_id: MarketId,
+    pub address: Address,
+    pub outcome_index: u32,
+    pub shares_redeemed: f64,
+    pub final_price: f64,
+    pub payout_sats: u64,
+}
+
+/// Summary of all payouts for a market when it transitions to Ossified
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MarketPayoutSummary {
+    pub market_id: MarketId,
+    pub treasury_distributed: u64,
+    pub author_fees_distributed: u64,
+    pub shareholder_count: u32,
+    pub payouts: Vec<SharePayoutRecord>,
+    pub block_height: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1332,43 +1340,6 @@ impl Market {
         self.get_current_state().market_state
     }
 
-    pub fn compute_state(
-        &self,
-        slots: &crate::state::slots::Dbs,
-        rotxn: &RoTxn,
-    ) -> Result<MarketState, Error> {
-        let persistent_state = self.state();
-        if matches!(
-            persistent_state,
-            MarketState::Cancelled
-                | MarketState::Invalid
-                | MarketState::Redemption
-                | MarketState::Ossified
-        ) {
-            return Ok(persistent_state);
-        }
-
-        if self.decision_slots.is_empty() {
-            return Ok(MarketState::Trading);
-        }
-
-        let total_slots = self.decision_slots.len();
-        let mut ossified_count = 0;
-
-        for slot_id in &self.decision_slots {
-            let slot_state = slots.get_slot_current_state(rotxn, *slot_id)?;
-            if slot_state == crate::state::slots::SlotState::Ossified {
-                ossified_count += 1;
-            }
-        }
-
-        if ossified_count == total_slots {
-            return Ok(MarketState::Redemption);
-        }
-
-        Ok(MarketState::Trading)
-    }
-
     pub fn b(&self) -> f64 {
         self.get_current_state().b
     }
@@ -1467,7 +1438,7 @@ impl Market {
             new_shares,
             new_final_prices,
             new_treasury,
-            None, // No fee change
+            None,
         )
     }
 
@@ -1740,53 +1711,21 @@ impl Market {
         height: u64,
     ) -> Result<MarketStateHash, MarketError> {
         match self.state() {
-            MarketState::Trading | MarketState::Redemption => self
-                .create_new_state_version(
-                    transaction_id,
-                    height,
-                    Some(MarketState::Invalid),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
+            MarketState::Trading => self.create_new_state_version(
+                transaction_id,
+                height,
+                Some(MarketState::Invalid),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
             current_state => Err(MarketError::InvalidStateTransition {
                 from: current_state,
                 to: MarketState::Invalid,
             }),
         }
-    }
-
-    pub fn check_ossification(
-        &mut self,
-        slot_states: &HashMap<SlotId, bool>,
-        transaction_id: Option<[u8; 32]>,
-        height: u64,
-    ) -> Result<(), MarketError> {
-        if self.state() != MarketState::Redemption {
-            return Ok(());
-        }
-
-        let all_ossified = self
-            .decision_slots
-            .iter()
-            .all(|slot_id| slot_states.get(slot_id).copied().unwrap_or(false));
-
-        if all_ossified {
-            self.create_new_state_version(
-                transaction_id,
-                height,
-                Some(MarketState::Ossified),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )?;
-        }
-
-        Ok(())
     }
 
     /// Calculate final_prices from resolved slot outcomes.
@@ -1804,11 +1743,11 @@ impl Market {
         &self,
         slot_outcomes: &std::collections::HashMap<SlotId, f64>,
     ) -> Result<Array<f64, Ix1>, MarketError> {
-        // Build combo from slot outcomes
+        // Build resolved combo from slot outcomes
         // outcome > 0.7 → 1 (YES/TRUE)
         // outcome < 0.3 → 0 (NO/FALSE)
         // otherwise → 2 (ABSTAIN/UNCERTAIN)
-        let combo: Vec<usize> = self
+        let resolved_combo: Vec<usize> = self
             .decision_slots
             .iter()
             .map(|slot_id| {
@@ -1823,11 +1762,34 @@ impl Market {
             })
             .collect();
 
-        // Evaluate each d_function against the combo
-        let mut prices = Array::zeros(self.d_functions.len());
-        for (i, df) in self.d_functions.iter().enumerate() {
-            if df.evaluate(&combo, &self.decision_slots)? {
+        // Find which state_combo(s) match the resolved combo
+        // For full-product markets, d_functions are all DFunction::True,
+        // so we must match against state_combos directly
+        let mut prices = Array::zeros(self.state_combos.len());
+
+        for (i, state_combo) in self.state_combos.iter().enumerate() {
+            if state_combo == &resolved_combo {
                 prices[i] = 1.0;
+            }
+        }
+
+        // If no exact match (e.g., resolved combo contains ABSTAIN values),
+        // find partial matches where non-ABSTAIN values match
+        let sum: f64 = prices.sum();
+        if sum == 0.0 {
+            // Check for partial matches - outcomes that are consistent with
+            // the resolved combo (where ABSTAIN acts as wildcard)
+            for (i, state_combo) in self.state_combos.iter().enumerate() {
+                let matches = resolved_combo.iter().zip(state_combo.iter()).all(
+                    |(resolved, state)| {
+                        // ABSTAIN (2) in resolved means any value is acceptable
+                        // Otherwise must match exactly
+                        *resolved == 2 || resolved == state
+                    },
+                );
+                if matches {
+                    prices[i] = 1.0;
+                }
             }
         }
 
@@ -1838,51 +1800,6 @@ impl Market {
         }
 
         Ok(prices)
-    }
-
-    /// Transition market from Trading to Redemption state.
-    ///
-    /// Calculates final_prices from slot outcomes and creates a new state version
-    /// with MarketState::Redemption.
-    ///
-    /// # Arguments
-    /// * `slot_outcomes` - Map of SlotId to consensus outcome value (0.0-1.0)
-    /// * `transaction_id` - Optional transaction ID for state versioning
-    /// * `height` - Block height at which transition occurs
-    ///
-    /// # Errors
-    /// Returns error if market is not in Trading state
-    pub fn transition_to_redemption(
-        &mut self,
-        slot_outcomes: &std::collections::HashMap<SlotId, f64>,
-        transaction_id: Option<[u8; 32]>,
-        height: u64,
-    ) -> Result<MarketStateHash, MarketError> {
-        if self.state() != MarketState::Trading {
-            return Err(MarketError::InvalidStateTransition {
-                from: self.state(),
-                to: MarketState::Redemption,
-            });
-        }
-
-        let final_prices = self.calculate_final_prices(slot_outcomes)?;
-
-        tracing::info!(
-            "Transitioning market {} to Redemption with final_prices: {:?}",
-            self.id,
-            final_prices
-        );
-
-        self.create_new_state_version(
-            transaction_id,
-            height,
-            Some(MarketState::Redemption),
-            None,
-            None,
-            None,
-            Some(final_prices),
-            None,
-        )
     }
 
     pub fn get_outcome_count(&self) -> usize {
@@ -2578,87 +2495,113 @@ impl MarketsDatabase {
         Ok(())
     }
 
-    pub fn update_ossification_status(
+    /// SINGLE SOURCE OF TRUTH: Transition resolved markets directly from Trading → Ossified
+    /// with automatic share payouts.
+    ///
+    /// Called every block from connect_body. Checks ALL trading markets to see if
+    /// their decision slots are now Resolved in the SlotStateHistory database.
+    /// When all slots are resolved:
+    /// 1. Calculate final prices from slot outcomes
+    /// 2. Calculate and apply share payouts (creates Bitcoin UTXOs for shareholders)
+    /// 3. Auto-pay collected fees to market creator
+    /// 4. Transition market directly to Ossified with zero treasury
+    ///
+    /// # Bitcoin Hivemind Specification
+    /// Per whitepaper Section 3.2, markets are resolved when all their
+    /// decision slots have been resolved through the voting consensus process.
+    pub fn transition_and_payout_resolved_markets(
         &self,
         txn: &mut RwTxn,
-        ossified_slots: &HashSet<SlotId>,
-        slot_outcomes: &std::collections::HashMap<SlotId, f64>,
+        state: &crate::state::State,
         slots_db: &crate::state::slots::Dbs,
-    ) -> Result<Vec<MarketId>, Error> {
-        let mut newly_ossified = Vec::new();
-
-        // Phase 1: Transition Trading → Redemption for markets with all slots ossified
-        let trading_markets =
-            self.get_markets_by_state(txn, MarketState::Trading)?;
+        current_height: u32,
+    ) -> Result<Vec<(MarketId, MarketPayoutSummary)>, Error> {
+        let mut results = Vec::new();
+        let trading_markets = self.get_markets_by_state(txn, MarketState::Trading)?;
 
         for mut market in trading_markets {
-            // Check if all decision slots for this market are ossified
-            let all_slots_ossified = market
-                .decision_slots
-                .iter()
-                .all(|slot_id| ossified_slots.contains(slot_id));
+            if market.decision_slots.is_empty() {
+                continue;
+            }
 
-            if all_slots_ossified && !market.decision_slots.is_empty() {
-                // Also verify via compute_state that this market should transition
-                let computed_state = market.compute_state(slots_db, txn).map_err(|e| {
-                    Error::DatabaseError(format!(
-                        "Failed to compute market state: {:?}",
-                        e
-                    ))
+            let mut all_slots_resolved = true;
+            let mut slot_outcomes: std::collections::HashMap<SlotId, f64> = std::collections::HashMap::new();
+
+            for slot_id in &market.decision_slots {
+                let slot_state = slots_db.get_slot_current_state(txn, *slot_id)?;
+
+                if slot_state != crate::state::slots::SlotState::Resolved {
+                    all_slots_resolved = false;
+                    break;
+                }
+
+                if let Some(history) = slots_db.get_slot_state_history(txn, *slot_id)? {
+                    if let Some(outcome) = history.get_consensus_outcome() {
+                        slot_outcomes.insert(*slot_id, outcome);
+                    }
+                }
+            }
+
+            if all_slots_resolved {
+                let market_id = market.id.clone();
+
+                // Calculate final prices from slot outcomes
+                let final_prices = market.calculate_final_prices(&slot_outcomes).map_err(|e| {
+                    Error::DatabaseError(format!("Failed to calculate final prices: {:?}", e))
                 })?;
 
-                if computed_state == MarketState::Redemption {
-                    market
-                        .transition_to_redemption(slot_outcomes, None, 0)
-                        .map_err(|e| {
-                            Error::DatabaseError(format!(
-                                "Failed to transition market to redemption: {:?}",
-                                e
-                            ))
-                        })?;
-                    self.update_market(txn, &market)?;
+                // Create intermediate state with final prices (still Trading) to enable payout calculation
+                market
+                    .create_new_state_version_with_fees(
+                        None,
+                        current_height as u64,
+                        None, // Keep Trading temporarily
+                        None,
+                        None,
+                        None,
+                        Some(final_prices),
+                        None,
+                        None,
+                    )
+                    .map_err(|e| {
+                        Error::DatabaseError(format!("Failed to set final prices: {:?}", e))
+                    })?;
 
-                    tracing::info!(
-                        "Market {} transitioned from Trading to Redemption",
-                        market.id
-                    );
-                }
+                // Calculate payouts based on shares and final prices
+                let payout_summary = self.calculate_share_payouts(txn, &market, current_height as u64)?;
+
+                // Apply payouts (creates Bitcoin UTXOs, removes shares)
+                self.apply_automatic_share_payouts(
+                    state,
+                    txn,
+                    &payout_summary,
+                    &market,
+                    current_height as u64,
+                )?;
+
+                // Transition directly to Ossified with zero treasury and zero collected_fees
+                market
+                    .create_new_state_version_with_fees(
+                        None,
+                        current_height as u64,
+                        Some(MarketState::Ossified),
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(0.0), // Treasury emptied
+                        Some(0),   // Collected fees distributed
+                    )
+                    .map_err(|e| {
+                        Error::DatabaseError(format!("Failed to ossify market: {:?}", e))
+                    })?;
+
+                self.update_market(txn, &market)?;
+                results.push((market_id, payout_summary));
             }
         }
 
-        // Phase 2: Transition Redemption → Ossified
-        let redemption_markets =
-            self.get_markets_by_state(txn, MarketState::Redemption)?;
-
-        for mut market in redemption_markets {
-            market
-                .create_new_state_version(
-                    None,
-                    0,
-                    Some(MarketState::Ossified),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-                .map_err(|e| {
-                    Error::DatabaseError(format!(
-                        "Failed to ossify market: {:?}",
-                        e
-                    ))
-                })?;
-
-            self.update_market(txn, &market)?;
-            newly_ossified.push(market.id.clone());
-
-            tracing::info!(
-                "Market {} transitioned from Redemption to Ossified",
-                market.id
-            );
-        }
-
-        Ok(newly_ossified)
+        Ok(results)
     }
 
     pub fn cancel_market(
@@ -3067,6 +3010,28 @@ impl MarketsDatabase {
         Ok(self.share_accounts.try_get(txn, address)?)
     }
 
+    /// Get all share accounts from the database (for debugging)
+    pub fn get_all_share_accounts(
+        &self,
+        txn: &RoTxn,
+    ) -> Result<Vec<(Address, Vec<(MarketId, u32, f64)>)>, Error> {
+        let mut result = Vec::new();
+        let mut iter = self.share_accounts.iter(txn)?;
+        while let Some((address, account)) = iter.next()? {
+            let positions: Vec<(MarketId, u32, f64)> = account
+                .positions
+                .into_iter()
+                .map(|((market_id, outcome_index), shares)| {
+                    (market_id, outcome_index, shares)
+                })
+                .collect();
+            if !positions.is_empty() {
+                result.push((address, positions));
+            }
+        }
+        Ok(result)
+    }
+
     pub fn get_user_share_positions(
         &self,
         txn: &RoTxn,
@@ -3103,25 +3068,6 @@ impl MarketsDatabase {
         }
     }
 
-    pub fn apply_share_redemption(
-        &self,
-        txn: &mut RwTxn,
-        address: &Address,
-        market_id: MarketId,
-        outcome_index: u32,
-        shares_to_redeem: f64,
-        height: u64,
-    ) -> Result<(), Error> {
-        self.remove_shares_from_account(
-            txn,
-            address,
-            &market_id,
-            outcome_index,
-            shares_to_redeem,
-            height,
-        )
-    }
-
     pub fn revert_share_trade(
         &self,
         txn: &mut RwTxn,
@@ -3137,25 +3083,6 @@ impl MarketsDatabase {
             &market_id,
             outcome_index,
             shares_traded,
-            height,
-        )
-    }
-
-    pub fn revert_share_redemption(
-        &self,
-        txn: &mut RwTxn,
-        address: &Address,
-        market_id: MarketId,
-        outcome_index: u32,
-        shares_redeemed: f64,
-        height: u64,
-    ) -> Result<(), Error> {
-        self.add_shares_to_account(
-            txn,
-            address,
-            market_id,
-            outcome_index,
-            shares_redeemed,
             height,
         )
     }
@@ -3176,12 +3103,256 @@ impl MarketsDatabase {
         &self,
         txn: &RoTxn,
         address: &Address,
-    ) -> Result<(u64, u64, u64), Error> {
+    ) -> Result<(u64, u64), Error> {
         if let Some(account) = self.share_accounts.try_get(txn, address)? {
-            Ok((account.nonce, account.redemption_nonce, account.trade_nonce))
+            Ok((account.nonce, account.trade_nonce))
         } else {
-            Ok((0, 0, 0))
+            Ok((0, 0))
         }
+    }
+
+    /// Get all shareholders who have positions in a specific market
+    pub fn get_shareholders_for_market(
+        &self,
+        txn: &RoTxn,
+        market_id: &MarketId,
+    ) -> Result<Vec<(Address, Vec<(u32, f64)>)>, Error> {
+        let mut shareholders = Vec::new();
+        let mut iter = self.share_accounts.iter(txn)?;
+
+        while let Some((address, account)) = iter.next()? {
+            let positions_for_market: Vec<(u32, f64)> = account
+                .positions
+                .iter()
+                .filter(|((mid, _), _)| mid == market_id)
+                .map(|((_, outcome_index), shares)| (*outcome_index, *shares))
+                .collect();
+
+            if !positions_for_market.is_empty() {
+                shareholders.push((address, positions_for_market));
+            }
+        }
+
+        Ok(shareholders)
+    }
+
+    /// Calculate share payouts for a resolved market
+    pub fn calculate_share_payouts(
+        &self,
+        txn: &RoTxn,
+        market: &Market,
+        block_height: u64,
+    ) -> Result<MarketPayoutSummary, Error> {
+        let treasury_sats = market.treasury() as u64;
+        let final_prices = market.final_prices();
+
+        let shareholders = self.get_shareholders_for_market(txn, &market.id)?;
+        let mut payouts = Vec::new();
+        let mut total_distributed: u64 = 0;
+
+        for (address, positions) in shareholders {
+            for (outcome_index, shares) in positions {
+                let final_price = final_prices[outcome_index as usize];
+                let payout_sats = (shares * final_price * treasury_sats as f64).floor() as u64;
+
+                if payout_sats > 0 {
+                    payouts.push(SharePayoutRecord {
+                        market_id: market.id.clone(),
+                        address,
+                        outcome_index,
+                        shares_redeemed: shares,
+                        final_price,
+                        payout_sats,
+                    });
+                    total_distributed += payout_sats;
+                }
+            }
+        }
+
+        // Handle rounding remainder - add to largest payout
+        let remainder = treasury_sats.saturating_sub(total_distributed);
+        if remainder > 0 && !payouts.is_empty() {
+            if let Some(max_idx) = payouts
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, p)| p.payout_sats)
+                .map(|(idx, _)| idx)
+            {
+                payouts[max_idx].payout_sats += remainder;
+                total_distributed += remainder;
+            }
+        }
+
+        Ok(MarketPayoutSummary {
+            market_id: market.id.clone(),
+            treasury_distributed: total_distributed,
+            author_fees_distributed: market.collected_fees(),
+            shareholder_count: payouts.len() as u32,
+            payouts,
+            block_height,
+        })
+    }
+
+    /// Apply automatic share payouts - creates Bitcoin UTXOs for shareholders
+    pub fn apply_automatic_share_payouts(
+        &self,
+        state: &crate::state::State,
+        txn: &mut RwTxn,
+        payout_summary: &MarketPayoutSummary,
+        market: &Market,
+        block_height: u64,
+    ) -> Result<(), Error> {
+        use crate::types::{FilledOutput, FilledOutputContent, BitcoinOutputContent};
+
+        if payout_summary.payouts.is_empty() && payout_summary.author_fees_distributed == 0 {
+            return Ok(());
+        }
+
+        let mut sequence = 0u32;
+
+        // Create Bitcoin UTXOs for each shareholder
+        for payout in &payout_summary.payouts {
+            let outpoint = generate_share_payout_outpoint(
+                &payout.market_id,
+                &payout.address,
+                block_height,
+                sequence,
+            );
+
+            let output = FilledOutput {
+                address: payout.address,
+                content: FilledOutputContent::Bitcoin(BitcoinOutputContent(
+                    bitcoin::Amount::from_sat(payout.payout_sats),
+                )),
+                memo: vec![],
+            };
+
+            state.insert_utxo_with_address_index(txn, &outpoint, &output)?;
+
+            // Remove shares from account
+            self.remove_shares_from_account(
+                txn,
+                &payout.address,
+                &payout.market_id,
+                payout.outcome_index,
+                payout.shares_redeemed,
+                block_height,
+            )?;
+
+            sequence += 1;
+        }
+
+        // Auto-pay collected fees to market creator
+        if payout_summary.author_fees_distributed > 0 {
+            let fee_outpoint = generate_share_payout_outpoint(
+                &payout_summary.market_id,
+                &market.creator_address,
+                block_height,
+                sequence,
+            );
+
+            let fee_output = FilledOutput {
+                address: market.creator_address,
+                content: FilledOutputContent::Bitcoin(BitcoinOutputContent(
+                    bitcoin::Amount::from_sat(payout_summary.author_fees_distributed),
+                )),
+                memo: vec![],
+            };
+
+            state.insert_utxo_with_address_index(txn, &fee_outpoint, &fee_output)?;
+        }
+
+        tracing::info!(
+            "Applied automatic share payouts for market {}: {} sats treasury + {} sats fees to {} shareholders",
+            payout_summary.market_id,
+            payout_summary.treasury_distributed,
+            payout_summary.author_fees_distributed,
+            payout_summary.shareholder_count
+        );
+
+        Ok(())
+    }
+
+    /// Revert automatic share payouts - removes Bitcoin UTXOs and restores shares
+    pub fn revert_automatic_share_payouts(
+        &self,
+        state: &crate::state::State,
+        txn: &mut RwTxn,
+        payout_summary: &MarketPayoutSummary,
+        market: &Market,
+        block_height: u64,
+    ) -> Result<(), Error> {
+        let mut sequence = 0u32;
+
+        // Remove Bitcoin UTXOs for each shareholder and restore shares
+        for payout in &payout_summary.payouts {
+            let outpoint = generate_share_payout_outpoint(
+                &payout.market_id,
+                &payout.address,
+                block_height,
+                sequence,
+            );
+
+            state.delete_utxo_with_address_index(txn, &outpoint)?;
+
+            // Restore shares to account
+            self.add_shares_to_account(
+                txn,
+                &payout.address,
+                payout.market_id.clone(),
+                payout.outcome_index,
+                payout.shares_redeemed,
+                block_height,
+            )?;
+
+            sequence += 1;
+        }
+
+        // Remove author fee UTXO
+        if payout_summary.author_fees_distributed > 0 {
+            let fee_outpoint = generate_share_payout_outpoint(
+                &payout_summary.market_id,
+                &market.creator_address,
+                block_height,
+                sequence,
+            );
+
+            state.delete_utxo_with_address_index(txn, &fee_outpoint)?;
+        }
+
+        tracing::info!(
+            "Reverted automatic share payouts for market {}: {} sats treasury + {} sats fees",
+            payout_summary.market_id,
+            payout_summary.treasury_distributed,
+            payout_summary.author_fees_distributed,
+        );
+
+        Ok(())
+    }
+}
+
+/// Generate a deterministic outpoint for share payouts
+fn generate_share_payout_outpoint(
+    market_id: &MarketId,
+    shareholder_address: &Address,
+    block_height: u64,
+    sequence: u32,
+) -> OutPoint {
+    use blake3::Hasher;
+
+    let mut hasher = Hasher::new();
+    hasher.update(b"SHARE_PAYOUT");
+    hasher.update(&market_id.0);
+    hasher.update(&shareholder_address.0);
+    hasher.update(&block_height.to_le_bytes());
+    hasher.update(&sequence.to_le_bytes());
+
+    let hash = hasher.finalize();
+    let merkle_root = crate::types::MerkleRoot::from(*hash.as_bytes());
+
+    OutPoint::Coinbase {
+        merkle_root,
+        vout: sequence,
     }
 }
 

@@ -1,4 +1,4 @@
-use eframe::egui::{self, InnerResponse, Response, TextBuffer};
+use eframe::egui::{self, Response};
 
 use truthcoin_dc::types::{Transaction, Txid};
 
@@ -17,38 +17,13 @@ pub struct TxCreator {
     pub bitcoin_value_in: bitcoin::Amount,
     pub bitcoin_value_out: bitcoin::Amount,
     pub tx_type: TxType,
-    // if the base tx has changed, need to recompute final tx
+
     base_txid: Txid,
     final_tx: Option<anyhow::Result<Transaction>>,
 }
 
-fn show_monospace_single_line_input(
-    ui: &mut egui::Ui,
-    text_buffer: &mut dyn TextBuffer,
-    descriptor: &str,
-) -> InnerResponse<Response> {
-    ui.horizontal(|ui| {
-        ui.monospace(format!("{descriptor}:       "))
-            | ui.add(egui::TextEdit::singleline(text_buffer))
-    })
-}
-
-fn show_monospace_single_line_inputs<'iter, I>(
-    ui: &mut egui::Ui,
-    iter: I,
-) -> Option<Response>
-where
-    I: IntoIterator<Item = (&'iter mut dyn TextBuffer, &'iter str)>,
-{
-    iter.into_iter()
-        .map(|(text_buffer, descriptor)| {
-            show_monospace_single_line_input(ui, text_buffer, descriptor).join()
-        })
-        .reduce(|resp0, resp1| resp0 | resp1)
-}
-
 impl TxCreator {
-    // set tx data for the current transaction
+
     fn set_tx_data(
         &self,
         _app: &App,
@@ -90,15 +65,11 @@ impl TxCreator {
         };
         let tx_data_changed =
             tx_data_ui.is_some_and(|resp: Response| resp.changed());
-        // if base txid has changed, store the new txid
         let base_txid = base_tx.txid();
         let base_txid_changed = base_txid != self.base_txid;
         if base_txid_changed {
             self.base_txid = base_txid;
         }
-        // (re)compute final tx if:
-        // * the tx type, tx data, or base txid has changed
-        // * final tx not yet set
         let refresh_final_tx = tx_type_dropdown.join().changed()
             || tx_data_changed
             || base_txid_changed

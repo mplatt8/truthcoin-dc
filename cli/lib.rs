@@ -18,8 +18,6 @@ use truthcoin_dc::{
 use truthcoin_dc_app_rpc_api::RpcClient;
 use url::{Host, Url};
 
-// Core CLI helper functions for improved user experience and code reuse
-
 /// Parse comma-separated input into filtered string vector
 pub fn parse_comma_separated(input: &str) -> Vec<String> {
     input
@@ -100,7 +98,6 @@ pub fn format_slot_info(slot_id: &str, period: u32, index: u32) -> String {
     format!("Slot {} (Period {}, Index {})", slot_id, period, index)
 }
 
-/// Handle JSON pretty printing consistently  
 pub fn json_response<T>(data: &T) -> anyhow::Result<String>
 where
     T: Serialize,
@@ -404,10 +401,6 @@ pub enum Command {
     #[command(name = "slots-get-quarter")]
     SlotsGetQuarter { quarter: u32 },
 
-    /// Convert timestamp to period
-    #[command(name = "slots-convert-timestamp")]
-    SlotsConvertTimestamp { timestamp: u64 },
-
     /// Get available slots in period
     #[command(name = "get-available-slots")]
     GetAvailableSlots {
@@ -535,14 +528,6 @@ pub enum Command {
     /// View market details
     #[command(name = "view-market", alias = "show-market", alias = "info")]
     ViewMarket { market_id: String },
-
-    /// Debug: Get raw market shares array
-    #[command(name = "debug-market-shares")]
-    DebugMarketShares { market_id: String },
-
-    /// Debug: Get all share accounts from the database
-    #[command(name = "debug-all-share-accounts")]
-    DebugAllShareAccounts,
 
     /// Buy shares
     #[command(name = "buy-shares", alias = "buy")]
@@ -687,7 +672,11 @@ pub enum Command {
     },
 
     /// Get all votes cast by a specific voter
-    #[command(name = "get-voter-votes", alias = "voter-votes", alias = "my-votes")]
+    #[command(
+        name = "get-voter-votes",
+        alias = "voter-votes",
+        alias = "my-votes"
+    )]
     GetVoterVotes {
         /// Voter address
         #[arg(long)]
@@ -932,7 +921,7 @@ impl Cli {
             .unwrap()
     }
 }
-/// Handle a command, returning CLI output
+
 async fn handle_command<RpcClient>(
     rpc_client: &RpcClient,
     command: Command,
@@ -1016,7 +1005,7 @@ where
             fee_sats,
         } => {
             let txid = rpc_client
-                .transfer_votecoin(dest, amount, fee_sats, None)
+                .votecoin_transfer(dest, amount, fee_sats, None)
                 .await?;
             format_tx_success("Votecoin transfer", None, &txid.to_string())
         }
@@ -1165,7 +1154,7 @@ where
 
         // === SLOT COMMANDS ===
         Command::SlotsStatus => {
-            let status = rpc_client.slots_status().await?;
+            let status = rpc_client.slot_status().await?;
             let mut output = String::new();
             output.push_str("Slot System Status:\n");
             output.push_str("==================\n\n");
@@ -1189,41 +1178,44 @@ where
             output
         }
         Command::SlotsListAll => {
-            let slots = rpc_client.slots_list_all().await?;
+            let slots = rpc_client.slot_list(None).await?;
             let mut output = String::new();
-            output.push_str("Available Slots by Period:\n");
-            output.push_str("========================\n\n");
+            output.push_str("All Slots by Period:\n");
+            output.push_str("====================\n\n");
             if slots.is_empty() {
                 output.push_str("No slots minted yet.\n");
             } else {
-                for slot_info in slots {
-                    let period_name =
-                        rpc_client.quarter_to_string(slot_info.period).await?;
+                // Group by period
+                let mut period_counts: std::collections::BTreeMap<u32, u64> =
+                    std::collections::BTreeMap::new();
+                for slot in &slots {
+                    *period_counts.entry(slot.period_index).or_insert(0) += 1;
+                }
+                for (period, count) in period_counts {
                     output.push_str(&format!(
-                        "{}: {} slots\n",
-                        period_name, slot_info.slots
+                        "Period {}: {} slots\n",
+                        period, count
                     ));
                 }
             }
             output
         }
         Command::SlotsGetQuarter { quarter } => {
-            let slot_count = rpc_client.slots_get_quarter(quarter).await?;
-            let period_name = rpc_client.quarter_to_string(quarter).await?;
-            format!("{}: {} slots", period_name, slot_count)
-        }
-        Command::SlotsConvertTimestamp { timestamp } => {
-            let quarter = rpc_client.timestamp_to_quarter(timestamp).await?;
-            let period_name = rpc_client.quarter_to_string(quarter).await?;
-            format!(
-                "Timestamp {} converts to: {} (Period {})",
-                timestamp, period_name, quarter
-            )
+            use truthcoin_dc_app_rpc_api::SlotFilter;
+            let filter = SlotFilter {
+                period: Some(quarter),
+                status: None,
+            };
+            let slots = rpc_client.slot_list(Some(filter)).await?;
+            format!("Period {}: {} slots", quarter, slots.len())
         }
         Command::GetAvailableSlots { period_index } => {
-            let available_slots = rpc_client
-                .get_available_slots_in_period(period_index)
-                .await?;
+            use truthcoin_dc_app_rpc_api::{SlotFilter, SlotState};
+            let filter = SlotFilter {
+                period: Some(period_index),
+                status: Some(SlotState::Available),
+            };
+            let available_slots = rpc_client.slot_list(Some(filter)).await?;
             if available_slots.is_empty() {
                 format!("No available slots in period {}", period_index)
             } else {
@@ -1242,7 +1234,7 @@ where
             }
         }
         Command::GetSlotById { slot_id_hex } => {
-            let slot = rpc_client.get_slot_by_id(slot_id_hex.clone()).await?;
+            let slot = rpc_client.slot_get(slot_id_hex.clone()).await?;
             match slot {
                 Some(slot_details) => {
                     let mut result = format!(
@@ -1302,8 +1294,12 @@ where
             }
         }
         Command::GetClaimedSlots { period_index } => {
-            let claimed_slots =
-                rpc_client.get_claimed_slots_in_period(period_index).await?;
+            use truthcoin_dc_app_rpc_api::{SlotFilter, SlotState};
+            let filter = SlotFilter {
+                period: Some(period_index),
+                status: Some(SlotState::Claimed),
+            };
+            let claimed_slots = rpc_client.slot_list(Some(filter)).await?;
             if claimed_slots.is_empty() {
                 format!("No claimed slots found in period {}", period_index)
             } else {
@@ -1313,58 +1309,126 @@ where
                     claimed_slots.len()
                 );
                 for slot in claimed_slots {
+                    let question_preview =
+                        slot.decision.as_ref().map_or("N/A".to_string(), |d| {
+                            if d.question.len() > 30 {
+                                format!("{}...", &d.question[..30])
+                            } else {
+                                d.question.clone()
+                            }
+                        });
+                    let is_standard =
+                        slot.decision.as_ref().map_or(false, |d| d.is_standard);
+                    let is_scaled =
+                        slot.decision.as_ref().map_or(false, |d| d.is_scaled);
+                    let market_maker =
+                        slot.decision.as_ref().map_or("N/A".to_string(), |d| {
+                            if d.market_maker_pubkey_hash.len() >= 8 {
+                                d.market_maker_pubkey_hash[..8].to_string()
+                            } else {
+                                d.market_maker_pubkey_hash.clone()
+                            }
+                        });
                     result.push_str(&format!(
                         "  Slot {} ({}): {} | {} | Market Maker: {} | \"{}\"\n",
                         slot.slot_index,
                         slot.slot_id_hex,
-                        if slot.is_standard {
+                        if is_standard {
                             "Standard"
                         } else {
                             "Non-Standard"
                         },
-                        if slot.is_scaled { "Scaled" } else { "Binary" },
-                        &slot.market_maker_pubkey_hash[..8], // Show first 8 chars of hash
-                        slot.question_preview
+                        if is_scaled { "Scaled" } else { "Binary" },
+                        market_maker,
+                        question_preview
                     ));
                 }
                 result
             }
         }
         Command::IsSlotInVoting { slot_id_hex } => {
-            let is_voting =
-                rpc_client.is_slot_in_voting(slot_id_hex.clone()).await?;
-            if is_voting {
-                format!("Slot {} is in voting period", slot_id_hex)
-            } else {
-                format!("Slot {} is NOT in voting period", slot_id_hex)
+            use truthcoin_dc_app_rpc_api::SlotState;
+            let slot = rpc_client.slot_get(slot_id_hex.clone()).await?;
+            match slot {
+                Some(s) => {
+                    let is_voting = matches!(
+                        s.content,
+                        truthcoin_dc_app_rpc_api::SlotContentInfo::Decision(_)
+                    ) && matches!(
+                        rpc_client
+                            .slot_list(Some(
+                                truthcoin_dc_app_rpc_api::SlotFilter {
+                                    period: Some(s.period_index),
+                                    status: Some(SlotState::Voting),
+                                }
+                            ))
+                            .await?
+                            .iter()
+                            .find(|sl| sl.slot_id_hex == slot_id_hex),
+                        Some(_)
+                    );
+                    if is_voting {
+                        format!("Slot {} is in voting period", slot_id_hex)
+                    } else {
+                        format!("Slot {} is NOT in voting period", slot_id_hex)
+                    }
+                }
+                None => format!("Slot {} not found", slot_id_hex),
             }
         }
         Command::GetVotingPeriods => {
-            let voting_periods = rpc_client.get_voting_periods().await?;
-            if voting_periods.is_empty() {
+            use truthcoin_dc_app_rpc_api::{SlotFilter, SlotState};
+            // Get all slots in voting state
+            let filter = SlotFilter {
+                period: None,
+                status: Some(SlotState::Voting),
+            };
+            let voting_slots = rpc_client.slot_list(Some(filter)).await?;
+            if voting_slots.is_empty() {
                 "No periods currently in voting phase".to_string()
             } else {
+                // Group by period and count
+                let mut period_counts: std::collections::BTreeMap<
+                    u32,
+                    (u64, u64),
+                > = std::collections::BTreeMap::new();
+                for slot in &voting_slots {
+                    let entry = period_counts
+                        .entry(slot.period_index)
+                        .or_insert((0, 0));
+                    entry.0 += 1; // total slots in voting
+                    if slot.decision.is_some() {
+                        entry.1 += 1; // claimed slots
+                    }
+                }
                 let mut result = format!(
                     "Voting Periods ({} total):\n",
-                    voting_periods.len()
+                    period_counts.len()
                 );
                 result.push_str("================================\n");
-                for period_info in voting_periods {
+                for (period, (total, claimed)) in period_counts {
                     result.push_str(&format!(
                         "Period {}: {}/{} slots claimed ({:.1}%)\n",
-                        period_info.period,
-                        period_info.claimed_slots,
-                        period_info.total_slots,
-                        (period_info.claimed_slots as f64
-                            / period_info.total_slots as f64)
-                            * 100.0
+                        period,
+                        claimed,
+                        total,
+                        if total > 0 {
+                            (claimed as f64 / total as f64) * 100.0
+                        } else {
+                            0.0
+                        }
                     ));
                 }
                 result
             }
         }
         Command::GetOssifiedSlots => {
-            let ossified_slots = rpc_client.get_ossified_slots().await?;
+            use truthcoin_dc_app_rpc_api::{SlotFilter, SlotState};
+            let filter = SlotFilter {
+                period: None,
+                status: Some(SlotState::Ossified),
+            };
+            let ossified_slots = rpc_client.slot_list(Some(filter)).await?;
             if ossified_slots.is_empty() {
                 "No ossified slots found".to_string()
             } else {
@@ -1378,11 +1442,11 @@ where
                         "Slot {} (Period {}, Index {}): ",
                         slot.slot_id_hex, slot.period_index, slot.slot_index
                     ));
-                    if let Some(decision) = slot.decision {
+                    if let Some(decision) = &slot.decision {
                         let question_preview = if decision.question.len() > 50 {
                             format!("{}...", &decision.question[..50])
                         } else {
-                            decision.question
+                            decision.question.clone()
                         };
                         result.push_str(&format!(
                             "{} - {}\n",
@@ -1411,7 +1475,7 @@ where
             fee_sats,
         } => {
             let txid = rpc_client
-                .claim_decision_slot(
+                .slot_claim(
                     period_index,
                     slot_index,
                     is_standard,
@@ -1464,7 +1528,7 @@ where
                 fee_sats,
             };
 
-            let txid = rpc_client.create_market(request).await?;
+            let txid = rpc_client.market_create(request).await?;
             format!(
                 "Market '{}' submitted successfully.\nTransaction ID: {}\nUse 'list-markets' after confirmation to get the market ID.",
                 title, txid
@@ -1505,14 +1569,14 @@ where
                 fee_sats,
             };
 
-            let txid = rpc_client.create_market(request).await?;
+            let txid = rpc_client.market_create(request).await?;
             format!(
                 "Yes/No market '{}' submitted successfully.\nTransaction ID: {}\nUse 'list-markets' after confirmation to get the market ID.",
                 question, txid
             )
         }
         Command::ListMarkets => {
-            let markets = rpc_client.list_markets().await?;
+            let markets = rpc_client.market_list().await?;
             if markets.is_empty() {
                 "No markets in Trading state found.".to_string()
             } else {
@@ -1566,7 +1630,7 @@ where
         }
         Command::ViewMarket { market_id } => {
             let market_details =
-                rpc_client.view_market(market_id.clone()).await?;
+                rpc_client.market_get(market_id.clone()).await?;
             match market_details {
                 Some(details) => {
                     let mut output = String::new();
@@ -1658,9 +1722,13 @@ where
 
                     // Display resolution info for ossified markets
                     if let Some(resolution) = &details.resolution {
-                        output.push_str("\n════════════════════════════════════════\n");
+                        output.push_str(
+                            "\n════════════════════════════════════════\n",
+                        );
                         output.push_str("  MARKET RESOLUTION\n");
-                        output.push_str("════════════════════════════════════════\n");
+                        output.push_str(
+                            "════════════════════════════════════════\n",
+                        );
                         output.push_str(&format!("{}\n\n", resolution.summary));
 
                         if !resolution.winning_outcomes.is_empty() {
@@ -1680,22 +1748,6 @@ where
                 None => format!("Market {} not found", market_id),
             }
         }
-        Command::DebugMarketShares { market_id } => {
-            let shares = rpc_client.debug_market_shares(market_id.clone()).await?;
-            match shares {
-                Some(s) => {
-                    let mut output = format!("Raw shares for market {}:\n", market_id);
-                    for (i, share) in s.iter().enumerate() {
-                        output.push_str(&format!("  [{}]: {:.6}\n", i, share));
-                    }
-                    output
-                }
-                None => format!("Market {} not found", market_id),
-            }
-        }
-        Command::DebugAllShareAccounts => {
-            rpc_client.debug_all_share_accounts().await?
-        }
         Command::BuyShares {
             market_id,
             outcome_index,
@@ -1703,23 +1755,28 @@ where
             max_cost,
             fee_sats,
         } => {
-            let txid = rpc_client
-                .buy_shares(
-                    market_id.clone(),
-                    outcome_index,
-                    shares_amount,
-                    max_cost,
-                    fee_sats,
-                )
-                .await?;
+            use truthcoin_dc_app_rpc_api::MarketBuyRequest;
+            let request = MarketBuyRequest {
+                market_id: market_id.clone(),
+                outcome_index,
+                shares_amount,
+                max_cost: Some(max_cost),
+                fee_sats: Some(fee_sats),
+                dry_run: Some(false),
+            };
+            let result = rpc_client.market_buy(request).await?;
             format!(
                 "Successfully submitted buy shares transaction!\n\
                 Market: {}\n\
                 Outcome Index: {}\n\
                 Shares: {:.4}\n\
-                Max Cost: {} sats\n\
+                Cost: {} sats\n\
                 Transaction ID: {}",
-                market_id, outcome_index, shares_amount, max_cost, txid
+                market_id,
+                outcome_index,
+                shares_amount,
+                result.cost_sats,
+                result.txid.unwrap_or_default()
             )
         }
         Command::CalculateShareCost {
@@ -1727,13 +1784,16 @@ where
             outcome_index,
             shares_amount,
         } => {
-            let cost_sats = rpc_client
-                .calculate_share_cost(
-                    market_id.clone(),
-                    outcome_index,
-                    shares_amount,
-                )
-                .await?;
+            use truthcoin_dc_app_rpc_api::MarketBuyRequest;
+            let request = MarketBuyRequest {
+                market_id: market_id.clone(),
+                outcome_index,
+                shares_amount,
+                max_cost: None,
+                fee_sats: Some(0),
+                dry_run: Some(true),
+            };
+            let result = rpc_client.market_buy(request).await?;
 
             format!(
                 "Share Purchase Cost Calculation:\n\
@@ -1744,24 +1804,26 @@ where
                 market_id,
                 outcome_index,
                 shares_amount,
-                cost_sats,
-                cost_sats as f64 / 100_000_000.0
+                result.cost_sats,
+                result.cost_sats as f64 / 100_000_000.0
             )
         }
         Command::GetUserSharePositions { address } => {
             // If address provided, query that address. Otherwise query all wallet addresses.
             let holdings = if let Some(addr) = address {
-                rpc_client.get_user_share_positions(addr).await?
+                rpc_client.market_positions(addr, None).await?
             } else {
                 // Get all wallet addresses and aggregate positions
-                let wallet_addresses = rpc_client.get_wallet_addresses().await?;
+                let wallet_addresses =
+                    rpc_client.get_wallet_addresses().await?;
                 let mut all_positions = Vec::new();
                 let mut total_value = 0.0;
                 let mut total_cost_basis = 0.0;
                 let mut active_markets = std::collections::HashSet::new();
 
                 for addr in wallet_addresses {
-                    let holdings = rpc_client.get_user_share_positions(addr).await?;
+                    let holdings =
+                        rpc_client.market_positions(addr, None).await?;
                     for pos in holdings.positions {
                         active_markets.insert(pos.market_id.clone());
                         total_value += pos.current_value;
@@ -1843,9 +1905,10 @@ where
                 rpc_client.get_new_address().await?
             };
 
-            let positions = rpc_client
-                .get_market_share_positions(addr, market_id.clone())
+            let holdings = rpc_client
+                .market_positions(addr, Some(market_id.clone()))
                 .await?;
+            let positions = holdings.positions;
 
             if positions.is_empty() {
                 format!(
@@ -1954,7 +2017,7 @@ where
                 fee_sats,
             };
 
-            let txid = rpc_client.register_voter(request).await?;
+            let txid = rpc_client.vote_register(request).await?;
             format_tx_success("Voter registration", None, &txid)
         }
 
@@ -1963,15 +2026,14 @@ where
             vote_value,
             fee_sats,
         } => {
-            use truthcoin_dc_app_rpc_api::SubmitVoteRequest;
+            use truthcoin_dc_app_rpc_api::VoteBatchItem;
 
-            let request = SubmitVoteRequest {
+            let vote_items = vec![VoteBatchItem {
                 decision_id: decision_id.clone(),
                 vote_value,
-                fee_sats,
-            };
+            }];
 
-            let txid = rpc_client.submit_vote(request).await?;
+            let txid = rpc_client.vote_submit(vote_items, fee_sats).await?;
             format!(
                 "Vote submitted successfully!\n\
                 Decision: {}\n\
@@ -1981,11 +2043,8 @@ where
             )
         }
 
-        Command::SubmitVoteBatch {
-            votes,
-            fee_sats,
-        } => {
-            use truthcoin_dc_app_rpc_api::{SubmitVoteBatchRequest, VoteBatchItem};
+        Command::SubmitVoteBatch { votes, fee_sats } => {
+            use truthcoin_dc_app_rpc_api::VoteBatchItem;
 
             // Parse votes from "decision_id:value,decision_id:value,..." format
             let vote_items: Result<Vec<VoteBatchItem>, String> = votes
@@ -2014,12 +2073,8 @@ where
             };
 
             let vote_count = vote_items.len();
-            let request = SubmitVoteBatchRequest {
-                votes: vote_items,
-                fee_sats,
-            };
 
-            let txid = rpc_client.submit_vote_batch(request).await?;
+            let txid = rpc_client.vote_submit(vote_items, fee_sats).await?;
             format!(
                 "Vote batch submitted successfully!\n\
                 Votes: {} decisions\n\
@@ -2029,16 +2084,25 @@ where
         }
 
         Command::GetVoterInfo { address } => {
-            let voter_info = rpc_client.get_voter_info(address).await?;
+            let voter_info = rpc_client.vote_voter(address).await?;
             match voter_info {
                 Some(info) => {
                     let mut output = String::new();
                     output.push_str("Voter Information:\n");
                     output.push_str("==================\n\n");
                     output.push_str(&format!("Address: {}\n", info.address));
-                    output.push_str(&format!("Reputation: {:.6}\n", info.reputation));
-                    output.push_str(&format!("Total Votes: {}\n", info.total_votes));
-                    output.push_str(&format!("Periods Active: {}\n", info.periods_active));
+                    output.push_str(&format!(
+                        "Reputation: {:.6}\n",
+                        info.reputation
+                    ));
+                    output.push_str(&format!(
+                        "Total Votes: {}\n",
+                        info.total_votes
+                    ));
+                    output.push_str(&format!(
+                        "Periods Active: {}\n",
+                        info.periods_active
+                    ));
                     output.push_str(&format!(
                         "Accuracy Score: {:.2}%\n",
                         info.accuracy_score * 100.0
@@ -2058,33 +2122,54 @@ where
         }
 
         Command::GetVotingPeriodDetails { period_id } => {
-            let details = rpc_client.get_voting_period_details(period_id).await?;
+            let details = rpc_client.vote_period(Some(period_id)).await?;
             match details {
                 Some(info) => {
                     let mut output = String::new();
-                    output.push_str(&format!("Voting Period {} Details:\n", period_id));
+                    output.push_str(&format!(
+                        "Voting Period {} Details:\n",
+                        period_id
+                    ));
                     output.push_str("=============================\n\n");
                     output.push_str(&format!("Status: {}\n", info.status));
-                    output.push_str(&format!("Start Time: {}\n", info.start_time));
-                    output.push_str(&format!("End Time: {}\n", info.end_time));
                     output.push_str(&format!(
-                        "Created at Height: {}\n",
-                        info.created_at_height
+                        "Start Height: {}\n",
+                        info.start_height
                     ));
-                    output.push_str(&format!("Total Voters: {}\n", info.total_voters));
-                    output.push_str(&format!("Active Voters: {}\n", info.active_voters));
-                    output.push_str(&format!("Total Votes: {}\n", info.total_votes));
+                    output.push_str(&format!(
+                        "End Height: {}\n",
+                        info.end_height
+                    ));
+                    output.push_str(&format!(
+                        "Total Voters: {}\n",
+                        info.stats.total_voters
+                    ));
+                    output.push_str(&format!(
+                        "Active Voters: {}\n",
+                        info.stats.active_voters
+                    ));
+                    output.push_str(&format!(
+                        "Total Votes: {}\n",
+                        info.stats.total_votes
+                    ));
                     output.push_str(&format!(
                         "Consensus Reached: {}\n",
-                        if info.consensus_reached { "Yes" } else { "No" }
+                        if info.consensus.is_some() {
+                            "Yes"
+                        } else {
+                            "No"
+                        }
                     ));
-                    if !info.decision_slots.is_empty() {
+                    if !info.decisions.is_empty() {
                         output.push_str(&format!(
-                            "\nDecision Slots ({}):\n",
-                            info.decision_slots.len()
+                            "\nDecisions ({}):\n",
+                            info.decisions.len()
                         ));
-                        for slot in &info.decision_slots {
-                            output.push_str(&format!("  - {}\n", slot));
+                        for decision in &info.decisions {
+                            output.push_str(&format!(
+                                "  - {} ({})\n",
+                                decision.slot_id_hex, decision.question
+                            ));
                         }
                     }
                     output
@@ -2094,11 +2179,20 @@ where
         }
 
         Command::GetVoterVotes { address, period_id } => {
-            let votes = rpc_client.get_voter_votes(address, period_id).await?;
+            use truthcoin_dc_app_rpc_api::VoteFilter;
+            let filter = VoteFilter {
+                voter: Some(address),
+                decision_id: None,
+                period_id,
+            };
+            let votes = rpc_client.vote_list(filter).await?;
             if votes.is_empty() {
                 match period_id {
                     Some(pid) => {
-                        format!("No votes found for {} in period {}", address, pid)
+                        format!(
+                            "No votes found for {} in period {}",
+                            address, pid
+                        )
                     }
                     None => format!("No votes found for {}", address),
                 }
@@ -2134,7 +2228,13 @@ where
         }
 
         Command::GetDecisionVotes { slot_id } => {
-            let votes = rpc_client.get_decision_votes(slot_id.clone()).await?;
+            use truthcoin_dc_app_rpc_api::VoteFilter;
+            let filter = VoteFilter {
+                voter: None,
+                decision_id: Some(slot_id.clone()),
+                period_id: None,
+            };
+            let votes = rpc_client.vote_list(filter).await?;
             if votes.is_empty() {
                 format!("No votes found for decision {}", slot_id)
             } else {
@@ -2154,7 +2254,10 @@ where
 
                     output.push_str(&format!(
                         "│ {:30} │ {:12.4} │ {:10} │ {:10} │\n",
-                        short_addr, vote.vote_value, vote.period_id, vote.block_height
+                        short_addr,
+                        vote.vote_value,
+                        vote.period_id,
+                        vote.block_height
                     ));
                 }
 
@@ -2165,33 +2268,34 @@ where
         }
 
         Command::GetVoterParticipation { address, period_id } => {
-            let participation = rpc_client
-                .get_voter_participation(address, period_id)
-                .await?;
-            match participation {
+            let voter_info = rpc_client.vote_voter(address).await?;
+            match voter_info {
                 Some(info) => {
                     let mut output = String::new();
                     output.push_str("Voter Participation Summary:\n");
                     output.push_str("============================\n\n");
                     output.push_str(&format!("Address: {}\n", info.address));
-                    output.push_str(&format!("Period: {}\n", info.period_id));
-                    output.push_str(&format!("Votes Cast: {}\n", info.votes_cast));
-                    output.push_str(&format!(
-                        "Decisions Available: {}\n",
-                        info.decisions_available
-                    ));
-                    output.push_str(&format!(
-                        "Participation Rate: {:.1}%\n",
-                        info.participation_rate * 100.0
-                    ));
-                    output.push_str(&format!(
-                        "In Consensus: {}\n",
-                        if info.participated_in_consensus {
-                            "Yes"
-                        } else {
-                            "No"
-                        }
-                    ));
+                    output.push_str(&format!("Period: {}\n", period_id));
+                    if let Some(participation) =
+                        &info.current_period_participation
+                    {
+                        output.push_str(&format!(
+                            "Votes Cast: {}\n",
+                            participation.votes_cast
+                        ));
+                        output.push_str(&format!(
+                            "Decisions Available: {}\n",
+                            participation.decisions_available
+                        ));
+                        output.push_str(&format!(
+                            "Participation Rate: {:.1}%\n",
+                            participation.participation_rate * 100.0
+                        ));
+                    } else {
+                        output.push_str(
+                            "No current period participation data available.\n",
+                        );
+                    }
                     output
                 }
                 None => format!(
@@ -2202,7 +2306,7 @@ where
         }
 
         Command::ListVoters => {
-            let voters = rpc_client.list_voters().await?;
+            let voters = rpc_client.vote_voters().await?;
             if voters.is_empty() {
                 "No registered voters found.".to_string()
             } else {
@@ -2237,8 +2341,8 @@ where
         }
 
         Command::IsRegisteredVoter { address } => {
-            let is_registered = rpc_client.is_registered_voter(address).await?;
-            if is_registered {
+            let voter_info = rpc_client.vote_voter(address).await?;
+            if voter_info.is_some() {
                 format!("Address {} is a registered voter", address)
             } else {
                 format!("Address {} is NOT a registered voter", address)
@@ -2246,29 +2350,43 @@ where
         }
 
         Command::GetVotecoinBalance { address } => {
-            let balance = rpc_client.get_votecoin_balance(address).await?;
+            let balance = rpc_client.votecoin_balance(address).await?;
             format!("Votecoin balance for {}: {} VTC", address, balance)
         }
 
         Command::GetCurrentVotingStats => {
-            let stats = rpc_client.get_current_voting_stats().await?;
+            let stats = rpc_client.vote_period(None).await?;
             match stats {
                 Some(info) => {
                     let mut output = String::new();
                     output.push_str("Current Voting Period Statistics:\n");
                     output.push_str("==================================\n\n");
-                    output.push_str(&format!("Period ID: {}\n", info.period_id));
+                    output
+                        .push_str(&format!("Period ID: {}\n", info.period_id));
                     output.push_str(&format!("Status: {}\n", info.status));
-                    output.push_str(&format!("Total Voters: {}\n", info.total_voters));
-                    output.push_str(&format!("Active Voters: {}\n", info.active_voters));
-                    output.push_str(&format!("Total Votes Cast: {}\n", info.total_votes));
                     output.push_str(&format!(
-                        "Decision Slots: {}\n",
-                        info.decision_slots.len()
+                        "Total Voters: {}\n",
+                        info.stats.total_voters
+                    ));
+                    output.push_str(&format!(
+                        "Active Voters: {}\n",
+                        info.stats.active_voters
+                    ));
+                    output.push_str(&format!(
+                        "Total Votes Cast: {}\n",
+                        info.stats.total_votes
+                    ));
+                    output.push_str(&format!(
+                        "Decisions: {}\n",
+                        info.decisions.len()
                     ));
                     output.push_str(&format!(
                         "Consensus Reached: {}\n",
-                        if info.consensus_reached { "Yes" } else { "No" }
+                        if info.consensus.is_some() {
+                            "Yes"
+                        } else {
+                            "No"
+                        }
                     ));
                     output
                 }
@@ -2277,102 +2395,155 @@ where
         }
 
         Command::GetVotingConsensusResults { period_id } => {
-            let results = rpc_client.get_voting_consensus_results(period_id).await?;
-            let mut output = String::new();
-            output.push_str(&format!(
-                "Voting Consensus Results for Period {}:\n",
-                period_id
-            ));
-            output.push_str("==========================================\n\n");
-            output.push_str(&format!("Status: {}\n", results.status));
-            output.push_str(&format!(
-                "Algorithm Version: {}\n",
-                results.algorithm_version
-            ));
-            output.push_str(&format!(
-                "Vote Matrix: {} voters × {} decisions\n",
-                results.vote_matrix_dimensions.0, results.vote_matrix_dimensions.1
-            ));
-            output.push_str(&format!(
-                "Explained Variance: {:.2}%\n",
-                results.explained_variance * 100.0
-            ));
-            output.push_str(&format!("Certainty: {:.4}\n", results.certainty));
-
-            if !results.first_loading.is_empty() {
-                output.push_str("\nFirst Principal Component:\n");
-                for (i, val) in results.first_loading.iter().enumerate() {
-                    output.push_str(&format!("  Decision {}: {:.4}\n", i, val));
-                }
-            }
-
-            if !results.outcomes.is_empty() {
-                output.push_str("\nDecision Outcomes:\n");
-                for (decision_id, outcome) in &results.outcomes {
-                    output.push_str(&format!("  {}: {:.4}\n", decision_id, outcome));
-                }
-            }
-
-            if !results.reputation_updates.is_empty() {
-                output.push_str("\nReputation Updates:\n");
-                for (voter, update) in &results.reputation_updates {
-                    let short_voter = if voter.len() > 20 {
-                        format!("{}...", &voter[..17])
-                    } else {
-                        voter.clone()
-                    };
+            let period_info = rpc_client.vote_period(Some(period_id)).await?;
+            match period_info {
+                Some(info) => {
+                    let mut output = String::new();
                     output.push_str(&format!(
-                        "  {}: {:.4} → {:.4} (compliance: {:.2}%)\n",
-                        short_voter,
-                        update.old_reputation,
-                        update.new_reputation,
-                        update.compliance_score * 100.0
+                        "Voting Consensus Results for Period {}:\n",
+                        period_id
                     ));
-                }
-            }
+                    output.push_str(
+                        "==========================================\n\n",
+                    );
+                    output.push_str(&format!("Status: {}\n", info.status));
 
-            if !results.outliers.is_empty() {
-                output.push_str("\nOutliers Detected:\n");
-                for outlier in &results.outliers {
-                    output.push_str(&format!("  - {}\n", outlier));
-                }
-            }
+                    if let Some(consensus) = &info.consensus {
+                        output.push_str(&format!(
+                            "Algorithm Version: {}\n",
+                            consensus.algorithm_version
+                        ));
+                        output.push_str(&format!(
+                            "Vote Matrix: {} voters × {} decisions\n",
+                            consensus.vote_matrix_dimensions.0,
+                            consensus.vote_matrix_dimensions.1
+                        ));
+                        output.push_str(&format!(
+                            "Explained Variance: {:.2}%\n",
+                            consensus.explained_variance * 100.0
+                        ));
+                        output.push_str(&format!(
+                            "Certainty: {:.4}\n",
+                            consensus.certainty
+                        ));
 
-            output
+                        if !consensus.first_loading.is_empty() {
+                            output.push_str("\nFirst Principal Component:\n");
+                            for (i, val) in
+                                consensus.first_loading.iter().enumerate()
+                            {
+                                output.push_str(&format!(
+                                    "  Decision {}: {:.4}\n",
+                                    i, val
+                                ));
+                            }
+                        }
+
+                        if !consensus.outcomes.is_empty() {
+                            output.push_str("\nDecision Outcomes:\n");
+                            for (decision_id, outcome) in &consensus.outcomes {
+                                output.push_str(&format!(
+                                    "  {}: {:.4}\n",
+                                    decision_id, outcome
+                                ));
+                            }
+                        }
+
+                        if !consensus.reputation_updates.is_empty() {
+                            output.push_str("\nReputation Updates:\n");
+                            for (voter, update) in &consensus.reputation_updates
+                            {
+                                let short_voter = if voter.len() > 20 {
+                                    format!("{}...", &voter[..17])
+                                } else {
+                                    voter.clone()
+                                };
+                                output.push_str(&format!(
+                                    "  {}: {:.4} → {:.4} (compliance: {:.2}%)\n",
+                                    short_voter,
+                                    update.old_reputation,
+                                    update.new_reputation,
+                                    update.compliance_score * 100.0
+                                ));
+                            }
+                        }
+
+                        if !consensus.outliers.is_empty() {
+                            output.push_str("\nOutliers Detected:\n");
+                            for outlier in &consensus.outliers {
+                                output.push_str(&format!("  - {}\n", outlier));
+                            }
+                        }
+                    } else {
+                        output.push_str("No consensus data available yet.\n");
+                    }
+
+                    output
+                }
+                None => format!("Voting period {} not found", period_id),
+            }
         }
 
         Command::GetVoterReputation { voter_id } => {
-            let reputation = rpc_client.get_voter_reputation(voter_id.clone()).await?;
-            format!("Reputation for {}: {:.6}", voter_id, reputation)
+            // Parse voter_id as Address
+            let address: Address = voter_id
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid address format"))?;
+            let voter_info = rpc_client.vote_voter(address).await?;
+            match voter_info {
+                Some(info) => format!(
+                    "Reputation for {}: {:.6}",
+                    voter_id, info.reputation
+                ),
+                None => format!("Voter {} not found", voter_id),
+            }
         }
 
         Command::GetVotingPeriodStatus { period_id } => {
-            let status = rpc_client.get_voting_period_status(period_id).await?;
-            format!("Voting period {} status: {}", period_id, status)
+            let period_info = rpc_client.vote_period(Some(period_id)).await?;
+            match period_info {
+                Some(info) => format!(
+                    "Voting period {} status: {}",
+                    period_id, info.status
+                ),
+                None => format!("Voting period {} not found", period_id),
+            }
         }
 
         Command::GetRedistributionSummary { period_id } => {
-            let summary = rpc_client.get_redistribution_summary(period_id).await?;
-            match summary {
+            let period_info = rpc_client.vote_period(Some(period_id)).await?;
+            match period_info.and_then(|p| p.redistribution) {
                 Some(info) => {
                     let mut output = String::new();
                     output.push_str(&format!(
                         "VoteCoin Redistribution Summary for Period {}:\n",
                         period_id
                     ));
-                    output.push_str("===============================================\n\n");
+                    output.push_str(
+                        "===============================================\n\n",
+                    );
                     output.push_str(&format!(
                         "Total Redistributed: {} sats\n",
                         info.total_redistributed
                     ));
-                    output.push_str(&format!("Winners: {}\n", info.winners_count));
-                    output.push_str(&format!("Losers: {}\n", info.losers_count));
-                    output.push_str(&format!("Unchanged: {}\n", info.unchanged_count));
+                    output.push_str(&format!(
+                        "Winners: {}\n",
+                        info.winners_count
+                    ));
+                    output
+                        .push_str(&format!("Losers: {}\n", info.losers_count));
+                    output.push_str(&format!(
+                        "Unchanged: {}\n",
+                        info.unchanged_count
+                    ));
                     output.push_str(&format!(
                         "Conservation Check: {} (should be 0)\n",
                         info.conservation_check
                     ));
-                    output.push_str(&format!("Block Height: {}\n", info.block_height));
+                    output.push_str(&format!(
+                        "Block Height: {}\n",
+                        info.block_height
+                    ));
                     output.push_str(&format!(
                         "Applied: {}\n",
                         if info.is_applied { "Yes" } else { "No" }
@@ -2390,7 +2561,10 @@ where
                     output
                 }
                 None => {
-                    format!("No redistribution summary found for period {}", period_id)
+                    format!(
+                        "No redistribution summary found for period {}",
+                        period_id
+                    )
                 }
             }
         }
@@ -2414,8 +2588,6 @@ impl Cli {
             set_tracing_subscriber()?;
         }
 
-        // Direct RPC communication without status checks
-
         let request_id = uuid::Uuid::new_v4().as_simple().to_string();
         tracing::info!(%request_id);
         let builder = HttpClientBuilder::default()
@@ -2427,7 +2599,6 @@ impl Cli {
             )]));
         let client = builder.build(self.rpc_url())?;
 
-        // Direct RPC communication
         let result = handle_command(&client, self.command).await?;
         Ok(result)
     }

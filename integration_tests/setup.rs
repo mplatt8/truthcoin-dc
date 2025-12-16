@@ -217,7 +217,9 @@ impl Sidechain for PostSetup {
                         utxo_value.0 == value
                     }
                     FilledOutputContent::BitcoinWithdrawal { .. }
-                    | FilledOutputContent::Votecoin(_) => false,
+                    | FilledOutputContent::Votecoin(_)
+                    | FilledOutputContent::MarketTreasury { .. }
+                    | FilledOutputContent::MarketAuthorFee { .. } => false,
                 }
                 && match utxo.outpoint {
                     truthcoin_dc::types::OutPoint::Deposit(outpoint) => {

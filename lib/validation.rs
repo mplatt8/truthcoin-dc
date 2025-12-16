@@ -1,9 +1,11 @@
 use crate::state::Error;
+use crate::state::markets::MarketState::*;
 use crate::state::markets::{
     DFunction, DimensionSpec, MarketError, MarketState,
+    generate_market_author_fee_address, generate_market_treasury_address,
 };
 use crate::state::slots::{Decision, SlotId};
-use crate::types::{Address, FilledTransaction};
+use crate::types::{Address, FilledOutputContent, FilledTransaction};
 use sneed::RoTxn;
 use std::collections::HashSet;
 
@@ -192,11 +194,11 @@ impl MarketValidator {
         tx: &FilledTransaction,
         _override_height: Option<u32>,
     ) -> Result<(), Error> {
-        let market_data = tx.create_market().ok_or_else(|| {
-            Error::InvalidTransaction {
-                reason: "Not a market creation transaction".to_string(),
-            }
-        })?;
+        let market_data =
+            tx.create_market()
+                .ok_or_else(|| Error::InvalidTransaction {
+                    reason: "Not a market creation transaction".to_string(),
+                })?;
 
         // Validate market type per whitepaper specifications
         if market_data.market_type != "independent"
@@ -225,14 +227,14 @@ impl MarketValidator {
             let slot_id = SlotValidator::parse_slot_id_from_hex(slot_hex)?;
 
             // Verify slot exists
-            let slot = state
-                .slots()
-                .get_slot(rotxn, slot_id)?
-                .ok_or_else(|| Error::InvalidTransaction {
-                    reason: format!(
-                        "Referenced decision slot {} does not exist",
-                        slot_hex
-                    ),
+            let slot =
+                state.slots().get_slot(rotxn, slot_id)?.ok_or_else(|| {
+                    Error::InvalidTransaction {
+                        reason: format!(
+                            "Referenced decision slot {} does not exist",
+                            slot_hex
+                        ),
+                    }
                 })?;
 
             // Verify slot has a decision
@@ -325,11 +327,10 @@ impl MarketValidator {
     ) -> Result<(), Error> {
         use crate::state::markets::MarketState;
 
-        let buy_data = tx.buy_shares().ok_or_else(|| {
-            Error::InvalidTransaction {
+        let buy_data =
+            tx.buy_shares().ok_or_else(|| Error::InvalidTransaction {
                 reason: "Not a buy shares transaction".to_string(),
-            }
-        })?;
+            })?;
 
         // Validate market exists
         let market = state
@@ -410,142 +411,79 @@ impl MarketValidator {
             });
         }
 
+        // Calculate fee amount
+        let fee_amount = trade_cost * market.trading_fee();
+        let base_cost_sats = trade_cost.ceil() as u64;
+        let fee_sats = fee_amount.ceil() as u64;
+
+        // Validate explicit treasury and fee outputs exist with correct content types and amounts
+        let treasury_address = generate_market_treasury_address(&buy_data.market_id);
+        let fee_address = generate_market_author_fee_address(&buy_data.market_id);
+        let market_id_bytes = *buy_data.market_id.as_bytes();
+
+        let (treasury_output_amount, fee_output_amount) = tx
+            .filled_outputs()
+            .map(|outputs| {
+                let treasury_amt = outputs
+                    .iter()
+                    .filter_map(|o| {
+                        if o.address == treasury_address {
+                            match &o.content {
+                                FilledOutputContent::MarketTreasury { market_id, amount }
+                                    if *market_id == market_id_bytes =>
+                                {
+                                    Some(amount.0.to_sat())
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .sum::<u64>();
+
+                let fee_amt = outputs
+                    .iter()
+                    .filter_map(|o| {
+                        if o.address == fee_address {
+                            match &o.content {
+                                FilledOutputContent::MarketAuthorFee { market_id, amount }
+                                    if *market_id == market_id_bytes =>
+                                {
+                                    Some(amount.0.to_sat())
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .sum::<u64>();
+
+                (treasury_amt, fee_amt)
+            })
+            .unwrap_or((0, 0));
+
+        if treasury_output_amount < base_cost_sats {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "BuyShares tx missing treasury output: expected {} sats to {}, found {} sats",
+                    base_cost_sats, treasury_address, treasury_output_amount
+                ),
+            });
+        }
+
+        if fee_output_amount < fee_sats {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "BuyShares tx missing fee output: expected {} sats to {}, found {} sats",
+                    fee_sats, fee_address, fee_output_amount
+                ),
+            });
+        }
+
         // Validate trader authorization
         let _trader_address = Self::validate_market_maker_authorization(tx)?;
-
-        Ok(())
-    }
-
-    /// Validate share redemption transaction
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Implements redemption validation per whitepaper section 4:
-    /// - Market must be in Resolved state (voting complete, outcomes determined)
-    /// - User must hold sufficient shares in the specified outcome
-    /// - Payout value calculated from final_prices array
-    /// - Ensures proper economic settlement post-resolution
-    ///
-    /// # Arguments
-    /// * `state` - Blockchain state for validation queries
-    /// * `rotxn` - Read-only transaction
-    /// * `tx` - Filled transaction to validate
-    ///
-    /// # Returns
-    /// * `Ok(())` - Redemption is valid
-    /// * `Err(Error)` - Invalid redemption with detailed reason
-    ///
-    /// # Validation Rules
-    /// 1. Transaction must contain RedeemShares data
-    /// 2. Market must exist
-    /// 3. Market must be in Resolved state (not Trading/Voting)
-    /// 4. Outcome index must be valid for the market
-    /// 5. User must hold sufficient shares for redemption
-    /// 6. Shares amount must be positive
-    ///
-    /// # Bitcoin Hivemind Specification
-    /// Per whitepaper section 4, share redemption occurs after consensus resolution:
-    /// - Shares are redeemed for Bitcoin based on final_prices
-    /// - Payout = shares_redeemed × final_price[outcome_index]
-    /// - Only available in Resolved state to prevent premature redemption
-    pub fn validate_share_redemption(
-        state: &crate::state::State,
-        rotxn: &RoTxn,
-        tx: &FilledTransaction,
-    ) -> Result<(), Error> {
-        use crate::state::markets::MarketState;
-
-        let redeem_data = tx.redeem_shares().ok_or_else(|| {
-            Error::InvalidTransaction {
-                reason: "Not a share redemption transaction".to_string(),
-            }
-        })?;
-
-        // Validate market exists
-        let market = state
-            .markets()
-            .get_market(rotxn, &redeem_data.market_id)?
-            .ok_or_else(|| Error::InvalidTransaction {
-                reason: format!(
-                    "Market {:?} does not exist",
-                    redeem_data.market_id
-                ),
-            })?;
-
-        // CRITICAL: Validate market is in Resolved state
-        // This is the core whitepaper requirement - shares can only be redeemed after resolution
-        if market.state() != MarketState::Resolved {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Market not in Resolved state (current: {:?}). Shares can only be redeemed after market resolution.",
-                    market.state()
-                ),
-            });
-        }
-
-        // Validate outcome index
-        if redeem_data.outcome_index as usize >= market.shares().len() {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Outcome index {} out of range (market has {} outcomes)",
-                    redeem_data.outcome_index,
-                    market.shares().len()
-                ),
-            });
-        }
-
-        // Validate shares amount is positive
-        if redeem_data.shares_to_redeem <= 0.0 {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Shares to redeem must be positive, got {}",
-                    redeem_data.shares_to_redeem
-                ),
-            });
-        }
-
-        // Get trader address from transaction authorization
-        let trader_address = Self::validate_market_maker_authorization(tx)?;
-
-        // Validate user has sufficient shares
-        let share_account = state
-            .markets()
-            .get_user_share_account(rotxn, &trader_address)?
-            .ok_or_else(|| Error::InvalidTransaction {
-                reason: format!(
-                    "No share account found for address {}",
-                    trader_address
-                ),
-            })?;
-
-        let current_shares = share_account.get_position(
-            &redeem_data.market_id,
-            redeem_data.outcome_index,
-        );
-
-        if current_shares < redeem_data.shares_to_redeem {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Insufficient shares for redemption. Has {:.4} shares, trying to redeem {:.4}",
-                    current_shares, redeem_data.shares_to_redeem
-                ),
-            });
-        }
-
-        // Calculate redemption value based on final_prices (for informational purposes)
-        // The actual payout happens during block application
-        let final_price = market.final_prices()[redeem_data.outcome_index as usize];
-        let _redemption_value = redeem_data.shares_to_redeem * final_price;
-
-        // Validate final_prices are populated (should always be true for Resolved state)
-        let final_prices_sum: f64 = market.final_prices().iter().sum();
-        if (final_prices_sum - 1.0).abs() > 1e-6 {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Market final_prices not properly normalized (sum = {:.6}). Market may not be properly resolved.",
-                    final_prices_sum
-                ),
-            });
-        }
 
         Ok(())
     }
@@ -581,7 +519,9 @@ impl MarketValidator {
             let market = state
                 .markets()
                 .get_market(rotxn, &trade.market_id)
-                .map_err(|e| Error::DatabaseError(format!("Market access failed: {}", e)))?
+                .map_err(|e| {
+                    Error::DatabaseError(format!("Market access failed: {}", e))
+                })?
                 .ok_or_else(|| {
                     Error::Market(MarketError::MarketNotFound {
                         id: trade.market_id.clone(),
@@ -691,6 +631,7 @@ impl MarketValidator {
 
         Ok(())
     }
+
 }
 
 /// D-function validation utilities for market constraints.
@@ -793,10 +734,10 @@ impl DFunctionValidator {
     /// * `Ok(false)` - Invalid categorical constraint (zero or multiple true)
     /// * `Err(MarketError)` - Evaluation error
     pub fn validate_categorical_constraint(
-        d_function: &DFunction,
+        _d_function: &DFunction,
         categorical_slots: &[usize],
         combo: &[usize],
-        decision_slots: &[SlotId],
+        _decision_slots: &[SlotId],
     ) -> Result<bool, MarketError> {
         let mut true_count = 0;
 
@@ -903,9 +844,9 @@ impl MarketStateValidator {
     /// Validate market state transition according to Bitcoin Hivemind specification.
     ///
     /// Ensures state transitions follow valid paths per whitepaper requirements:
-    /// - Trading -> Voting -> Resolved -> Ossified
+    /// - Trading -> Ossified (automatic payout when voting completes)
     /// - Trading -> Cancelled (if no trades occurred)
-    /// - Trading/Voting -> Invalid (governance action)
+    /// - Trading -> Invalid (governance action)
     ///
     /// # Arguments
     /// * `from_state` - Current market state
@@ -918,19 +859,15 @@ impl MarketStateValidator {
         from_state: MarketState,
         to_state: MarketState,
     ) -> Result<(), Error> {
-        use MarketState::*;
-
         let valid_transition = match (from_state, to_state) {
             // No change is always valid
             (a, b) if a == b => true,
 
             // Valid forward transitions
-            (Trading, Voting) => true,
+            (Trading, Ossified) => true, // Direct transition with automatic payout
             (Trading, Cancelled) => true, // Only if no trades occurred (checked elsewhere)
             (Trading, Invalid) => true,   // Governance action
-            (Voting, Resolved) => true,
-            (Voting, Invalid) => true, // Governance action
-            (Resolved, Ossified) => true,
+            (Invalid, Ossified) => true,
 
             // All other transitions are invalid
             _ => false,
@@ -1011,7 +948,9 @@ impl VoteValidator {
     ///
     /// # Returns
     /// * `VoteValue` - Typed vote value for storage
-    pub fn convert_vote_value(vote_value: f64) -> crate::state::voting::types::VoteValue {
+    pub fn convert_vote_value(
+        vote_value: f64,
+    ) -> crate::state::voting::types::VoteValue {
         use crate::state::voting::types::VoteValue;
 
         if vote_value.is_nan() {
@@ -1041,10 +980,12 @@ impl VoteValidator {
         rotxn: &RoTxn,
         voter_address: &crate::types::Address,
     ) -> Result<u32, Error> {
-        let votecoin_balance = state.get_votecoin_balance(rotxn, voter_address)?;
+        let votecoin_balance =
+            state.get_votecoin_balance(rotxn, voter_address)?;
         if votecoin_balance == 0 {
             return Err(Error::InvalidTransaction {
-                reason: "Voter has no Votecoin balance (voting rights)".to_string(),
+                reason: "Voter has no Votecoin balance (voting rights)"
+                    .to_string(),
             });
         }
         Ok(votecoin_balance)
@@ -1068,11 +1009,14 @@ impl VoteValidator {
         rotxn: &RoTxn,
         decision_id: crate::state::slots::SlotId,
     ) -> Result<crate::state::slots::Decision, Error> {
-        let slot = state
-            .slots()
-            .get_slot(rotxn, decision_id)?
-            .ok_or_else(|| Error::InvalidSlotId {
-                reason: format!("Decision slot {:?} does not exist", decision_id),
+        let slot =
+            state.slots().get_slot(rotxn, decision_id)?.ok_or_else(|| {
+                Error::InvalidSlotId {
+                    reason: format!(
+                        "Decision slot {:?} does not exist",
+                        decision_id
+                    ),
+                }
             })?;
 
         let decision = slot.decision.ok_or_else(|| Error::InvalidSlotId {
@@ -1103,9 +1047,7 @@ impl VoteValidator {
             // Scalar decision - validate value is within range
             let min = decision.min.unwrap_or(0) as f64;
             let max = decision.max.unwrap_or(1) as f64;
-            if !vote_value.is_nan()
-                && (vote_value < min || vote_value > max)
-            {
+            if !vote_value.is_nan() && (vote_value < min || vote_value > max) {
                 return Err(Error::InvalidTransaction {
                     reason: format!(
                         "Vote value {} outside valid range [{}, {}]",
@@ -1117,9 +1059,7 @@ impl VoteValidator {
             // Binary decision - validate value is between 0.0 and 1.0, or NaN (abstain)
             // Per Bitcoin Hivemind whitepaper, 0.5 represents "inconclusive"
             // Voters can express uncertainty using any value in [0.0, 1.0]
-            if !vote_value.is_nan()
-                && (vote_value < 0.0 || vote_value > 1.0)
-            {
+            if !vote_value.is_nan() && (vote_value < 0.0 || vote_value > 1.0) {
                 return Err(Error::InvalidTransaction {
                     reason: format!(
                         "Binary decision vote must be between 0.0 and 1.0, or NaN (abstain), got {}",
@@ -1129,31 +1069,6 @@ impl VoteValidator {
             }
         }
         Ok(())
-    }
-
-    /// Get current timestamp and height for voting period validation.
-    ///
-    /// This method serves as the canonical source for time-based validation,
-    /// supporting caching to reduce database reads during batch processing.
-    ///
-    /// # Arguments
-    /// * `state` - Blockchain state
-    /// * `rotxn` - Read-only transaction
-    ///
-    /// # Returns
-    /// * `Ok((timestamp, height))` - Current timestamp and optional height
-    /// * `Err(Error)` - Timestamp not available
-    fn get_current_time_context(
-        state: &crate::state::State,
-        rotxn: &RoTxn,
-    ) -> Result<(u64, Option<u32>), Error> {
-        let current_ts = state
-            .try_get_mainchain_timestamp(rotxn)?
-            .ok_or_else(|| Error::InvalidTransaction {
-                reason: "No mainchain timestamp available".to_string(),
-            })?;
-        let current_height = state.try_get_height(rotxn)?;
-        Ok((current_ts, current_height))
     }
 
     /// Validate slot is in voting period.
@@ -1172,14 +1087,10 @@ impl VoteValidator {
     /// * `Err(Error)` - Slot is not accepting votes
     fn validate_voting_period(
         state: &crate::state::State,
+        rotxn: &sneed::RoTxn,
         decision_id: crate::state::slots::SlotId,
-        current_ts: u64,
-        current_height: Option<u32>,
     ) -> Result<(), Error> {
-        if !state
-            .slots()
-            .is_slot_in_voting(decision_id, current_ts, current_height)
-        {
+        if !state.slots().is_slot_in_voting(rotxn, decision_id)? {
             return Err(Error::InvalidTransaction {
                 reason: format!(
                     "Decision slot {:?} is not in voting period",
@@ -1208,14 +1119,14 @@ impl VoteValidator {
     fn validate_no_duplicate_vote(
         state: &crate::state::State,
         rotxn: &RoTxn,
-        voter_id: crate::state::voting::types::VoterId,
+        voter_address: crate::types::Address,
         period_id: crate::state::voting::types::VotingPeriodId,
         decision_id: crate::state::slots::SlotId,
     ) -> Result<(), Error> {
         if state
             .voting()
             .databases()
-            .get_vote(rotxn, period_id, voter_id, decision_id)?
+            .get_vote(rotxn, period_id, voter_address, decision_id)?
             .is_some()
         {
             return Err(Error::InvalidTransaction {
@@ -1250,10 +1161,7 @@ impl VoteValidator {
         filled_tx: &FilledTransaction,
         _override_height: Option<u32>,
     ) -> Result<(), Error> {
-        use crate::state::{
-            slots::SlotId,
-            voting::types::{VoterId, VotingPeriodId},
-        };
+        use crate::state::{slots::SlotId, voting::types::VotingPeriodId};
 
         let vote_data = filled_tx.submit_vote().ok_or_else(|| {
             Error::InvalidTransaction {
@@ -1271,7 +1179,8 @@ impl VoteValidator {
             .address;
 
         // Validate voter eligibility using shared helper
-        let _votecoin_balance = Self::validate_voter_eligibility(state, rotxn, &voter_address)?;
+        let _votecoin_balance =
+            Self::validate_voter_eligibility(state, rotxn, &voter_address)?;
 
         // Parse and validate decision slot using shared helper
         let decision_id = SlotId::from_bytes(vote_data.slot_id_bytes)?;
@@ -1297,16 +1206,18 @@ impl VoteValidator {
         // Validate vote value using shared helper
         Self::validate_vote_value(&decision, vote_data.vote_value)?;
 
-        // Get current time context (cached for efficiency)
-        let (current_ts, current_height) = Self::get_current_time_context(state, rotxn)?;
-
-        // Validate voting period using shared helper
-        Self::validate_voting_period(state, decision_id, current_ts, current_height)?;
+        // Validate voting period using shared helper (queries SlotStateHistory)
+        Self::validate_voting_period(state, rotxn, decision_id)?;
 
         // Check for duplicate votes using shared helper
-        let voter_id = VoterId::from_address(&voter_address);
         let period_id = VotingPeriodId::new(vote_data.voting_period);
-        Self::validate_no_duplicate_vote(state, rotxn, voter_id, period_id, decision_id)?;
+        Self::validate_no_duplicate_vote(
+            state,
+            rotxn,
+            voter_address,
+            period_id,
+            decision_id,
+        )?;
 
         Ok(())
     }
@@ -1331,10 +1242,7 @@ impl VoteValidator {
         filled_tx: &FilledTransaction,
         _override_height: Option<u32>,
     ) -> Result<(), Error> {
-        use crate::state::{
-            slots::SlotId,
-            voting::types::{VoterId, VotingPeriodId},
-        };
+        use crate::state::{slots::SlotId, voting::types::VotingPeriodId};
 
         let batch_data = filled_tx.submit_vote_batch().ok_or_else(|| {
             Error::InvalidTransaction {
@@ -1352,13 +1260,10 @@ impl VoteValidator {
             .address;
 
         // Validate voter eligibility once for the entire batch using shared helper
-        let _votecoin_balance = Self::validate_voter_eligibility(state, rotxn, &voter_address)?;
+        let _votecoin_balance =
+            Self::validate_voter_eligibility(state, rotxn, &voter_address)?;
 
-        let voter_id = VoterId::from_address(&voter_address);
         let period_id = VotingPeriodId::new(batch_data.voting_period);
-
-        // Get current time context once for the entire batch (cached for efficiency)
-        let (current_ts, current_height) = Self::get_current_time_context(state, rotxn)?;
 
         // Validate each vote in the batch using shared helpers
         for (idx, vote_item) in batch_data.votes.iter().enumerate() {
@@ -1383,40 +1288,65 @@ impl VoteValidator {
             }
 
             // Validate decision slot using shared helper with batch context
-            let decision = Self::validate_decision_slot(state, rotxn, decision_id)
-                .map_err(|e| match e {
-                    Error::InvalidSlotId { reason } => Error::InvalidSlotId {
-                        reason: format!("Vote batch item {}: {}", idx, reason),
-                    },
-                    other => other,
-                })?;
+            let decision =
+                Self::validate_decision_slot(state, rotxn, decision_id)
+                    .map_err(|e| match e {
+                        Error::InvalidSlotId { reason } => {
+                            Error::InvalidSlotId {
+                                reason: format!(
+                                    "Vote batch item {}: {}",
+                                    idx, reason
+                                ),
+                            }
+                        }
+                        other => other,
+                    })?;
 
             // Validate vote value using shared helper with batch context
             Self::validate_vote_value(&decision, vote_item.vote_value)
                 .map_err(|e| match e {
-                    Error::InvalidTransaction { reason } => Error::InvalidTransaction {
-                        reason: format!("Vote batch item {}: {}", idx, reason),
-                    },
+                    Error::InvalidTransaction { reason } => {
+                        Error::InvalidTransaction {
+                            reason: format!(
+                                "Vote batch item {}: {}",
+                                idx, reason
+                            ),
+                        }
+                    }
                     other => other,
                 })?;
 
-            // Validate voting period using shared helper with batch context
-            Self::validate_voting_period(state, decision_id, current_ts, current_height)
-                .map_err(|e| match e {
-                    Error::InvalidTransaction { reason } => Error::InvalidTransaction {
-                        reason: format!("Vote batch item {}: {}", idx, reason),
-                    },
+            // Validate voting period using shared helper with batch context (queries SlotStateHistory)
+            Self::validate_voting_period(state, rotxn, decision_id).map_err(
+                |e| match e {
+                    Error::InvalidTransaction { reason } => {
+                        Error::InvalidTransaction {
+                            reason: format!(
+                                "Vote batch item {}: {}",
+                                idx, reason
+                            ),
+                        }
+                    }
                     other => other,
-                })?;
+                },
+            )?;
 
             // Check for duplicate votes using shared helper with batch context
-            Self::validate_no_duplicate_vote(state, rotxn, voter_id, period_id, decision_id)
-                .map_err(|e| match e {
-                    Error::InvalidTransaction { reason } => Error::InvalidTransaction {
+            Self::validate_no_duplicate_vote(
+                state,
+                rotxn,
+                voter_address,
+                period_id,
+                decision_id,
+            )
+            .map_err(|e| match e {
+                Error::InvalidTransaction { reason } => {
+                    Error::InvalidTransaction {
                         reason: format!("Vote batch item {}: {}", idx, reason),
-                    },
-                    other => other,
-                })?;
+                    }
+                }
+                other => other,
+            })?;
         }
 
         Ok(())
@@ -1430,12 +1360,12 @@ impl VoterValidator {
     pub fn validate_voter_not_registered(
         state: &crate::state::State,
         rotxn: &RoTxn,
-        voter_id: crate::state::voting::types::VoterId,
+        voter_address: crate::types::Address,
     ) -> Result<(), Error> {
         if state
             .voting()
             .databases()
-            .get_voter_reputation(rotxn, voter_id)?
+            .get_voter_reputation(rotxn, voter_address)?
             .is_some()
         {
             return Err(Error::InvalidTransaction {
@@ -1448,12 +1378,12 @@ impl VoterValidator {
     pub fn validate_voter_exists(
         state: &crate::state::State,
         rotxn: &RoTxn,
-        voter_id: crate::state::voting::types::VoterId,
+        voter_address: crate::types::Address,
     ) -> Result<(), Error> {
         if state
             .voting()
             .databases()
-            .get_voter_reputation(rotxn, voter_id)?
+            .get_voter_reputation(rotxn, voter_address)?
             .is_none()
         {
             return Err(Error::InvalidTransaction {
@@ -1466,10 +1396,10 @@ impl VoterValidator {
     pub fn validate_reputation_update(
         state: &crate::state::State,
         rotxn: &RoTxn,
-        voter_id: crate::state::voting::types::VoterId,
+        voter_address: crate::types::Address,
         period_id: crate::state::voting::types::VotingPeriodId,
     ) -> Result<(), Error> {
-        Self::validate_voter_exists(state, rotxn, voter_id)?;
+        Self::validate_voter_exists(state, rotxn, voter_address)?;
 
         let consensus_outcomes = state
             .voting()
@@ -1488,7 +1418,7 @@ impl VoterValidator {
         let voter_votes = state
             .voting()
             .databases()
-            .get_votes_by_voter(rotxn, voter_id)?;
+            .get_votes_by_voter(rotxn, voter_address)?;
 
         let has_votes_in_period = voter_votes
             .iter()
@@ -1537,7 +1467,10 @@ impl PeriodValidator {
 
         if period.status != VotingPeriodStatus::Active {
             return Err(Error::InvalidTransaction {
-                reason: format!("Period {:?} is not active for voting", period.id),
+                reason: format!(
+                    "Period {:?} is not active for voting",
+                    period.id
+                ),
             });
         }
 

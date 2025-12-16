@@ -1,5 +1,3 @@
-//! State errors
-
 use sneed::{db::error as db, env::error as env, rwtxn::error as rwtxn};
 use thiserror::Error;
 use transitive::Transitive;
@@ -78,6 +76,8 @@ pub enum Error {
     InvalidRange,
     #[error("invalid slot ID: {reason}")]
     InvalidSlotId { reason: String },
+    #[error("invalid slot state: {reason}")]
+    InvalidSlotState { reason: String },
     #[error("invalid timestamp")]
     InvalidTimestamp,
     #[error("invalid transaction: {reason}")]
@@ -150,4 +150,8 @@ pub enum Error {
     WithdrawalBundle(#[from] WithdrawalBundleError),
     #[error("wrong public key for address")]
     WrongPubKeyForAddress,
+    #[error(
+        "consensus not yet calculated for period {0:?} - must be calculated by protocol during block connection"
+    )]
+    ConsensusNotYetCalculated(crate::state::voting::types::VotingPeriodId),
 }

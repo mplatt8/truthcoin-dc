@@ -1,5 +1,3 @@
-//! Test an unknown withdrawal event
-
 use std::collections::HashMap;
 
 use bip300301_enforcer_integration_tests::{
@@ -19,34 +17,27 @@ use tokio::time::sleep;
 use tracing::Instrument as _;
 use truthcoin_dc::{
     authorization::{Dst, Signature},
-    state::voting::types::{VotingPeriodId, VoterId},
     types::{Address, FilledOutputContent, GetAddress as _},
 };
-use truthcoin_dc_app_rpc_api::RpcClient as _;
+use truthcoin_dc_app_rpc_api::{
+    MarketBuyRequest, RpcClient as _, SlotContentInfo, SlotFilter, SlotState,
+    VoteBatchItem, VoteFilter,
+};
 
 use crate::{
     setup::{Init, PostSetup},
     util::BinPaths,
 };
 
-
 #[derive(Debug)]
 struct TruthcoinNodes {
-    /// Sidechain process that will be issuing a Truthcoin
     issuer: PostSetup,
-    /// Sidechain process that will be voting
     voter_0: PostSetup,
-    /// Sidechain process that will be voting
     voter_1: PostSetup,
-    /// Sidechain process that will be voting
     voter_2: PostSetup,
-    /// Sidechain process that will be voting
     voter_3: PostSetup,
-    /// Sidechain process that will be voting
     voter_4: PostSetup,
-    /// Sidechain process that will be voting
     voter_5: PostSetup,
-    /// Sidechain process that will be voting
     voter_6: PostSetup,
 }
 
@@ -56,7 +47,6 @@ impl TruthcoinNodes {
         res_tx: mpsc::UnboundedSender<anyhow::Result<()>>,
         enforcer_post_setup: &EnforcerPostSetup,
     ) -> anyhow::Result<Self> {
-        // Initialize a single node
         let setup_single = |suffix: &str| {
             PostSetup::setup(
                 Init {
@@ -77,8 +67,19 @@ impl TruthcoinNodes {
             voter_5: setup_single("voter_5").await?,
             voter_6: setup_single("voter_6").await?,
         };
-        for voter in [&res.voter_0, &res.voter_1, &res.voter_2, &res.voter_3, &res.voter_4, &res.voter_5, &res.voter_6] {
-            res.issuer.rpc_client.connect_peer(voter.net_addr().into()).await?;
+        for voter in [
+            &res.voter_0,
+            &res.voter_1,
+            &res.voter_2,
+            &res.voter_3,
+            &res.voter_4,
+            &res.voter_5,
+            &res.voter_6,
+        ] {
+            res.issuer
+                .rpc_client
+                .connect_peer(voter.net_addr().into())
+                .await?;
         }
         tracing::debug!("Connected 8 nodes in P2P network");
         Ok(res)
@@ -88,7 +89,6 @@ impl TruthcoinNodes {
 const DEPOSIT_AMOUNT: bitcoin::Amount = bitcoin::Amount::from_sat(21_000_000);
 const DEPOSIT_FEE: bitcoin::Amount = bitcoin::Amount::from_sat(1_000_000);
 
-/// Initial setup for the test
 async fn setup(
     bin_paths: &BinPaths,
     res_tx: mpsc::UnboundedSender<anyhow::Result<()>>,
@@ -124,9 +124,7 @@ async fn setup(
 const VOTE_CALL_MSG: &str = "test vote call";
 const VOTE_YES_MSG: &str = "test vote call YES";
 const VOTE_NO_MSG: &str = "test vote call NO";
-/// Total initial Votecoin supply
 const INITIAL_VOTECOIN_SUPPLY: u32 = 1000000;
-/// Votecoin allocated to voter 0
 const VOTER_ALLOCATION: u32 = 142857;
 
 async fn roundtrip_task(
@@ -175,16 +173,31 @@ async fn roundtrip_task(
     for voter in &voters {
         voter_addrs.push(voter.rpc_client.get_new_address().await?);
     }
-    let [voter_addr_0, voter_addr_1, voter_addr_2, voter_addr_3, voter_addr_4, voter_addr_5, voter_addr_6]: [Address; 7] =
-        voter_addrs.try_into().unwrap();
+    let [
+        voter_addr_0,
+        voter_addr_1,
+        voter_addr_2,
+        voter_addr_3,
+        voter_addr_4,
+        voter_addr_5,
+        voter_addr_6,
+    ]: [Address; 7] = voter_addrs.try_into().unwrap();
 
-    let voter_addresses = [voter_addr_0, voter_addr_1, voter_addr_2, voter_addr_3, voter_addr_4, voter_addr_5, voter_addr_6];
+    let voter_addresses = [
+        voter_addr_0,
+        voter_addr_1,
+        voter_addr_2,
+        voter_addr_3,
+        voter_addr_4,
+        voter_addr_5,
+        voter_addr_6,
+    ];
 
     for &voter_addr in &voter_addresses {
         truthcoin_nodes
             .issuer
             .rpc_client
-            .transfer_votecoin(voter_addr, VOTER_ALLOCATION, 0, None)
+            .votecoin_transfer(voter_addr, VOTER_ALLOCATION, 0, None)
             .await?;
 
         truthcoin_nodes
@@ -201,7 +214,15 @@ async fn roundtrip_task(
         .sign_arbitrary_msg(issuer_vk, VOTE_CALL_MSG.to_owned())
         .await?;
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3, &truthcoin_nodes.voter_4, &truthcoin_nodes.voter_5, &truthcoin_nodes.voter_6] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+        &truthcoin_nodes.voter_4,
+        &truthcoin_nodes.voter_5,
+        &truthcoin_nodes.voter_6,
+    ] {
         anyhow::ensure!(
             voter
                 .rpc_client
@@ -216,8 +237,14 @@ async fn roundtrip_task(
     }
 
     for (&voter_addr, voter) in voter_addresses.iter().zip(&voters) {
-        let balance = voter.rpc_client.get_votecoin_balance(voter_addr).await?;
-        anyhow::ensure!(balance == VOTER_ALLOCATION);
+        let balance = voter.rpc_client.votecoin_balance(voter_addr).await?;
+        anyhow::ensure!(
+            balance == VOTER_ALLOCATION,
+            "Voter at address {} has VoteCoin balance {} instead of expected {}",
+            voter_addr.as_base58(),
+            balance,
+            VOTER_ALLOCATION
+        );
     }
 
     let vote_weights: HashMap<Address, u32> = {
@@ -225,12 +252,17 @@ async fn roundtrip_task(
         let utxos = truthcoin_nodes.issuer.rpc_client.list_utxos().await?;
         for utxo in utxos {
             if let Some(votecoin_amount) = utxo.output.content.votecoin() {
-                *weights.entry(utxo.output.address).or_default() += votecoin_amount;
+                *weights.entry(utxo.output.address).or_default() +=
+                    votecoin_amount;
             }
         }
         weights
     };
-    anyhow::ensure!(vote_weights.len() >= 7, "Expected at least 7 voters in snapshot, found {}", vote_weights.len());
+    anyhow::ensure!(
+        vote_weights.len() >= 7,
+        "Expected at least 7 voters in snapshot, found {}",
+        vote_weights.len()
+    );
 
     let vote_auth_0 = truthcoin_nodes
         .voter_0
@@ -282,7 +314,8 @@ async fn roundtrip_task(
     anyhow::ensure!(total_yes == VOTER_ALLOCATION);
     anyhow::ensure!(total_no == VOTER_ALLOCATION);
 
-    let issuer_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
+    let issuer_height =
+        truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
     for voter in voters.iter() {
         let height = voter.rpc_client.getblockcount().await?;
         anyhow::ensure!(issuer_height == height);
@@ -290,65 +323,97 @@ async fn roundtrip_task(
 
     tracing::info!("✓ Phase 1: Votecoin distribution and voting verified");
 
-    const VOTER_DEPOSIT_AMOUNT: bitcoin::Amount = bitcoin::Amount::from_sat(5_000_000);
-    const VOTER_DEPOSIT_FEE: bitcoin::Amount = bitcoin::Amount::from_sat(500_000);
+    const VOTER_DEPOSIT_AMOUNT: bitcoin::Amount =
+        bitcoin::Amount::from_sat(5_000_000);
+    const VOTER_DEPOSIT_FEE: bitcoin::Amount =
+        bitcoin::Amount::from_sat(500_000);
 
-    let voter_0_deposit_address = truthcoin_nodes.voter_0.get_deposit_address().await?;
+    let voter_0_deposit_address =
+        truthcoin_nodes.voter_0.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
         &mut truthcoin_nodes.voter_0,
         &voter_0_deposit_address,
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
-    ).await?;
+    )
+    .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
-    let voter_1_deposit_address = truthcoin_nodes.voter_1.get_deposit_address().await?;
+    let voter_1_deposit_address =
+        truthcoin_nodes.voter_1.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
         &mut truthcoin_nodes.voter_1,
         &voter_1_deposit_address,
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
-    ).await?;
+    )
+    .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
-    let voter_2_deposit_address = truthcoin_nodes.voter_2.get_deposit_address().await?;
+    let voter_2_deposit_address =
+        truthcoin_nodes.voter_2.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
         &mut truthcoin_nodes.voter_2,
         &voter_2_deposit_address,
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
-    ).await?;
+    )
+    .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
-    let voter_3_deposit_address = truthcoin_nodes.voter_3.get_deposit_address().await?;
+    let voter_3_deposit_address =
+        truthcoin_nodes.voter_3.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
         &mut truthcoin_nodes.voter_3,
         &voter_3_deposit_address,
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
-    ).await?;
+    )
+    .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ] {
         let balance = voter.rpc_client.bitcoin_balance().await?;
         anyhow::ensure!(balance.total > bitcoin::Amount::ZERO);
     }
 
-    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    truthcoin_nodes
+        .issuer
+        .bmm_single(&mut enforcer_post_setup)
+        .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
     let slot_claims = [
-        (voter_addr_0, 0, "Decision 1: Will Bitcoin reach $100k in 2025?"),
-        (voter_addr_1, 1, "Decision 2: Will Ethereum merge to PoS succeed?"),
-        (voter_addr_2, 2, "Decision 3: Will there be 1M BTC addresses by 2026?"),
-        (voter_addr_3, 3, "Decision 4: Will Lightning Network capacity exceed 5000 BTC?"),
+        (
+            voter_addr_0,
+            0,
+            "Decision 1: Will Bitcoin reach $100k in 2025?",
+        ),
+        (
+            voter_addr_1,
+            1,
+            "Will the temperature in Florida be below 60 degrees?",
+        ),
+        (
+            voter_addr_2,
+            2,
+            "Decision 3: Will there be 1M BTC addresses by 2026?",
+        ),
+        (voter_addr_3, 3, "Will BIP 444 activate"),
     ];
 
-    for (i, (_voter_addr, slot_index, question)) in slot_claims.iter().enumerate() {
+    for (i, (_voter_addr, slot_index, question)) in
+        slot_claims.iter().enumerate()
+    {
         let voter_node = match i {
             0 => &truthcoin_nodes.voter_0,
             1 => &truthcoin_nodes.voter_1,
@@ -359,7 +424,7 @@ async fn roundtrip_task(
 
         voter_node
             .rpc_client
-            .claim_decision_slot(
+            .slot_claim(
                 3,
                 *slot_index,
                 true,
@@ -381,8 +446,16 @@ async fn roundtrip_task(
 
     sleep(std::time::Duration::from_secs(2)).await;
 
-    let issuer_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3].iter() {
+    let issuer_height =
+        truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ]
+    .iter()
+    {
         let mut block_received = false;
         for _ in 0..20 {
             let voter_height = voter.rpc_client.getblockcount().await?;
@@ -396,14 +469,25 @@ async fn roundtrip_task(
     }
 
     // Manual wallet refresh for multi-node test environment (8 nodes on one machine)
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ] {
         voter.rpc_client.refresh_wallet().await?;
     }
 
-    let wallet_utxos = truthcoin_nodes.voter_0.rpc_client.get_wallet_utxos().await?;
+    let wallet_utxos = truthcoin_nodes
+        .voter_0
+        .rpc_client
+        .get_wallet_utxos()
+        .await?;
     let chain_utxos = truthcoin_nodes.voter_0.rpc_client.list_utxos().await?;
-    let voter_0_addresses: Vec<_> = wallet_utxos.iter().map(|u| u.output.address).collect();
-    let voter_0_chain_bitcoin_utxos: Vec<_> = chain_utxos.iter()
+    let voter_0_addresses: Vec<_> =
+        wallet_utxos.iter().map(|u| u.output.address).collect();
+    let voter_0_chain_bitcoin_utxos: Vec<_> = chain_utxos
+        .iter()
         .filter(|utxo| {
             matches!(utxo.output.content, FilledOutputContent::Bitcoin(_))
                 && voter_0_addresses.contains(&utxo.output.address)
@@ -415,14 +499,22 @@ async fn roundtrip_task(
     let claimed_slots = truthcoin_nodes
         .issuer
         .rpc_client
-        .get_claimed_slots_in_period(3)
+        .slot_list(Some(SlotFilter {
+            period: Some(3),
+            status: Some(SlotState::Claimed),
+        }))
         .await?;
 
     anyhow::ensure!(claimed_slots.len() == 4);
 
     tracing::info!("✓ Phase 2: Claimed 4 decision slots");
     for slot in claimed_slots.iter() {
-        tracing::info!("  - {}", slot.question_preview);
+        let question = slot
+            .decision
+            .as_ref()
+            .map(|d| d.question.as_str())
+            .unwrap_or("Unknown");
+        tracing::info!("  - {}", question);
     }
 
     let market_slot_ids: Vec<String> = claimed_slots
@@ -439,8 +531,8 @@ async fn roundtrip_task(
         (
             &truthcoin_nodes.voter_1,
             1,
-            "Will Ethereum merge to PoS succeed?",
-            "Prediction market for Ethereum 2.0 success",
+            "Will the temperature in Florida be below 60 degrees?",
+            "Weather prediction market for Florida temperature",
         ),
         (
             &truthcoin_nodes.voter_2,
@@ -451,8 +543,8 @@ async fn roundtrip_task(
         (
             &truthcoin_nodes.voter_3,
             3,
-            "Will Lightning Network capacity exceed 5000 BTC?",
-            "Lightning Network growth prediction",
+            "Will BIP 444 activate",
+            "Prediction market for BIP 444 activation",
         ),
     ];
 
@@ -474,7 +566,7 @@ async fn roundtrip_task(
             fee_sats: 1000,
         };
 
-        voter_node.rpc_client.create_market(request).await?;
+        voter_node.rpc_client.market_create(request).await?;
     }
 
     sleep(std::time::Duration::from_millis(500)).await;
@@ -486,7 +578,7 @@ async fn roundtrip_task(
 
     sleep(std::time::Duration::from_secs(2)).await;
 
-    let markets = truthcoin_nodes.issuer.rpc_client.list_markets().await?;
+    let markets = truthcoin_nodes.issuer.rpc_client.market_list().await?;
     anyhow::ensure!(markets.len() == 4);
 
     for market in &markets {
@@ -499,9 +591,15 @@ async fn roundtrip_task(
         tracing::info!("  - {}", market.title);
     }
 
-    let market_ids: Vec<String> = markets.iter().map(|m| m.market_id.clone()).collect();
+    let market_ids: Vec<String> =
+        markets.iter().map(|m| m.market_id.clone()).collect();
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ] {
         voter.rpc_client.refresh_wallet().await?;
     }
     sleep(std::time::Duration::from_secs(1)).await;
@@ -515,24 +613,43 @@ async fn roundtrip_task(
             _ => unreachable!(),
         };
 
-        let cost = voter.rpc_client.calculate_share_cost(
-            market_id.clone(),
-            0,
-            5.0,
-        ).await?;
+        let dry_run = voter
+            .rpc_client
+            .market_buy(MarketBuyRequest {
+                market_id: market_id.clone(),
+                outcome_index: 0,
+                shares_amount: 5.0,
+                max_cost: None,
+                fee_sats: None,
+                dry_run: Some(true),
+            })
+            .await?;
+        let cost = dry_run.cost_sats;
 
-        voter.rpc_client.buy_shares(
-            market_id.clone(),
-            0,
-            5.0,
-            cost + 10000,
-            1000,
-        ).await?;
+        voter
+            .rpc_client
+            .market_buy(MarketBuyRequest {
+                market_id: market_id.clone(),
+                outcome_index: 0,
+                shares_amount: 5.0,
+                max_cost: Some(cost + 10000),
+                fee_sats: Some(1000),
+                dry_run: None,
+            })
+            .await?;
     }
-    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    truthcoin_nodes
+        .issuer
+        .bmm_single(&mut enforcer_post_setup)
+        .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ] {
         voter.rpc_client.refresh_wallet().await?;
     }
     sleep(std::time::Duration::from_millis(500)).await;
@@ -540,22 +657,43 @@ async fn roundtrip_task(
     truthcoin_nodes.voter_1.rpc_client.refresh_wallet().await?;
     sleep(std::time::Duration::from_millis(500)).await;
 
-    let cost = truthcoin_nodes.voter_1.rpc_client.calculate_share_cost(
-        market_ids[0].clone(),
-        1,
-        5.0,
-    ).await?;
-    truthcoin_nodes.voter_1.rpc_client.buy_shares(
-        market_ids[0].clone(),
-        1,
-        5.0,
-        cost + 10000,
-        1000,
-    ).await?;
-    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    let dry_run = truthcoin_nodes
+        .voter_1
+        .rpc_client
+        .market_buy(MarketBuyRequest {
+            market_id: market_ids[0].clone(),
+            outcome_index: 1,
+            shares_amount: 5.0,
+            max_cost: None,
+            fee_sats: None,
+            dry_run: Some(true),
+        })
+        .await?;
+    let cost = dry_run.cost_sats;
+    truthcoin_nodes
+        .voter_1
+        .rpc_client
+        .market_buy(MarketBuyRequest {
+            market_id: market_ids[0].clone(),
+            outcome_index: 1,
+            shares_amount: 5.0,
+            max_cost: Some(cost + 10000),
+            fee_sats: Some(1000),
+            dry_run: None,
+        })
+        .await?;
+    truthcoin_nodes
+        .issuer
+        .bmm_single(&mut enforcer_post_setup)
+        .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ] {
         voter.rpc_client.refresh_wallet().await?;
     }
     sleep(std::time::Duration::from_millis(500)).await;
@@ -563,130 +701,205 @@ async fn roundtrip_task(
     truthcoin_nodes.voter_2.rpc_client.refresh_wallet().await?;
     sleep(std::time::Duration::from_millis(500)).await;
 
-    let cost = truthcoin_nodes.voter_2.rpc_client.calculate_share_cost(
-        market_ids[1].clone(),
-        0,
-        50.0,
-    ).await?;
-    truthcoin_nodes.voter_2.rpc_client.buy_shares(
-        market_ids[1].clone(),
-        0,
-        50.0,
-        cost + 50000,
-        1000,
-    ).await?;
-    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    let dry_run = truthcoin_nodes
+        .voter_2
+        .rpc_client
+        .market_buy(MarketBuyRequest {
+            market_id: market_ids[1].clone(),
+            outcome_index: 0,
+            shares_amount: 50.0,
+            max_cost: None,
+            fee_sats: None,
+            dry_run: Some(true),
+        })
+        .await?;
+    let cost = dry_run.cost_sats;
+    truthcoin_nodes
+        .voter_2
+        .rpc_client
+        .market_buy(MarketBuyRequest {
+            market_id: market_ids[1].clone(),
+            outcome_index: 0,
+            shares_amount: 50.0,
+            max_cost: Some(cost + 50000),
+            fee_sats: Some(1000),
+            dry_run: None,
+        })
+        .await?;
+    truthcoin_nodes
+        .issuer
+        .bmm_single(&mut enforcer_post_setup)
+        .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ] {
         voter.rpc_client.refresh_wallet().await?;
     }
     sleep(std::time::Duration::from_millis(500)).await;
 
-    let voter_2_deposit_address = truthcoin_nodes.voter_2.get_deposit_address().await?;
+    let voter_2_deposit_address =
+        truthcoin_nodes.voter_2.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
         &mut truthcoin_nodes.voter_2,
         &voter_2_deposit_address,
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
-    ).await?;
+    )
+    .await?;
     sleep(std::time::Duration::from_millis(500)).await;
 
-    let voter_3_deposit_address = truthcoin_nodes.voter_3.get_deposit_address().await?;
+    let voter_3_deposit_address =
+        truthcoin_nodes.voter_3.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
         &mut truthcoin_nodes.voter_3,
         &voter_3_deposit_address,
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
-    ).await?;
+    )
+    .await?;
     sleep(std::time::Duration::from_millis(500)).await;
 
-    let voter_4_deposit_address = truthcoin_nodes.voter_4.get_deposit_address().await?;
+    let voter_4_deposit_address =
+        truthcoin_nodes.voter_4.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
         &mut truthcoin_nodes.voter_4,
         &voter_4_deposit_address,
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
-    ).await?;
+    )
+    .await?;
     sleep(std::time::Duration::from_millis(500)).await;
 
-    let voter_5_deposit_address = truthcoin_nodes.voter_5.get_deposit_address().await?;
+    let voter_5_deposit_address =
+        truthcoin_nodes.voter_5.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
         &mut truthcoin_nodes.voter_5,
         &voter_5_deposit_address,
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
-    ).await?;
+    )
+    .await?;
     sleep(std::time::Duration::from_millis(500)).await;
 
-    let voter_6_deposit_address = truthcoin_nodes.voter_6.get_deposit_address().await?;
+    let voter_6_deposit_address =
+        truthcoin_nodes.voter_6.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
         &mut truthcoin_nodes.voter_6,
         &voter_6_deposit_address,
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
-    ).await?;
+    )
+    .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
     truthcoin_nodes.voter_3.rpc_client.refresh_wallet().await?;
     sleep(std::time::Duration::from_millis(500)).await;
 
     for outcome in [0, 1] {
-        let cost = truthcoin_nodes.voter_3.rpc_client.calculate_share_cost(
-            market_ids[2].clone(),
-            outcome,
-            2.0,
-        ).await?;
-        truthcoin_nodes.voter_3.rpc_client.buy_shares(
-            market_ids[2].clone(),
-            outcome,
-            2.0,
-            cost + 5000,
-            1000,
-        ).await?;
+        let dry_run = truthcoin_nodes
+            .voter_3
+            .rpc_client
+            .market_buy(MarketBuyRequest {
+                market_id: market_ids[2].clone(),
+                outcome_index: outcome,
+                shares_amount: 2.0,
+                max_cost: None,
+                fee_sats: None,
+                dry_run: Some(true),
+            })
+            .await?;
+        let cost = dry_run.cost_sats;
+        truthcoin_nodes
+            .voter_3
+            .rpc_client
+            .market_buy(MarketBuyRequest {
+                market_id: market_ids[2].clone(),
+                outcome_index: outcome,
+                shares_amount: 2.0,
+                max_cost: Some(cost + 5000),
+                fee_sats: Some(1000),
+                dry_run: None,
+            })
+            .await?;
     }
-    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    truthcoin_nodes
+        .issuer
+        .bmm_single(&mut enforcer_post_setup)
+        .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ] {
         voter.rpc_client.refresh_wallet().await?;
     }
     sleep(std::time::Duration::from_millis(500)).await;
 
-    let voter_0_deposit_address = truthcoin_nodes.voter_0.get_deposit_address().await?;
+    let voter_0_deposit_address =
+        truthcoin_nodes.voter_0.get_deposit_address().await?;
     deposit(
         &mut enforcer_post_setup,
         &mut truthcoin_nodes.voter_0,
         &voter_0_deposit_address,
         VOTER_DEPOSIT_AMOUNT,
         VOTER_DEPOSIT_FEE,
-    ).await?;
+    )
+    .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
     truthcoin_nodes.voter_3.rpc_client.refresh_wallet().await?;
     sleep(std::time::Duration::from_millis(500)).await;
 
-    let cost = truthcoin_nodes.voter_3.rpc_client.calculate_share_cost(
-        market_ids[1].clone(),
-        0,
-        20.0,
-    ).await?;
-    truthcoin_nodes.voter_3.rpc_client.buy_shares(
-        market_ids[1].clone(),
-        0,
-        20.0,
-        cost + 30000,
-        1000,
-    ).await?;
-    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    let dry_run = truthcoin_nodes
+        .voter_3
+        .rpc_client
+        .market_buy(MarketBuyRequest {
+            market_id: market_ids[1].clone(),
+            outcome_index: 0,
+            shares_amount: 20.0,
+            max_cost: None,
+            fee_sats: None,
+            dry_run: Some(true),
+        })
+        .await?;
+    let cost = dry_run.cost_sats;
+    truthcoin_nodes
+        .voter_3
+        .rpc_client
+        .market_buy(MarketBuyRequest {
+            market_id: market_ids[1].clone(),
+            outcome_index: 0,
+            shares_amount: 20.0,
+            max_cost: Some(cost + 30000),
+            fee_sats: Some(1000),
+            dry_run: None,
+        })
+        .await?;
+    truthcoin_nodes
+        .issuer
+        .bmm_single(&mut enforcer_post_setup)
+        .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ] {
         voter.rpc_client.refresh_wallet().await?;
     }
     sleep(std::time::Duration::from_millis(500)).await;
@@ -694,22 +907,43 @@ async fn roundtrip_task(
     truthcoin_nodes.voter_0.rpc_client.refresh_wallet().await?;
     sleep(std::time::Duration::from_millis(500)).await;
 
-    let cost = truthcoin_nodes.voter_0.rpc_client.calculate_share_cost(
-        market_ids[1].clone(),
-        1,
-        15.0,
-    ).await?;
-    truthcoin_nodes.voter_0.rpc_client.buy_shares(
-        market_ids[1].clone(),
-        1,
-        15.0,
-        cost + 20000,
-        1000,
-    ).await?;
-    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    let dry_run = truthcoin_nodes
+        .voter_0
+        .rpc_client
+        .market_buy(MarketBuyRequest {
+            market_id: market_ids[1].clone(),
+            outcome_index: 1,
+            shares_amount: 15.0,
+            max_cost: None,
+            fee_sats: None,
+            dry_run: Some(true),
+        })
+        .await?;
+    let cost = dry_run.cost_sats;
+    truthcoin_nodes
+        .voter_0
+        .rpc_client
+        .market_buy(MarketBuyRequest {
+            market_id: market_ids[1].clone(),
+            outcome_index: 1,
+            shares_amount: 15.0,
+            max_cost: Some(cost + 20000),
+            fee_sats: Some(1000),
+            dry_run: None,
+        })
+        .await?;
+    truthcoin_nodes
+        .issuer
+        .bmm_single(&mut enforcer_post_setup)
+        .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ] {
         voter.rpc_client.refresh_wallet().await?;
     }
     sleep(std::time::Duration::from_millis(500)).await;
@@ -720,39 +954,72 @@ async fn roundtrip_task(
     sleep(std::time::Duration::from_millis(500)).await;
 
     for outcome in [0, 1] {
-        let voter = if outcome == 0 { &truthcoin_nodes.voter_0 } else { &truthcoin_nodes.voter_1 };
-        let cost = voter.rpc_client.calculate_share_cost(
-            market_ids[3].clone(),
-            outcome,
-            10.0,
-        ).await?;
-        voter.rpc_client.buy_shares(
-            market_ids[3].clone(),
-            outcome,
-            10.0,
-            cost + 15000,
-            1000,
-        ).await?;
+        let voter = if outcome == 0 {
+            &truthcoin_nodes.voter_0
+        } else {
+            &truthcoin_nodes.voter_1
+        };
+        let dry_run = voter
+            .rpc_client
+            .market_buy(MarketBuyRequest {
+                market_id: market_ids[3].clone(),
+                outcome_index: outcome,
+                shares_amount: 10.0,
+                max_cost: None,
+                fee_sats: None,
+                dry_run: Some(true),
+            })
+            .await?;
+        let cost = dry_run.cost_sats;
+        voter
+            .rpc_client
+            .market_buy(MarketBuyRequest {
+                market_id: market_ids[3].clone(),
+                outcome_index: outcome,
+                shares_amount: 10.0,
+                max_cost: Some(cost + 15000),
+                fee_sats: Some(1000),
+                dry_run: None,
+            })
+            .await?;
     }
-    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    truthcoin_nodes
+        .issuer
+        .bmm_single(&mut enforcer_post_setup)
+        .await?;
     sleep(std::time::Duration::from_secs(1)).await;
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ] {
         voter.rpc_client.refresh_wallet().await?;
     }
     sleep(std::time::Duration::from_millis(500)).await;
 
-    let final_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+    let final_height =
+        truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ] {
         let voter_height = voter.rpc_client.getblockcount().await?;
         anyhow::ensure!(voter_height == final_height);
     }
 
-    let final_markets = truthcoin_nodes.issuer.rpc_client.list_markets().await?;
+    let final_markets = truthcoin_nodes.issuer.rpc_client.market_list().await?;
     anyhow::ensure!(final_markets.len() == 4);
 
     for market in &final_markets {
-        let market_detail = truthcoin_nodes.issuer.rpc_client.view_market(market.market_id.clone()).await?;
+        let market_detail = truthcoin_nodes
+            .issuer
+            .rpc_client
+            .market_get(market.market_id.clone())
+            .await?;
         if let Some(market_data) = market_detail {
             anyhow::ensure!(market_data.treasury > 0.0);
         } else {
@@ -762,7 +1029,8 @@ async fn roundtrip_task(
 
     tracing::info!("✓ Phase 4: Completed 7 blocks of trading");
 
-    let current_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
+    let current_height =
+        truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
 
     let voting_period_start_height = 31u32;
     let blocks_to_mine = if current_height < voting_period_start_height {
@@ -772,46 +1040,81 @@ async fn roundtrip_task(
     };
 
     for _ in 0..blocks_to_mine {
-        truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+        truthcoin_nodes
+            .issuer
+            .bmm_single(&mut enforcer_post_setup)
+            .await?;
         sleep(std::time::Duration::from_millis(500)).await;
     }
 
     sleep(std::time::Duration::from_secs(2)).await;
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ] {
         voter.rpc_client.refresh_wallet().await?;
     }
     sleep(std::time::Duration::from_secs(3)).await;
 
-    let final_height = truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
+    let final_height =
+        truthcoin_nodes.issuer.rpc_client.getblockcount().await?;
     anyhow::ensure!(final_height >= voting_period_start_height);
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3].iter() {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+    ]
+    .iter()
+    {
         let voter_height = voter.rpc_client.getblockcount().await?;
         anyhow::ensure!(voter_height == final_height);
     }
 
-    let slots_at_voting = truthcoin_nodes.issuer.rpc_client.get_claimed_slots_in_period(3).await?;
+    let slots_at_voting = truthcoin_nodes
+        .issuer
+        .rpc_client
+        .slot_list(Some(SlotFilter {
+            period: Some(3),
+            status: Some(SlotState::Voting),
+        }))
+        .await?;
     anyhow::ensure!(slots_at_voting.len() == 4);
 
     for slot in &slots_at_voting {
-        let is_voting = truthcoin_nodes.issuer.rpc_client.is_slot_in_voting(slot.slot_id_hex.clone()).await?;
+        let slot_detail = truthcoin_nodes
+            .issuer
+            .rpc_client
+            .slot_get(slot.slot_id_hex.clone())
+            .await?;
+        let is_voting = slot_detail
+            .map(|s| matches!(s.content, SlotContentInfo::Decision(_)))
+            .unwrap_or(false);
         anyhow::ensure!(is_voting);
     }
 
-    let markets_at_voting = truthcoin_nodes.issuer.rpc_client.list_markets().await?;
-    anyhow::ensure!(markets_at_voting.len() == 4);
+    let markets_during_voting =
+        truthcoin_nodes.issuer.rpc_client.market_list().await?;
+    anyhow::ensure!(markets_during_voting.len() == 4);
 
-    for market in markets_at_voting.iter() {
-        anyhow::ensure!(market.state == "Voting");
+    for market in markets_during_voting.iter() {
+        anyhow::ensure!(market.state == "Trading");
     }
 
-    for market in &markets_at_voting {
-        let market_detail = truthcoin_nodes.issuer.rpc_client.view_market(market.market_id.clone()).await?;
+    for market in &markets_during_voting {
+        let market_detail = truthcoin_nodes
+            .issuer
+            .rpc_client
+            .market_get(market.market_id.clone())
+            .await?;
         anyhow::ensure!(market_detail.is_some());
     }
 
-    tracing::info!("✓ Phase 5: All markets transitioned to Voting state");
+    tracing::info!("✓ Phase 5: Markets remain Trading while slots are voting");
 
     let decision_slot_ids: Vec<String> = slots_at_voting
         .iter()
@@ -839,9 +1142,7 @@ async fn roundtrip_task(
     ];
 
     // Submit votes for all 7 voters using batch submission
-    use truthcoin_dc_app_rpc_api::{SubmitVoteBatchRequest, VoteBatchItem};
-
-    let voting_period_id = 3u32;
+    let voting_period_id = 4u32;
 
     for (voter_idx, votes) in vote_matrix.iter().enumerate() {
         let voter = match voter_idx {
@@ -863,20 +1164,25 @@ async fn roundtrip_task(
             });
         }
 
-        let batch_request = SubmitVoteBatchRequest {
-            votes: vote_items,
-            period_id: voting_period_id,
-            fee_sats: 1000,
-        };
-
-        voter.rpc_client.submit_vote_batch(batch_request).await?;
+        voter.rpc_client.vote_submit(vote_items, 1000).await?;
     }
 
     sleep(std::time::Duration::from_millis(500)).await;
-    truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+    truthcoin_nodes
+        .issuer
+        .bmm_single(&mut enforcer_post_setup)
+        .await?;
     sleep(std::time::Duration::from_secs(2)).await;
 
-    for voter in [&truthcoin_nodes.voter_0, &truthcoin_nodes.voter_1, &truthcoin_nodes.voter_2, &truthcoin_nodes.voter_3, &truthcoin_nodes.voter_4, &truthcoin_nodes.voter_5, &truthcoin_nodes.voter_6] {
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+        &truthcoin_nodes.voter_4,
+        &truthcoin_nodes.voter_5,
+        &truthcoin_nodes.voter_6,
+    ] {
         voter.rpc_client.refresh_wallet().await?;
     }
     sleep(std::time::Duration::from_secs(1)).await;
@@ -885,7 +1191,11 @@ async fn roundtrip_task(
         let votes = truthcoin_nodes
             .issuer
             .rpc_client
-            .get_decision_votes(decision_id.clone())
+            .vote_list(VoteFilter {
+                voter: None,
+                decision_id: Some(decision_id.clone()),
+                period_id: None,
+            })
             .await?;
 
         anyhow::ensure!(votes.len() == 7);
@@ -910,7 +1220,11 @@ async fn roundtrip_task(
         let voter_votes = truthcoin_nodes
             .issuer
             .rpc_client
-            .get_voter_votes(*voter_addr, Some(voting_period_id))
+            .vote_list(VoteFilter {
+                voter: Some(*voter_addr),
+                decision_id: None,
+                period_id: Some(voting_period_id),
+            })
             .await?;
 
         anyhow::ensure!(voter_votes.len() == 4);
@@ -920,7 +1234,8 @@ async fn roundtrip_task(
     tracing::info!("       D1    D2    D3    D4");
     tracing::info!("     ╔═════╦═════╦═════╦═════╗");
     for (voter_idx, votes) in vote_matrix.iter().enumerate() {
-        tracing::info!("V{} → ║ {:>3} ║ {:>3} ║ {:>3} ║ {:>3} ║{}",
+        tracing::info!(
+            "V{} → ║ {:>3} ║ {:>3} ║ {:>3} ║ {:>3} ║{}",
             voter_idx + 1,
             votes[0],
             votes[1],
@@ -936,107 +1251,377 @@ async fn roundtrip_task(
     let period_id = voting_period_id;
 
     let blocks_to_mine = 10;
-
     for _ in 1..=blocks_to_mine {
-        truthcoin_nodes.issuer.bmm_single(&mut enforcer_post_setup).await?;
+        truthcoin_nodes
+            .issuer
+            .bmm_single(&mut enforcer_post_setup)
+            .await?;
         sleep(std::time::Duration::from_millis(100)).await;
     }
 
     tracing::info!("✓ Phase 7: Voting period closed");
 
-    let period_details = truthcoin_nodes.issuer.rpc_client
-        .get_voting_period_details(period_id)
-        .await?;
+    // ==========================================================================
+    // Phase 8: Period Resolution (Consensus + Redistribution + Market Redemption)
+    // ==========================================================================
+    // All of the following happen atomically in a single block during connect_block:
+    // 1. Consensus calculation via SVD-based PCA
+    // 2. VoteCoin redistribution based on voting accuracy
+    // 3. Market ossification and automatic share redemption payouts
+    // ==========================================================================
 
-    if period_details.is_none() {
-        return Err(anyhow::anyhow!("Voting period does not exist"));
-    }
-
-    let consensus_results = match truthcoin_nodes.issuer.rpc_client
-        .get_voting_consensus_results(period_id)
-        .await
-    {
-        Ok(results) => results,
-        Err(e) => {
-            let period_status = truthcoin_nodes.issuer.rpc_client
-                .get_voting_period_status(period_id)
-                .await
-                .unwrap_or_else(|_| "Unknown".to_string());
-
-            return Err(anyhow::anyhow!(
-                "Failed to resolve consensus. Error: {}. Period status: {}",
-                e, period_status
-            ));
-        }
-    };
-
-    anyhow::ensure!(
-        consensus_results.status == "Resolved" || consensus_results.status == "resolved"
+    tracing::info!(
+        "\n=== Phase 8: Period Resolution (Consensus + Redistribution + Redemption) ==="
     );
+    tracing::info!("Mining block to trigger atomic period resolution...");
+
+    truthcoin_nodes
+        .issuer
+        .bmm_single(&mut enforcer_post_setup)
+        .await?;
+    sleep(std::time::Duration::from_millis(100)).await;
+
+    tracing::info!("\n--- 8.1: Consensus Results ---");
+
+    let period_info = truthcoin_nodes
+        .issuer
+        .rpc_client
+        .vote_period(Some(period_id))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Period {} not found", period_id))?;
+
+    let period_status = period_info.status.clone();
+
+    let consensus_results = period_info
+        .consensus
+        .clone()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to get consensus results. Period status: {}. Note: Consensus should be calculated automatically by the protocol when period closes.",
+                period_status
+            )
+        })?;
+
+    anyhow::ensure!(period_status == "Resolved" || period_status == "resolved");
 
     anyhow::ensure!(consensus_results.explained_variance != 0.85);
     anyhow::ensure!(consensus_results.explained_variance != 0.95);
     anyhow::ensure!(
-        consensus_results.explained_variance > 0.0 && consensus_results.explained_variance <= 1.0
+        consensus_results.explained_variance > 0.0
+            && consensus_results.explained_variance <= 1.0
     );
 
     let mut reputation_updates_count = 0;
     let mut reputation_changes = vec![];
 
     for (i, voter_addr) in voter_addresses.iter().enumerate() {
-        let voter_id = VoterId::from_address(voter_addr);
-        let voter_id_hex = hex::encode(voter_id.as_bytes());
+        let voter_addr_str = voter_addr.to_string();
 
-        anyhow::ensure!(voter_id == VoterId::from_address(voter_addr));
-
-        if let Some(rep_update) = consensus_results.reputation_updates.get(&voter_id_hex) {
+        if let Some(rep_update) =
+            consensus_results.reputation_updates.get(&voter_addr_str)
+        {
             reputation_updates_count += 1;
             let delta = rep_update.new_reputation - rep_update.old_reputation;
-            reputation_changes.push((i, rep_update.old_reputation, rep_update.new_reputation, delta));
+            reputation_changes.push((
+                i,
+                rep_update.old_reputation,
+                rep_update.new_reputation,
+                delta,
+            ));
 
-            let current_rep = truthcoin_nodes.issuer.rpc_client
-                .get_voter_reputation(voter_id_hex.clone())
-                .await?;
+            let voter_info = truthcoin_nodes
+                .issuer
+                .rpc_client
+                .vote_voter(*voter_addr)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Voter not found: {}", voter_addr_str)
+                })?;
+            let current_rep = voter_info.reputation;
 
-            anyhow::ensure!((current_rep - rep_update.new_reputation).abs() < 0.0001);
+            anyhow::ensure!(
+                (current_rep - rep_update.new_reputation).abs() < 0.0001
+            );
         }
     }
 
     anyhow::ensure!(reputation_updates_count == 7);
 
-    tracing::info!("\n=== Consensus Results ===");
-    tracing::info!("Period: {} ({})", period_id, consensus_results.status);
-    tracing::info!("\nDecision Outcomes:");
-    tracing::info!("  D1: {:.2}", consensus_results.outcomes.get(&decision_slot_ids[0]).unwrap_or(&0.0));
-    tracing::info!("  D2: {:.2}", consensus_results.outcomes.get(&decision_slot_ids[1]).unwrap_or(&0.0));
-    tracing::info!("  D3: {:.2}", consensus_results.outcomes.get(&decision_slot_ids[2]).unwrap_or(&0.0));
-    tracing::info!("  D4: {:.2}", consensus_results.outcomes.get(&decision_slot_ids[3]).unwrap_or(&0.0));
-    tracing::info!("\nSVD Analysis:");
-    tracing::info!("  Explained Variance: {:.4}", consensus_results.explained_variance);
+    tracing::info!("Period: {} ({})", period_id, period_status);
+    tracing::info!("Decision Outcomes:");
+    tracing::info!(
+        "  D1: {:.2}",
+        consensus_results
+            .outcomes
+            .get(&decision_slot_ids[0])
+            .unwrap_or(&0.0)
+    );
+    tracing::info!(
+        "  D2: {:.2}",
+        consensus_results
+            .outcomes
+            .get(&decision_slot_ids[1])
+            .unwrap_or(&0.0)
+    );
+    tracing::info!(
+        "  D3: {:.2}",
+        consensus_results
+            .outcomes
+            .get(&decision_slot_ids[2])
+            .unwrap_or(&0.0)
+    );
+    tracing::info!(
+        "  D4: {:.2}",
+        consensus_results
+            .outcomes
+            .get(&decision_slot_ids[3])
+            .unwrap_or(&0.0)
+    );
+    tracing::info!("SVD Analysis:");
+    tracing::info!(
+        "  Explained Variance: {:.4}",
+        consensus_results.explained_variance
+    );
     tracing::info!("  Certainty Score: {:.4}", consensus_results.certainty);
-    tracing::info!("\nReputation Updates:");
+    tracing::info!("Reputation Updates:");
     for (voter_idx, old_rep, new_rep, delta) in &reputation_changes {
-        tracing::info!("  V{}: {:.4} → {:.4} (Δ={:+.4})",
-            voter_idx + 1, old_rep, new_rep, delta
+        tracing::info!(
+            "  V{}: {:.4} → {:.4} (Δ={:+.4})",
+            voter_idx + 1,
+            old_rep,
+            new_rep,
+            delta
         );
     }
     if !consensus_results.outliers.is_empty() {
-        tracing::info!("\nOutliers:");
+        tracing::info!("Outliers:");
         for outlier in &consensus_results.outliers {
             tracing::info!("  - {}", outlier);
         }
     }
-    tracing::info!("");
 
     let expected_outcomes = vec![1.0, 0.5, 0.0, 0.0];
 
-    for (decision_id, expected) in decision_slot_ids.iter().zip(expected_outcomes.iter()) {
-        let actual = consensus_results.outcomes.get(decision_id).unwrap_or(&-1.0);
+    for (decision_id, expected) in
+        decision_slot_ids.iter().zip(expected_outcomes.iter())
+    {
+        let actual =
+            consensus_results.outcomes.get(decision_id).unwrap_or(&-1.0);
         let tolerance = 0.01;
         anyhow::ensure!((actual - expected).abs() < tolerance);
     }
 
-    tracing::info!("✓ Phase 8: Consensus resolution completed\n");
+    tracing::info!("\n--- 8.2: VoteCoin Redistribution ---");
+
+    let redistribution_info = period_info.redistribution.clone();
+
+    anyhow::ensure!(
+        redistribution_info.is_some(),
+        "Expected redistribution info for period {}, got None",
+        period_id
+    );
+
+    let redist = redistribution_info.unwrap();
+
+    tracing::info!(
+        "Period: {}, Calculated at Block: {}",
+        redist.period_id,
+        redist.block_height
+    );
+    tracing::info!("VoteCoin Flow:");
+    tracing::info!(
+        "  Total Redistributed: {} VoteCoin",
+        redist.total_redistributed
+    );
+    tracing::info!(
+        "  Winners: {} voters gained VoteCoin",
+        redist.winners_count
+    );
+    tracing::info!("  Losers: {} voters lost VoteCoin", redist.losers_count);
+    tracing::info!("  Unchanged: {} voters", redist.unchanged_count);
+    tracing::info!(
+        "  Conservation: {} (sum is zero)",
+        redist.conservation_check
+    );
+    tracing::info!(
+        "  Slots affected: {} (matches our 4 decisions)",
+        redist.slots_affected.len()
+    );
+
+    anyhow::ensure!(
+        redist.conservation_check == 0,
+        "VoteCoin conservation violated: sum = {} (expected 0)",
+        redist.conservation_check
+    );
+
+    anyhow::ensure!(
+        redist.slots_affected.len() == 4,
+        "Expected 4 slots affected, got {}",
+        redist.slots_affected.len()
+    );
+
+    anyhow::ensure!(
+        redist.winners_count > 0,
+        "Expected at least some winners in redistribution"
+    );
+    anyhow::ensure!(
+        redist.losers_count > 0,
+        "Expected at least some losers in redistribution"
+    );
+
+    let total_categorized =
+        redist.winners_count + redist.losers_count + redist.unchanged_count;
+    anyhow::ensure!(
+        total_categorized == 7,
+        "Expected 7 total voters, got {}",
+        total_categorized
+    );
+
+    tracing::info!("\n--- 8.3: Market Ossification & Share Redemption ---");
+
+    let ossified_markets =
+        truthcoin_nodes.issuer.rpc_client.market_list().await?;
+    anyhow::ensure!(
+        ossified_markets.len() == 4,
+        "Expected 4 markets, got {}",
+        ossified_markets.len()
+    );
+
+    for market_summary in &ossified_markets {
+        let market_data = truthcoin_nodes
+            .issuer
+            .rpc_client
+            .market_get(market_summary.market_id.clone())
+            .await?;
+
+        anyhow::ensure!(
+            market_data.is_some(),
+            "Market {} not found after period resolution",
+            market_summary.market_id
+        );
+
+        let market = market_data.unwrap();
+
+        anyhow::ensure!(
+            market.state == "Ossified",
+            "Expected market {} to be Ossified, got {}",
+            market_summary.market_id,
+            market.state
+        );
+
+        anyhow::ensure!(
+            market.treasury == 0.0,
+            "Expected market {} treasury to be 0 (distributed to shareholders), got {}",
+            market_summary.market_id,
+            market.treasury
+        );
+
+        anyhow::ensure!(
+            market.resolution.is_some(),
+            "Expected market {} to have resolution info",
+            market_summary.market_id
+        );
+
+        let resolution = market.resolution.unwrap();
+        tracing::info!(
+            "  Market {}: {} - {}",
+            &market_summary.market_id[..12],
+            market.state,
+            resolution.summary
+        );
+    }
+
+    tracing::info!("\n--- 8.4: VoteCoin Conservation ---");
+
+    for voter in [
+        &truthcoin_nodes.voter_0,
+        &truthcoin_nodes.voter_1,
+        &truthcoin_nodes.voter_2,
+        &truthcoin_nodes.voter_3,
+        &truthcoin_nodes.voter_4,
+        &truthcoin_nodes.voter_5,
+        &truthcoin_nodes.voter_6,
+    ] {
+        voter.rpc_client.refresh_wallet().await?;
+    }
+    sleep(std::time::Duration::from_millis(500)).await;
+
+    let mut total_votecoin_snapshot = 0u32;
+
+    let issuer_utxos =
+        truthcoin_nodes.issuer.rpc_client.get_wallet_utxos().await?;
+    let issuer_balance: u32 = issuer_utxos
+        .iter()
+        .filter_map(|utxo| utxo.output.content.votecoin())
+        .sum();
+    total_votecoin_snapshot += issuer_balance;
+    tracing::info!(
+        "  Issuer wallet: {} VoteCoin (change from transfers)",
+        issuer_balance
+    );
+
+    let voters_list = [
+        (&truthcoin_nodes.voter_0, voter_addr_0),
+        (&truthcoin_nodes.voter_1, voter_addr_1),
+        (&truthcoin_nodes.voter_2, voter_addr_2),
+        (&truthcoin_nodes.voter_3, voter_addr_3),
+        (&truthcoin_nodes.voter_4, voter_addr_4),
+        (&truthcoin_nodes.voter_5, voter_addr_5),
+        (&truthcoin_nodes.voter_6, voter_addr_6),
+    ];
+
+    for (voter_idx, (voter_node, voter_addr)) in voters_list.iter().enumerate()
+    {
+        let voter_addr_str = voter_addr.to_string();
+
+        let wallet_utxos = voter_node.rpc_client.get_wallet_utxos().await?;
+        let balance: u32 = wallet_utxos
+            .iter()
+            .filter_map(|utxo| utxo.output.content.votecoin())
+            .sum();
+
+        total_votecoin_snapshot += balance;
+
+        let voter_info = truthcoin_nodes
+            .issuer
+            .rpc_client
+            .vote_voter(*voter_addr)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("Voter not found: {}", voter_addr_str)
+            })?;
+        let reputation = voter_info.reputation;
+
+        tracing::info!(
+            "  Voter {} ({}...): {} VoteCoin (reputation: {:.4})",
+            voter_idx + 1,
+            &voter_addr.as_base58()[..8],
+            balance,
+            reputation
+        );
+    }
+
+    tracing::info!(
+        "  Total VoteCoin: {} (Initial: {}, Conservation: {})",
+        total_votecoin_snapshot,
+        INITIAL_VOTECOIN_SUPPLY,
+        if total_votecoin_snapshot == INITIAL_VOTECOIN_SUPPLY {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    );
+
+    anyhow::ensure!(
+        total_votecoin_snapshot == INITIAL_VOTECOIN_SUPPLY,
+        "VoteCoin supply changed! Expected {}, got {}",
+        INITIAL_VOTECOIN_SUPPLY,
+        total_votecoin_snapshot
+    );
+
+    tracing::info!(
+        "\n✓ Phase 8: Period resolution completed (consensus + redistribution + redemption)\n"
+    );
 
     tracing::info!("=== Test Summary ===");
     tracing::info!("All phases completed successfully:");
@@ -1047,9 +1632,10 @@ async fn roundtrip_task(
     tracing::info!("  5. Voting period transition");
     tracing::info!("  6. Vote submission");
     tracing::info!("  7. Period closure");
-    tracing::info!("  8. Consensus resolution\n");
+    tracing::info!(
+        "  8. Period resolution (consensus + redistribution + redemption)\n"
+    );
 
-    // Cleanup
     {
         drop(truthcoin_nodes);
         tracing::info!(
@@ -1057,7 +1643,6 @@ async fn roundtrip_task(
             enforcer_post_setup.out_dir.path().display()
         );
         drop(enforcer_post_setup.tasks);
-        // Wait for tasks to die
         sleep(std::time::Duration::from_secs(1)).await;
         enforcer_post_setup.out_dir.cleanup()?;
     }

@@ -1,6 +1,6 @@
 use crate::state::Error;
-use crate::validation::SlotValidationInterface;
 use crate::types::{BITCOIN_GENESIS_TIMESTAMP, SECONDS_PER_QUARTER};
+use crate::validation::SlotValidationInterface;
 use fallible_iterator::FallibleIterator;
 use heed::types::SerdeBincode;
 use serde::{Deserialize, Serialize};
@@ -21,13 +21,10 @@ use std::collections::BTreeSet;
 )]
 pub struct SlotId([u8; 3]);
 
-// Compile-time constants for efficient bit operations and bounds checking
-const MAX_PERIOD_INDEX: u32 = (1 << 10) - 1; // 1023
-const MAX_SLOT_INDEX: u32 = (1 << 14) - 1; // 16383
+const MAX_PERIOD_INDEX: u32 = (1 << 10) - 1;
+const MAX_SLOT_INDEX: u32 = (1 << 14) - 1;
 const STANDARD_SLOT_MAX: u32 = 499;
 const NONSTANDARD_SLOT_MIN: u32 = 500;
-
-// Bit manipulation constants for fast slot ID encoding/decoding
 const PERIOD_SHIFT: u32 = 14;
 const SLOT_MASK: u32 = MAX_SLOT_INDEX;
 
@@ -50,7 +47,6 @@ impl SlotId {
             });
         }
 
-        // Optimized encode: period (10 bits) || slot_index (14 bits)
         let combined = (period << PERIOD_SHIFT) | index;
         let bytes = [
             (combined >> 16) as u8,
@@ -63,7 +59,6 @@ impl SlotId {
 
     #[inline(always)]
     pub const fn period_index(self) -> u32 {
-        // Fast bit manipulation using const operations
         let combined = ((self.0[0] as u32) << 16)
             | ((self.0[1] as u32) << 8)
             | (self.0[2] as u32);
@@ -72,7 +67,6 @@ impl SlotId {
 
     #[inline(always)]
     pub const fn slot_index(self) -> u32 {
-        // Fast bit manipulation using const operations
         let combined = ((self.0[0] as u32) << 16)
             | ((self.0[1] as u32) << 8)
             | (self.0[2] as u32);
@@ -84,7 +78,6 @@ impl SlotId {
     }
 
     pub fn from_bytes(bytes: [u8; 3]) -> Result<Self, Error> {
-        // Optimized bit manipulation without intermediate big-endian conversion
         let combined = ((bytes[0] as u32) << 16)
             | ((bytes[1] as u32) << 8)
             | (bytes[2] as u32);
@@ -111,10 +104,7 @@ impl SlotId {
         Ok(SlotId(bytes))
     }
 
-    /// Parse slot ID from hex string.
-    /// This is the single source of truth for SlotId parsing from hex strings.
     pub fn from_hex(slot_id_hex: &str) -> Result<Self, Error> {
-        // Fast path validation for common case (6 hex chars = 3 bytes)
         if slot_id_hex.len() != 6 {
             return Err(Error::InvalidSlotId {
                 reason: "Slot ID hex must be exactly 6 characters (3 bytes)"
@@ -122,7 +112,6 @@ impl SlotId {
             });
         }
 
-        // Manual hex parsing can be faster than hex::decode for small fixed sizes
         let mut slot_id_bytes = [0u8; 3];
         for (i, chunk) in slot_id_hex.as_bytes().chunks_exact(2).enumerate() {
             let hex_str = std::str::from_utf8(chunk).map_err(|_| {
@@ -146,26 +135,9 @@ impl SlotId {
         hex::encode(self.0)
     }
 
-    /// Calculate the voting period for this slot
-    ///
-    /// # Returns
-    /// The voting period index when this slot will be voted on
-    ///
-    /// # Bitcoin Hivemind Principle
-    /// **SINGLE SOURCE OF TRUTH for slot-to-voting-period conversion**
-    ///
-    /// Slots claimed in period N are voted on in period N.
-    /// This is the ONLY function in the codebase that should perform this calculation.
-    /// All other code must use this method instead of duplicating the formula.
-    ///
-    /// # Specification Reference
-    /// Bitcoin Hivemind whitepaper Section 4.1: "Voting Periods"
-    /// - Slot period = period when slot was claimed
-    /// - Voting period = period when votes on this slot are accepted
-    /// - Relationship: voting_period = slot_period (SAME period)
     #[inline(always)]
     pub const fn voting_period(self) -> u32 {
-        self.period_index()
+        self.period_index() + 1
     }
 }
 
@@ -243,16 +215,220 @@ impl Decision {
 }
 
 #[derive(
+    Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd,
+)]
+pub enum SlotState {
+    Created,
+    Claimed,
+    Voting,
+    Resolved,
+    Invalid,
+}
+
+impl SlotState {
+    pub fn can_transition_to(&self, new_state: SlotState) -> bool {
+        use SlotState::*;
+        match (self, new_state) {
+            (Created, Claimed) => true,
+            (Claimed, Voting) => true,
+            (Voting, Resolved) => true,
+            (_, Invalid) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, SlotState::Resolved | SlotState::Invalid)
+    }
+
+    pub fn allows_voting(&self) -> bool {
+        matches!(self, SlotState::Voting)
+    }
+
+    pub fn has_consensus(&self) -> bool {
+        matches!(self, SlotState::Resolved)
+    }
+}
+
+#[derive(
+    Clone, Debug, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd,
+)]
+pub struct SlotStateHistory {
+    pub current_state: SlotState,
+    pub state_changed_at_height: u32,
+    pub voting_period: Option<u32>,
+    pub consensus_outcome: Option<u16>,
+    pub state_history: Vec<(SlotState, u32)>,
+}
+
+impl SlotStateHistory {
+    pub fn new_created(_slot_id: SlotId, height: u32) -> Self {
+        let mut history = Self {
+            current_state: SlotState::Created,
+            state_changed_at_height: height,
+            voting_period: None,
+            consensus_outcome: None,
+            state_history: Vec::new(),
+        };
+        history.state_history.push((SlotState::Created, height));
+        history
+    }
+
+    pub fn new(_slot_id: SlotId, initial_height: u64, _timestamp: u64) -> Self {
+        let height_u32 = initial_height as u32;
+        Self::new_created(_slot_id, height_u32)
+    }
+
+    pub fn current_state(&self) -> SlotState {
+        self.current_state
+    }
+
+    pub fn transition_to_claimed(&mut self, height: u32) -> Result<(), Error> {
+        if !self.current_state.can_transition_to(SlotState::Claimed) {
+            return Err(Error::InvalidSlotState {
+                reason: format!(
+                    "Cannot transition to Claimed from {:?}",
+                    self.current_state
+                ),
+            });
+        }
+        self.current_state = SlotState::Claimed;
+        self.state_changed_at_height = height;
+        self.state_history.push((SlotState::Claimed, height));
+        Ok(())
+    }
+
+    pub fn transition_to_voting(
+        &mut self,
+        voting_period: u32,
+        height: u32,
+    ) -> Result<(), Error> {
+        if !self.current_state.can_transition_to(SlotState::Voting) {
+            return Err(Error::InvalidSlotState {
+                reason: format!(
+                    "Cannot transition to Voting from {:?}",
+                    self.current_state
+                ),
+            });
+        }
+        self.current_state = SlotState::Voting;
+        self.state_changed_at_height = height;
+        self.voting_period = Some(voting_period);
+        self.state_history.push((SlotState::Voting, height));
+        Ok(())
+    }
+
+    pub fn transition_to_resolved(
+        &mut self,
+        consensus_outcome: f64,
+        height: u32,
+    ) -> Result<(), Error> {
+        if !self.current_state.can_transition_to(SlotState::Resolved) {
+            return Err(Error::InvalidSlotState {
+                reason: format!(
+                    "Cannot transition to Resolved from {:?}",
+                    self.current_state
+                ),
+            });
+        }
+
+        if consensus_outcome < 0.0 || consensus_outcome > 1.0 {
+            return Err(Error::InvalidSlotState {
+                reason: format!(
+                    "Consensus outcome {} outside valid range [0.0, 1.0]",
+                    consensus_outcome
+                ),
+            });
+        }
+
+        self.current_state = SlotState::Resolved;
+        self.state_changed_at_height = height;
+        self.consensus_outcome =
+            Some((consensus_outcome * 10000.0).round() as u16);
+        self.state_history.push((SlotState::Resolved, height));
+        Ok(())
+    }
+
+    pub fn get_voting_period(&self) -> Option<u32> {
+        self.voting_period
+    }
+
+    pub fn get_consensus_outcome(&self) -> Option<f64> {
+        self.consensus_outcome.map(|v| v as f64 / 10000.0)
+    }
+
+    pub fn can_accept_votes(&self) -> bool {
+        self.current_state == SlotState::Voting
+    }
+
+    pub fn has_consensus(&self) -> bool {
+        self.current_state.has_consensus()
+    }
+
+    pub fn has_reached_state(&self, state: SlotState) -> bool {
+        self.state_history.iter().any(|(s, _)| *s == state)
+    }
+
+    pub fn state_at_height(&self, height: u64) -> SlotState {
+        let height_u32 = height as u32;
+        self.state_history
+            .iter()
+            .rev()
+            .find(|(_, h)| *h <= height_u32)
+            .map(|(s, _)| *s)
+            .unwrap_or(SlotState::Created)
+    }
+
+    pub fn rollback_to_height(&mut self, height: u64) {
+        let height_u32 = height as u32;
+        self.state_history.retain(|(_, h)| *h <= height_u32);
+
+        if let Some((state, height)) = self.state_history.last() {
+            self.current_state = *state;
+            self.state_changed_at_height = *height;
+        } else {
+            self.current_state = SlotState::Created;
+            self.state_changed_at_height = 0;
+        }
+    }
+
+    pub fn get_state_height(&self, state: SlotState) -> Option<u64> {
+        self.state_history
+            .iter()
+            .find(|(s, _)| *s == state)
+            .map(|(_, h)| *h as u64)
+    }
+
+    pub fn transition_to_claimed_with_timestamp(
+        &mut self,
+        block_height: u64,
+        _timestamp: u64,
+    ) -> Result<(), Error> {
+        self.transition_to_claimed(block_height as u32)
+    }
+
+    pub fn transition_to_voting_with_timestamp(
+        &mut self,
+        block_height: u64,
+        _timestamp: u64,
+        voting_period: u32,
+    ) -> Result<(), Error> {
+        self.transition_to_voting(voting_period, block_height as u32)
+    }
+}
+
+#[derive(
     Clone, Debug, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd,
 )]
 pub struct Slot {
     pub slot_id: SlotId,
     pub decision: Option<Decision>,
+    #[serde(default)]
+    pub state_history: Option<SlotStateHistory>,
 }
 
-// Compile-time slot configuration constants
 const FUTURE_PERIODS: u32 = 20;
-const SLOTS_DECLINING_RATE: u64 = 25; // Slots decrease by 25 per period  
+const SLOTS_DECLINING_RATE: u64 = 25;
 const INITIAL_SLOTS_PER_PERIOD: u64 = 500;
 
 #[derive(Clone, Debug)]
@@ -342,11 +518,13 @@ pub struct Dbs {
         DatabaseUnique<SerdeBincode<u32>, SerdeBincode<BTreeSet<Slot>>>,
     claimed_slot_ids:
         DatabaseUnique<SerdeBincode<u32>, SerdeBincode<BTreeSet<SlotId>>>,
+    slot_state_histories:
+        DatabaseUnique<SerdeBincode<SlotId>, SerdeBincode<SlotStateHistory>>,
     config: SlotConfig,
 }
 
 impl Dbs {
-    pub const NUM_DBS: u32 = 2;
+    pub const NUM_DBS: u32 = 3;
 
     pub fn new(env: &Env, rwtxn: &mut RwTxn<'_>) -> Result<Self, Error> {
         Self::new_with_config(env, rwtxn, SlotConfig::default())
@@ -363,6 +541,11 @@ impl Dbs {
                 env,
                 rwtxn,
                 "claimed_slot_ids",
+            )?,
+            slot_state_histories: DatabaseUnique::create(
+                env,
+                rwtxn,
+                "slot_state_histories",
             )?,
             config,
         })
@@ -385,14 +568,12 @@ impl Dbs {
         Ok((current, current + FUTURE_PERIODS - 1))
     }
 
-    // Optimized declining pattern: 500→475→450→...→25 over 20 future periods
     #[inline]
     const fn calculate_available_slots(
         &self,
         period: u32,
         current_period: u32,
     ) -> u64 {
-        // Fast path for historical periods (ossified or in voting)
         if period < current_period {
             return 0;
         }
@@ -402,7 +583,6 @@ impl Dbs {
             return 0;
         }
 
-        // Optimized calculation using const arithmetic
         INITIAL_SLOTS_PER_PERIOD
             .saturating_sub((offset as u64) * SLOTS_DECLINING_RATE)
     }
@@ -452,7 +632,6 @@ impl Dbs {
                 let empty_period: BTreeSet<Slot> = BTreeSet::new();
                 self.period_slots.put(rwtxn, &period, &empty_period)?;
 
-                // Initialize claimed_slot_ids for this period as well
                 let empty_claimed: BTreeSet<SlotId> = BTreeSet::new();
                 self.claimed_slot_ids.put(rwtxn, &period, &empty_claimed)?;
             }
@@ -506,8 +685,6 @@ impl Dbs {
     }
 
     pub fn block_height_to_testing_period(&self, block_height: u32) -> u32 {
-        // Block heights are 0-indexed and directly map to periods
-        // Heights 0-9 = period 1, 10-19 = period 2, etc.
         if self.config.testing_blocks_per_period == 0 {
             0
         } else {
@@ -523,9 +700,6 @@ impl Dbs {
         quarter_to_string(quarter_idx, &self.config)
     }
 
-    /// Check if a slot period is ossified (past voting and resolution periods)
-    /// Ossification occurs 4 periods after voting ends (7 periods after claim)
-    /// Voting ends at period N+3, so ossification is at N+7
     pub fn is_period_ossified(
         &self,
         slot_period: u32,
@@ -535,31 +709,9 @@ impl Dbs {
         let current_period = self
             .get_current_period(current_ts, current_height)
             .unwrap_or(0);
-        // Ossified when current_period > slot_period + 7
         current_period > slot_period.saturating_add(7)
     }
 
-    /// Check if a slot period is in the voting window
-    /// Voting occurs starting in the slot's claim period through 4 periods total
-    /// If slot claimed in period N, voting is active in periods N, N+1, N+2, N+3
-    pub fn is_period_in_voting(
-        &self,
-        slot_period: u32,
-        current_ts: u64,
-        current_height: Option<u32>,
-    ) -> bool {
-        let current_period = self
-            .get_current_period(current_ts, current_height)
-            .unwrap_or(0);
-        // Voting window: periods slot_period through (slot_period + 3) inclusive
-        // At the START of period N, voting begins (so current_period >= slot_period)
-        // Voting ends at the END of period N+3 (so current_period <= slot_period + 3)
-        current_period >= slot_period
-            && current_period <= slot_period.saturating_add(3)
-    }
-
-    /// Check if a specific slot is ossified
-    /// Delegates to is_period_ossified for single source of truth
     pub fn is_slot_ossified(
         &self,
         slot_id: SlotId,
@@ -572,19 +724,12 @@ impl Dbs {
 
     pub fn is_slot_in_voting(
         &self,
+        rotxn: &RoTxn,
         slot_id: SlotId,
-        current_ts: u64,
-        current_height: Option<u32>,
-    ) -> bool {
-        self.is_period_in_voting(
-            slot_id.period_index(),
-            current_ts,
-            current_height,
-        )
+    ) -> Result<bool, Error> {
+        Ok(self.get_slot_current_state(rotxn, slot_id)? == SlotState::Voting)
     }
 
-    /// Get all ossified slots across all periods
-    /// Delegates to is_period_ossified for consistency
     pub fn get_ossified_slots(
         &self,
         rotxn: &sneed::RoTxn,
@@ -596,7 +741,6 @@ impl Dbs {
         let mut iter = self.period_slots.iter(rotxn)?;
         while let Some((period, slots)) = iter.next()? {
             if self.is_period_ossified(period, current_ts, current_height) {
-                // These slots are ossified (voting has ended)
                 ossified_slots.extend(slots.iter().cloned());
             }
         }
@@ -604,8 +748,6 @@ impl Dbs {
         Ok(ossified_slots)
     }
 
-    /// Validate that a slot can be claimed without actually claiming it
-    /// This is the single source of truth for slot claim validation
     pub fn validate_slot_claim(
         &self,
         rotxn: &RoTxn,
@@ -622,19 +764,16 @@ impl Dbs {
         if self.is_slot_ossified(slot_id, current_ts, current_height) {
             return Err(Error::SlotNotAvailable {
                 slot_id,
-                reason: format!(
-                    "Slot period {} is ossified (voting has ended)",
-                    period_index
-                ),
+                reason: format!("Slot period {} is ossified", period_index),
             });
         }
 
-        if self.is_slot_in_voting(slot_id, current_ts, current_height) {
+        if self.is_slot_in_voting(rotxn, slot_id)? {
             return Err(Error::SlotNotAvailable {
                 slot_id,
                 reason: format!(
-                    "Period {} is in voting period - no new slots can be claimed",
-                    period_index
+                    "Slot {:?} is in voting state - no new slots can be claimed",
+                    slot_id
                 ),
             });
         }
@@ -700,8 +839,6 @@ impl Dbs {
             }
         }
 
-        // Check if slot is already claimed using O(log n) BTreeSet lookup
-        // This is a significant performance improvement over the previous O(n) linear search
         let claimed_slots = self
             .claimed_slot_ids
             .try_get(rotxn, &period_index)?
@@ -722,7 +859,6 @@ impl Dbs {
         current_ts: u64,
         current_height: Option<u32>,
     ) -> Result<(), Error> {
-        // Use the single source of truth for validation
         self.validate_slot_claim(
             rwtxn,
             slot_id,
@@ -731,10 +867,8 @@ impl Dbs {
             current_height,
         )?;
 
-        // Now perform the actual claim using optimized BTreeSet operations
         let period_index = slot_id.period_index();
 
-        // Update period_slots with BTreeSet::insert (O(log n))
         let mut period_slots = self
             .period_slots
             .try_get(rwtxn, &period_index)?
@@ -743,11 +877,11 @@ impl Dbs {
         let new_slot = Slot {
             slot_id,
             decision: Some(decision),
+            state_history: None,
         };
         period_slots.insert(new_slot);
         self.period_slots.put(rwtxn, &period_index, &period_slots)?;
 
-        // Update claimed_slot_ids for O(log n) lookups
         let mut claimed_slots = self
             .claimed_slot_ids
             .try_get(rwtxn, &period_index)?
@@ -755,6 +889,16 @@ impl Dbs {
         claimed_slots.insert(slot_id);
         self.claimed_slot_ids
             .put(rwtxn, &period_index, &claimed_slots)?;
+
+        let block_height = current_height.unwrap_or(0) as u64;
+        let mut slot_history =
+            SlotStateHistory::new(slot_id, block_height, current_ts);
+
+        slot_history
+            .transition_to_claimed_with_timestamp(block_height, current_ts)?;
+
+        self.slot_state_histories
+            .put(rwtxn, &slot_id, &slot_history)?;
 
         Ok(())
     }
@@ -766,25 +910,20 @@ impl Dbs {
     ) -> Result<Option<Slot>, Error> {
         let period = slot_id.period_index();
         if let Some(period_slots) = self.period_slots.try_get(rotxn, &period)? {
-            // Use BTreeSet's efficient search instead of linear iteration
-            // Create a dummy slot for binary search
             let search_slot = Slot {
                 slot_id,
                 decision: None,
+                state_history: None,
             };
 
-            // BTreeSet search is O(log n) vs O(n) linear search
             if let Some(found_slot) = period_slots.get(&search_slot) {
                 return Ok(Some(found_slot.clone()));
             }
 
-            // If exact match not found, try to find slot with matching ID but different decision
-            // This handles the case where the slot exists but has a decision
             for slot in period_slots.range(search_slot..) {
                 if slot.slot_id == slot_id {
                     return Ok(Some(slot.clone()));
                 }
-                // Early termination since BTreeSet is ordered
                 if slot.slot_id > slot_id {
                     break;
                 }
@@ -806,20 +945,16 @@ impl Dbs {
         let max_slot_index =
             std::cmp::min(total_slots, (STANDARD_SLOT_MAX + 1) as u64);
 
-        // Pre-allocate with known capacity to avoid reallocations
         let mut available_slots = Vec::with_capacity(max_slot_index as usize);
 
-        // Get claimed slots for this period once (O(log n) database lookup)
         let claimed_slots = self
             .claimed_slot_ids
             .try_get(rotxn, &period_index)?
             .unwrap_or_default();
 
-        // Efficient availability check using the claimed_slots index
         for slot_index in 0..max_slot_index {
             let slot_id = SlotId::new(period_index, slot_index as u32)?;
 
-            // O(log k) lookup where k = claimed slots in period, much faster than O(n) get_slot call
             if !claimed_slots.contains(&slot_id) {
                 available_slots.push(slot_id);
             }
@@ -853,7 +988,6 @@ impl Dbs {
         rotxn: &sneed::RoTxn,
         period_index: u32,
     ) -> Result<u64, Error> {
-        // Use the claimed_slots index for O(1) count lookup instead of O(n) iteration
         let claimed_slots = self
             .claimed_slot_ids
             .try_get(rotxn, &period_index)?
@@ -862,27 +996,14 @@ impl Dbs {
         Ok(claimed_slots.len() as u64)
     }
 
-    /// Get all claimed slots across all periods
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    ///
-    /// # Returns
-    /// Vector of all claimed Slots in the database
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// This method is used to calculate voting periods on-demand by finding
-    /// all slots that have been claimed, without needing a separate period database.
     pub fn get_all_claimed_slots(
         &self,
         rotxn: &sneed::RoTxn,
     ) -> Result<Vec<Slot>, Error> {
         let mut all_claimed_slots = Vec::new();
 
-        // Iterate through all periods
         let mut iter = self.period_slots.iter(rotxn)?;
         while let Some((_period, period_slots)) = iter.next()? {
-            // Collect all slots that have decisions (i.e., are claimed)
             for slot in &period_slots {
                 if slot.decision.is_some() {
                     all_claimed_slots.push(slot.clone());
@@ -893,27 +1014,31 @@ impl Dbs {
         Ok(all_claimed_slots)
     }
 
-    /// Get all periods that are currently in voting
-    /// Delegates to is_period_in_voting for consistency
     pub fn get_voting_periods(
         &self,
         rotxn: &sneed::RoTxn,
-        current_ts: u64,
-        current_height: Option<u32>,
+        _current_ts: u64,
+        _current_height: Option<u32>,
     ) -> Result<Vec<(u32, u64, u64)>, Error> {
-        let mut voting_periods = Vec::new();
+        use std::collections::HashMap;
 
-        // Iterate through all periods and check if they're in voting
-        let mut iter = self.period_slots.iter(rotxn)?;
-        while let Some((period, _)) = iter.next()? {
-            if self.is_period_in_voting(period, current_ts, current_height) {
-                let count = self.get_claimed_slot_count_in_period(rotxn, period)?;
-                if count > 0 {
-                    let total_slots = 500u64;
-                    voting_periods.push((period, count, total_slots));
-                }
+        let mut period_voting_counts: HashMap<u32, u64> = HashMap::new();
+
+        let mut iter = self.slot_state_histories.iter(rotxn)?;
+        while let Some((slot_id, history)) = iter.next()? {
+            if history.current_state() == SlotState::Voting {
+                let period = slot_id.period_index();
+                *period_voting_counts.entry(period).or_insert(0) += 1;
             }
         }
+
+        let mut voting_periods: Vec<(u32, u64, u64)> = period_voting_counts
+            .into_iter()
+            .map(|(period, count)| {
+                let total_slots = 500u64;
+                (period, count, total_slots)
+            })
+            .collect();
 
         voting_periods.sort_by_key(|(period, _, _)| *period);
         Ok(voting_periods)
@@ -990,6 +1115,118 @@ impl Dbs {
 
         Ok(())
     }
+
+    pub fn get_slot_state_history(
+        &self,
+        rotxn: &RoTxn,
+        slot_id: SlotId,
+    ) -> Result<Option<SlotStateHistory>, Error> {
+        Ok(self.slot_state_histories.try_get(rotxn, &slot_id)?)
+    }
+
+    pub fn get_slot_current_state(
+        &self,
+        rotxn: &RoTxn,
+        slot_id: SlotId,
+    ) -> Result<SlotState, Error> {
+        Ok(self
+            .get_slot_state_history(rotxn, slot_id)?
+            .map(|h| h.current_state())
+            .unwrap_or(SlotState::Created))
+    }
+
+    pub fn transition_slot_to_voting(
+        &self,
+        rwtxn: &mut RwTxn,
+        slot_id: SlotId,
+        block_height: u64,
+        timestamp: u64,
+    ) -> Result<(), Error> {
+        let mut history = self.get_slot_state_history(rwtxn, slot_id)?.ok_or(
+            Error::InvalidSlotId {
+                reason: format!("Slot {:?} has no state history", slot_id),
+            },
+        )?;
+
+        let voting_period = slot_id.voting_period();
+        history.transition_to_voting_with_timestamp(
+            block_height,
+            timestamp,
+            voting_period,
+        )?;
+        self.slot_state_histories.put(rwtxn, &slot_id, &history)?;
+        Ok(())
+    }
+
+    pub fn transition_slot_to_resolved(
+        &self,
+        rwtxn: &mut RwTxn,
+        slot_id: SlotId,
+        block_height: u64,
+        _timestamp: u64,
+        consensus_outcome: f64,
+    ) -> Result<(), Error> {
+        let mut history = self.get_slot_state_history(rwtxn, slot_id)?.ok_or(
+            Error::InvalidSlotId {
+                reason: format!("Slot {:?} has no state history", slot_id),
+            },
+        )?;
+
+        history
+            .transition_to_resolved(consensus_outcome, block_height as u32)?;
+        self.slot_state_histories.put(rwtxn, &slot_id, &history)?;
+        Ok(())
+    }
+
+    pub fn get_slots_in_state(
+        &self,
+        rotxn: &RoTxn,
+        state: SlotState,
+    ) -> Result<Vec<SlotId>, Error> {
+        let mut slots_in_state = Vec::new();
+
+        let mut iter = self.slot_state_histories.iter(rotxn)?;
+        while let Some((slot_id, history)) = iter.next()? {
+            if history.current_state() == state {
+                slots_in_state.push(slot_id);
+            }
+        }
+
+        Ok(slots_in_state)
+    }
+
+    pub fn slot_has_consensus(
+        &self,
+        rotxn: &RoTxn,
+        slot_id: SlotId,
+    ) -> Result<bool, Error> {
+        Ok(self
+            .get_slot_state_history(rotxn, slot_id)?
+            .map(|h| h.current_state().has_consensus())
+            .unwrap_or(false))
+    }
+
+    pub fn rollback_slot_states_to_height(
+        &self,
+        rwtxn: &mut RwTxn,
+        height: u64,
+    ) -> Result<(), Error> {
+        let mut slots_to_update = Vec::new();
+
+        {
+            let mut iter = self.slot_state_histories.iter(rwtxn)?;
+            while let Some((slot_id, mut history)) = iter.next()? {
+                history.rollback_to_height(height);
+                slots_to_update.push((slot_id, history));
+            }
+        }
+
+        for (slot_id, history) in slots_to_update {
+            self.slot_state_histories.put(rwtxn, &slot_id, &history)?;
+        }
+
+        Ok(())
+    }
 }
 
 impl SlotValidationInterface for Dbs {
@@ -1001,7 +1238,6 @@ impl SlotValidationInterface for Dbs {
         current_ts: u64,
         current_height: Option<u32>,
     ) -> Result<(), Error> {
-        // Delegate to the optimized validation method
         self.validate_slot_claim(
             rotxn,
             slot_id,
@@ -1012,8 +1248,6 @@ impl SlotValidationInterface for Dbs {
     }
 
     fn try_get_height(&self, _rotxn: &RoTxn) -> Result<Option<u32>, Error> {
-        // Slots database doesn't store height information
-        // This will be provided by the caller in most cases
         Ok(None)
     }
 }

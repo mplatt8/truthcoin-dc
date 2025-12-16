@@ -1,8 +1,3 @@
-//! Block state management for Bitcoin Hivemind sidechain.
-//!
-//! Handles atomic state transitions for all transaction types including
-//! UTXO management, market operations, slot transitions, and LMSR calculations.
-
 use ndarray::{Array, Ix1};
 use std::collections::{HashMap, HashSet};
 
@@ -19,66 +14,47 @@ use crate::{
     },
 };
 
-/// State changes for atomic block processing.
 struct StateUpdate {
-    /// Market state updates with integrated LMSR calculations
     market_updates: Vec<MarketStateUpdate>,
-    /// New markets to be created
     market_creations: Vec<MarketCreation>,
-    /// Share account changes (trades, transfers, redemptions)
     share_account_changes: HashMap<(Address, MarketId), HashMap<u32, f64>>,
-    /// Slot state changes and period transitions
     slot_changes: Vec<SlotStateChange>,
-    /// Vote submissions to be applied atomically
     vote_submissions: Vec<VoteSubmission>,
-    /// Voter registrations to be applied atomically
     voter_registrations: Vec<VoterRegistration>,
-    /// Reputation updates to be applied atomically
     reputation_updates: Vec<ReputationUpdate>,
 }
 
-/// Market state update.
 struct MarketStateUpdate {
     market_id: MarketId,
-    new_shares: Option<Array<f64, Ix1>>,
+    /// Share delta: (outcome_index, shares_to_add)
+    share_delta: Option<(usize, f64)>,
     new_beta: Option<f64>,
-    trader_address: Option<Address>,
-    trade_cost: Option<f64>,
     transaction_id: Option<[u8; 32]>,
-    outcome_index: Option<u32>,
     volume_sats: Option<u64>,
+    /// Trading fee collected for the market author (in satoshis)
+    fee_sats: Option<u64>,
 }
 
-/// Slot state change.
 struct SlotStateChange {
     slot_id: crate::state::slots::SlotId,
     new_decision: Option<crate::state::slots::Decision>,
     period_transition: Option<u32>,
 }
 
-/// Market creation data.
 struct MarketCreation {
     market: crate::state::Market,
-    creator_address: Address,
-    height: u32,
 }
 
-/// Vote submission data for deferred application.
 struct VoteSubmission {
     vote: crate::state::voting::types::Vote,
 }
 
-/// Voter registration data for deferred application.
 struct VoterRegistration {
-    voter_id: crate::state::voting::types::VoterId,
     initial_reputation: crate::state::voting::types::VoterReputation,
 }
 
-/// Reputation update data for deferred application.
 struct ReputationUpdate {
-    voter_id: crate::state::voting::types::VoterId,
     updated_reputation: crate::state::voting::types::VoterReputation,
-    old_reputation: crate::state::voting::types::VoterReputation,
 }
 
 impl StateUpdate {
@@ -94,12 +70,7 @@ impl StateUpdate {
         }
     }
 
-    /// Verify the internal consistency of all collected changes
-    ///
-    /// This validation ensures that all changes are mathematically sound
-    /// and consistent with Bitcoin Hivemind specifications before application.
     fn verify_internal_consistency(&self) -> Result<(), Error> {
-        // Verify no duplicate market IDs between creations and updates
         let mut created_market_ids = std::collections::HashSet::new();
         for creation in &self.market_creations {
             if !created_market_ids.insert(creation.market.id.clone()) {
@@ -123,12 +94,10 @@ impl StateUpdate {
             }
         }
 
-        // Verify share account changes are balanced (total shares conserved)
         for ((address, market_id), outcome_changes) in
             &self.share_account_changes
         {
             let _total_delta: f64 = outcome_changes.values().sum();
-            // For now, just verify no individual change is infinite or NaN
             for &delta in outcome_changes.values() {
                 if !delta.is_finite() {
                     return Err(Error::InvalidSlotId {
@@ -144,25 +113,23 @@ impl StateUpdate {
         Ok(())
     }
 
-    /// Validate all collected state changes before applying
     fn validate_all_changes(
         &self,
         state: &State,
         rotxn: &RoTxn,
     ) -> Result<(), Error> {
-        // First verify internal consistency
         self.verify_internal_consistency()?;
 
-        // Validate market updates with comprehensive LMSR constraints
         for update in &self.market_updates {
-            if let Some(ref shares) = update.new_shares {
-                if let Some(beta) = update.new_beta {
-                    // Use centralized validation from validation.rs
-                    crate::validation::MarketValidator::validate_lmsr_parameters(beta, shares)?;
+            // Validate beta if provided (share deltas don't need LMSR validation here)
+            if let Some(beta) = update.new_beta {
+                if beta <= 0.0 {
+                    return Err(Error::InvalidSlotId {
+                        reason: "Beta must be positive".to_string(),
+                    });
                 }
             }
 
-            // Ensure market exists
             if state
                 .markets()
                 .get_market(rotxn, &update.market_id)?
@@ -177,9 +144,7 @@ impl StateUpdate {
             }
         }
 
-        // Validate market creations
         for creation in &self.market_creations {
-            // Validate market doesn't already exist
             if state
                 .markets()
                 .get_market(rotxn, &creation.market.id)?
@@ -193,17 +158,13 @@ impl StateUpdate {
                 });
             }
 
-            // Validate LMSR parameters using centralized validation
-            // Follows single-source-of-truth pattern from validation.rs
             crate::validation::MarketValidator::validate_lmsr_parameters(
                 creation.market.b(),
                 &creation.market.shares(),
             )?;
         }
 
-        // Validate slot changes
         for slot_change in &self.slot_changes {
-            // Validate slot exists if updating
             if slot_change.new_decision.is_some() {
                 if state
                     .slots()
@@ -223,109 +184,110 @@ impl StateUpdate {
         Ok(())
     }
 
-    /// Apply all collected changes atomically
-    ///
-    /// This method ensures that all state changes are applied in a single atomic transaction.
-    /// If any operation fails, the entire transaction is rolled back, maintaining database consistency.
-    /// The order of operations is carefully designed to handle dependencies correctly.
     fn apply_all_changes(
         &self,
         state: &State,
         rwtxn: &mut RwTxn,
         height: u32,
     ) -> Result<(), Error> {
-        // Apply market creations first (order matters for dependencies)
-        // Markets must exist before shares can be allocated or updated
         for creation in &self.market_creations {
-            // Store market in database
             state
                 .markets()
                 .add_market(rwtxn, &creation.market)
                 .map_err(|_| Error::InvalidSlotId {
                     reason: "Failed to store market in database".to_string(),
                 })?;
-
-            // Market shares start at zero according to LMSR specification
-            // Initial liquidity is automatically calculated and built into the market treasury
         }
 
-        // Apply market updates with integrated LMSR calculations
+        // Aggregate share deltas per market before applying
+        let mut aggregated_deltas: std::collections::HashMap<
+            MarketId,
+            Vec<(usize, f64, Option<u64>, Option<u64>, Option<[u8; 32]>)>,
+        > = std::collections::HashMap::new();
+
         for update in &self.market_updates {
-            if let Some(ref new_shares) = update.new_shares {
-                // Update market shares and recalculate treasury using integrated LMSR
-                let mut market = state
-                    .markets()
-                    .get_market(rwtxn, &update.market_id)?
-                    .ok_or_else(|| Error::InvalidSlotId {
-                        reason: format!(
-                            "Market {:?} not found",
-                            update.market_id
-                        ),
-                    })?;
-
-                // Recalculate treasury with new shares using centralized LMSR service
-                let new_treasury = LmsrService::calculate_treasury(new_shares, market.b())
-                    .map_err(|e| Error::InvalidSlotId {
-                        reason: format!("Treasury calculation failed: {:?}", e),
-                    })?;
-
-                // Create new market state version instead of direct mutation
-                let _new_state_hash = market
-                    .create_new_state_version(
+            if let Some((outcome_index, delta)) = update.share_delta {
+                aggregated_deltas
+                    .entry(update.market_id.clone())
+                    .or_default()
+                    .push((
+                        outcome_index,
+                        delta,
+                        update.volume_sats,
+                        update.fee_sats,
                         update.transaction_id,
-                        height as u64,
-                        None, // Keep current market state
-                        None, // Keep current b
-                        None, // Keep current trading fee
-                        Some(new_shares.clone()),
-                        None, // Keep current final prices
-                        Some(new_treasury),
-                    )
-                    .map_err(|e| Error::InvalidSlotId {
-                        reason: format!(
-                            "Failed to create new market state: {:?}",
-                            e
-                        ),
-                    })?;
+                    ));
+            }
+        }
 
-                // Update volume if this is a trade
-                if let (Some(outcome_index), Some(volume_sats)) =
-                    (update.outcome_index, update.volume_sats)
-                {
+        // Apply aggregated deltas to each market
+        for (market_id, deltas) in aggregated_deltas {
+            let mut market = state
+                .markets()
+                .get_market(rwtxn, &market_id)?
+                .ok_or_else(|| Error::InvalidSlotId {
+                    reason: format!("Market {:?} not found", market_id),
+                })?;
+
+            let mut new_shares = market.shares().clone();
+            let mut last_txid: Option<[u8; 32]> = None;
+
+            // Apply all deltas for this market
+            for (outcome_index, delta, volume_sats, _fee_sats, txid) in &deltas {
+                new_shares[*outcome_index] += delta;
+                if let Some(vol) = volume_sats {
                     market
-                        .update_trading_volume(
-                            outcome_index as usize,
-                            volume_sats,
-                        )
+                        .update_trading_volume(*outcome_index, *vol)
                         .map_err(|e| Error::InvalidSlotId {
                             reason: format!("Failed to update volume: {:?}", e),
                         })?;
                 }
-
-                // Update market in database
-                state.markets().update_market(rwtxn, &market)?;
-
-                // Clear mempool shares now that they're confirmed in block
-                state.clear_mempool_shares(rwtxn, &update.market_id)?;
-
-                // Update trader's share account if applicable
-                if let (Some(trader), Some(cost)) =
-                    (&update.trader_address, update.trade_cost)
-                {
-                    // The specific outcome and amount would be determined by the trade logic
-                    // This is a simplified version - actual implementation would track specific outcomes
-                    let _ = (trader, cost); // Placeholder for actual share account updates
-                }
+                last_txid = *txid;
             }
+
+            let _new_state_hash = market
+                .create_new_state_version(
+                    last_txid,
+                    height as u64,
+                    None,
+                    None,
+                    None,
+                    Some(new_shares),
+                    None,
+                )
+                .map_err(|e| Error::InvalidSlotId {
+                    reason: format!(
+                        "Failed to create new market state: {:?}",
+                        e
+                    ),
+                })?;
+
+            state.markets().update_market(rwtxn, &market)?;
+            state.clear_mempool_shares(rwtxn, &market_id)?;
         }
 
-        // Apply share account changes with proper block height for audit trail
-        // Per Bitcoin Hivemind whitepaper: all state changes must be traceable to specific blocks
+        tracing::info!(
+            "apply_all_changes: Processing {} share account changes",
+            self.share_account_changes.len()
+        );
+
         for ((address, market_id), outcome_changes) in
             &self.share_account_changes
         {
+            tracing::info!(
+                "  Share account change: address={}, market={}, outcomes={:?}",
+                address,
+                market_id,
+                outcome_changes
+            );
             for (&outcome_index, &share_delta) in outcome_changes {
                 if share_delta != 0.0 {
+                    tracing::info!(
+                        "    Adding {} shares for outcome {} to address {}",
+                        share_delta,
+                        outcome_index,
+                        address
+                    );
                     if share_delta > 0.0 {
                         state.markets().add_shares_to_account(
                             rwtxn,
@@ -349,13 +311,8 @@ impl StateUpdate {
             }
         }
 
-        // Apply slot changes with integrated state management
         for slot_change in &self.slot_changes {
             if let Some(ref _decision) = slot_change.new_decision {
-                // Slot decision updates are handled through the claim mechanism
-                // If a decision needs to be updated, it means a new claim is being processed
-                // The actual claim processing happens during individual transaction processing
-                // but we can validate the slot exists and is in proper state
                 if let Some(slot) =
                     state.slots().get_slot(rwtxn, slot_change.slot_id)?
                 {
@@ -370,10 +327,7 @@ impl StateUpdate {
                 }
             }
 
-            // Handle period transitions for slot state management
             if let Some(new_period) = slot_change.period_transition {
-                // Period transitions are handled by the slot minting system
-                // This validates that the transition is consistent with current state
                 let current_period = slot_change.slot_id.period_index();
                 if new_period <= current_period {
                     return Err(Error::InvalidSlotId {
@@ -383,30 +337,28 @@ impl StateUpdate {
                         ),
                     });
                 }
-                // The actual period transitions are managed by the slot minting system
-                // during block connection, so this is primarily for validation
             }
         }
 
-        // Apply vote submissions atomically
         tracing::debug!(
             "apply_all_changes: Applying {} vote submissions",
             self.vote_submissions.len()
         );
 
         for submission in &self.vote_submissions {
-            state.voting().databases().put_vote(rwtxn, &submission.vote)?;
-        }
-
-        // Apply voter registrations atomically
-        for registration in &self.voter_registrations {
             state
                 .voting()
                 .databases()
-                .put_voter_reputation(rwtxn, &registration.initial_reputation)?;
+                .put_vote(rwtxn, &submission.vote)?;
         }
 
-        // Apply reputation updates atomically
+        for registration in &self.voter_registrations {
+            state.voting().databases().put_voter_reputation(
+                rwtxn,
+                &registration.initial_reputation,
+            )?;
+        }
+
         for update in &self.reputation_updates {
             state
                 .voting()
@@ -414,15 +366,139 @@ impl StateUpdate {
                 .put_voter_reputation(rwtxn, &update.updated_reputation)?;
         }
 
+        // Consolidate any MarketTreasury/MarketAuthorFee UTXOs from explicit tx outputs
+        // This merges new outputs from BuyShares txs with the previous Market/Fee UTXOs
+        Self::consolidate_market_utxos(state, rwtxn, height)?;
+
         Ok(())
     }
 
-    /// Add a market update to the collected changes
+    /// Consolidate all MarketTreasury and MarketAuthorFee UTXOs for each market
+    /// into a single UTXO per market. This is called at block end to merge:
+    /// - The previous block's Market/Fee UTXO (if exists)
+    /// - Any new outputs from BuyShares transactions in this block
+    ///
+    /// Uses pending UTXO tracking for O(m) efficiency where m = markets with trades,
+    /// instead of O(n) where n = total UTXOs.
+    fn consolidate_market_utxos(
+        state: &State,
+        rwtxn: &mut RwTxn,
+        height: u32,
+    ) -> Result<(), Error> {
+        use crate::state::markets::{
+            generate_market_author_fee_address, generate_market_treasury_address,
+        };
+        use crate::types::{BitcoinOutputContent, FilledOutput, OutPoint};
+
+        // Get markets that have pending UTXOs to consolidate (O(m) where m = active markets)
+        let markets_to_consolidate = state.markets().get_markets_with_pending_utxos(rwtxn)?;
+
+        if markets_to_consolidate.is_empty() {
+            return Ok(());
+        }
+
+        for market_id_bytes in markets_to_consolidate {
+            let market_id = MarketId::new(market_id_bytes);
+
+            // Collect treasury UTXOs: existing consolidated + pending from transactions
+            let mut treasury_total = 0u64;
+            let mut treasury_utxos_to_consume = Vec::new();
+
+            // Get existing consolidated treasury UTXO (if any)
+            if let Some(existing_outpoint) = state.markets().get_market_utxo(rwtxn, &market_id)? {
+                if let Some(utxo) = state.utxos.try_get(rwtxn, &existing_outpoint)? {
+                    treasury_total += utxo.get_bitcoin_value().to_sat();
+                    treasury_utxos_to_consume.push(existing_outpoint);
+                }
+            }
+
+            // Get pending treasury UTXOs from transactions
+            let pending_treasury = state.markets().get_pending_treasury_utxos(rwtxn, &market_id)?;
+            for outpoint in pending_treasury {
+                if let Some(utxo) = state.utxos.try_get(rwtxn, &outpoint)? {
+                    treasury_total += utxo.get_bitcoin_value().to_sat();
+                    treasury_utxos_to_consume.push(outpoint);
+                }
+            }
+
+            // Collect fee UTXOs: existing consolidated + pending from transactions
+            let mut fee_total = 0u64;
+            let mut fee_utxos_to_consume = Vec::new();
+
+            // Get existing consolidated fee UTXO (if any)
+            if let Some(existing_outpoint) = state.markets().get_author_fee_utxo(rwtxn, &market_id)? {
+                if let Some(utxo) = state.utxos.try_get(rwtxn, &existing_outpoint)? {
+                    fee_total += utxo.get_bitcoin_value().to_sat();
+                    fee_utxos_to_consume.push(existing_outpoint);
+                }
+            }
+
+            // Get pending fee UTXOs from transactions
+            let pending_fees = state.markets().get_pending_author_fee_utxos(rwtxn, &market_id)?;
+            for outpoint in pending_fees {
+                if let Some(utxo) = state.utxos.try_get(rwtxn, &outpoint)? {
+                    fee_total += utxo.get_bitcoin_value().to_sat();
+                    fee_utxos_to_consume.push(outpoint);
+                }
+            }
+
+            // Consolidate treasury UTXOs into a single OutPoint::Market
+            if !treasury_utxos_to_consume.is_empty() && treasury_total > 0 {
+                for outpoint in &treasury_utxos_to_consume {
+                    state.delete_utxo_with_address_index(rwtxn, outpoint)?;
+                }
+                state.markets().clear_market_utxo(rwtxn, &market_id)?;
+
+                let treasury_address = generate_market_treasury_address(&market_id);
+                let new_outpoint = OutPoint::Market {
+                    market_id: market_id_bytes,
+                    block_height: height,
+                };
+                let new_output = FilledOutput::new(
+                    treasury_address,
+                    FilledOutputContent::MarketTreasury {
+                        market_id: market_id_bytes,
+                        amount: BitcoinOutputContent(bitcoin::Amount::from_sat(treasury_total)),
+                    },
+                );
+                state.insert_utxo_with_address_index(rwtxn, &new_outpoint, &new_output)?;
+                state.markets().set_market_utxo(rwtxn, &market_id, &new_outpoint)?;
+            }
+
+            // Consolidate fee UTXOs into a single OutPoint::MarketAuthorFee
+            if !fee_utxos_to_consume.is_empty() && fee_total > 0 {
+                for outpoint in &fee_utxos_to_consume {
+                    state.delete_utxo_with_address_index(rwtxn, outpoint)?;
+                }
+                state.markets().clear_author_fee_utxo(rwtxn, &market_id)?;
+
+                let fee_address = generate_market_author_fee_address(&market_id);
+                let new_outpoint = OutPoint::MarketAuthorFee {
+                    market_id: market_id_bytes,
+                    block_height: height,
+                };
+                let new_output = FilledOutput::new(
+                    fee_address,
+                    FilledOutputContent::MarketAuthorFee {
+                        market_id: market_id_bytes,
+                        amount: BitcoinOutputContent(bitcoin::Amount::from_sat(fee_total)),
+                    },
+                );
+                state.insert_utxo_with_address_index(rwtxn, &new_outpoint, &new_output)?;
+                state.markets().set_author_fee_utxo(rwtxn, &market_id, &new_outpoint)?;
+            }
+
+            // Clear pending UTXOs after consolidation - data is now in consolidated UTXO
+            state.markets().clear_pending_treasury_utxos(rwtxn, &market_id)?;
+            state.markets().clear_pending_author_fee_utxos(rwtxn, &market_id)?;
+        }
+
+        Ok(())
+    }
+
     fn add_market_update(&mut self, update: MarketStateUpdate) {
         self.market_updates.push(update);
     }
-
-    /// Add share account changes
     fn add_share_account_change(
         &mut self,
         address: Address,
@@ -435,55 +511,21 @@ impl StateUpdate {
             .or_insert_with(HashMap::new)
             .insert(outcome, delta);
     }
-
-    /// Add market creation to the collected changes
     fn add_market_creation(&mut self, creation: MarketCreation) {
         self.market_creations.push(creation);
     }
-
-    /// Add vote submission to the collected changes
     fn add_vote_submission(&mut self, vote: crate::state::voting::types::Vote) {
         self.vote_submissions.push(VoteSubmission { vote });
     }
-
-    /// Add voter registration to the collected changes
-    fn add_voter_registration(
-        &mut self,
-        voter_id: crate::state::voting::types::VoterId,
-        reputation: crate::state::voting::types::VoterReputation,
-    ) {
-        self.voter_registrations.push(VoterRegistration {
-            voter_id,
-            initial_reputation: reputation,
-        });
-    }
-
-    /// Add reputation update to the collected changes
-    fn add_reputation_update(
-        &mut self,
-        voter_id: crate::state::voting::types::VoterId,
-        old_reputation: crate::state::voting::types::VoterReputation,
-        updated_reputation: crate::state::voting::types::VoterReputation,
-    ) {
-        self.reputation_updates.push(ReputationUpdate {
-            voter_id,
-            updated_reputation,
-            old_reputation,
-        });
-    }
 }
-
-/// Calculate share update cost using centralized LMSR service.
 fn query_update_cost(
     current_shares: &Array<f64, Ix1>,
     new_shares: &Array<f64, Ix1>,
     beta: f64,
 ) -> Result<f64, LmsrError> {
-    // Use centralized LMSR service for all calculations
     LmsrService::calculate_update_cost(current_shares, new_shares, beta)
 }
 
-/// Validate a block and return total fees.
 pub fn validate(
     state: &State,
     rotxn: &RoTxn,
@@ -507,7 +549,6 @@ pub fn validate(
         return Err(err);
     }
 
-    // Calculate the height this block will have after being applied
     let future_height =
         state.try_get_height(rotxn)?.map_or(0, |height| height + 1);
 
@@ -531,7 +572,6 @@ pub fn validate(
             }
             spent_utxos.insert(*input);
         }
-        // Use the future height for validation
         total_fees = total_fees
             .checked_add(state.validate_filled_transaction(
                 rotxn,
@@ -557,32 +597,6 @@ pub fn validate(
     Ok(total_fees)
 }
 
-/// Connect a block as the single source of truth for all state transitions
-///
-/// This function serves as the authoritative implementation for all state changes
-/// within a block, processing UTXO updates, market operations with LMSR calculations,
-/// slot transitions, and database persistence atomically.
-///
-/// # Block State Management Architecture
-/// - All transaction types processed within block state
-/// - LMSR calculations integrated directly into block processing  
-/// - Database state maintained in perfect sync with blockchain state
-/// - Atomic operations ensure consistency across all state components
-///
-/// # Arguments
-/// * `state` - Blockchain state (authoritative source)
-/// * `rwtxn` - Database write transaction for atomic persistence
-/// * `header` - Block header with validation data
-/// * `body` - Block body containing all transactions
-/// * `mainchain_timestamp` - Bitcoin timestamp for period calculations
-///
-/// # Returns
-/// * `Ok(())` - Successful atomic block connection
-/// * `Err(Error)` - Connection failure with automatic rollback
-///
-/// # Bitcoin Hivemind Compliance
-/// Implements atomic block connection per whitepaper specifications for
-/// concurrent operations and mathematical precision requirements.
 pub fn connect(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -608,8 +622,6 @@ pub fn connect(
         return Err(err);
     }
 
-    // slot minting using mainchain timestamp
-
     if height == 0 {
         state
             .slots()
@@ -620,10 +632,108 @@ pub fn connect(
             .mint_up_to(rwtxn, mainchain_timestamp, height)?;
     }
 
-    // NOTE: Markets no longer have persistent voting state transitions
-    // Markets derive their voting behavior from decision slot states dynamically
-    // Individual slots enter voting periods based on when they were claimed
-    // This ensures multidimensional markets can have some slots voting while others trade
+    for claimed_slot in state.slots().get_all_claimed_slots(rwtxn)? {
+        let slot_id = claimed_slot.slot_id;
+        let current_state =
+            state.slots().get_slot_current_state(rwtxn, slot_id)?;
+
+        if current_state == crate::state::slots::SlotState::Claimed {
+            let voting_period = slot_id.voting_period();
+            let period_info = crate::state::voting::period_calculator::calculate_voting_period(
+                rwtxn,
+                crate::state::voting::types::VotingPeriodId(voting_period),
+                height,
+                mainchain_timestamp,
+                state.slots().get_config(),
+                state.slots(),
+                false,
+            )?;
+
+            if matches!(
+                period_info.status,
+                crate::state::voting::types::VotingPeriodStatus::Active
+                    | crate::state::voting::types::VotingPeriodStatus::Closed
+            ) {
+                state.slots().transition_slot_to_voting(
+                    rwtxn,
+                    slot_id,
+                    height as u64,
+                    mainchain_timestamp,
+                )?;
+            }
+        }
+    }
+
+    let all_periods = state.voting().get_all_periods(
+        rwtxn,
+        mainchain_timestamp,
+        height,
+        state.slots().get_config(),
+        state.slots(),
+    )?;
+
+    for (period_id, period) in all_periods {
+        if period.status
+            == crate::state::voting::types::VotingPeriodStatus::Closed
+        {
+            let votes = state
+                .voting()
+                .databases()
+                .get_votes_for_period(rwtxn, period_id)?;
+
+            if !votes.is_empty() {
+                let existing_outcomes = state
+                    .voting()
+                    .databases()
+                    .get_consensus_outcomes_for_period(rwtxn, period_id)?;
+
+                if existing_outcomes.is_empty() {
+                    tracing::info!(
+                        "Protocol: Automatically calculating consensus for period {} at block height {} (period ended at timestamp {})",
+                        period_id.0,
+                        height,
+                        period.end_timestamp
+                    );
+
+                    state.voting().calculate_and_store_consensus(
+                        rwtxn,
+                        period_id,
+                        state,
+                        mainchain_timestamp,
+                        height as u64,
+                        state.slots(),
+                    )?;
+
+                    tracing::info!(
+                        "Protocol: Successfully calculated consensus for period {}",
+                        period_id.0
+                    );
+                }
+            }
+        }
+    }
+
+    {
+        let payout_results =
+            state.markets().transition_and_payout_resolved_markets(
+                rwtxn,
+                state,
+                state.slots(),
+                height,
+            )?;
+
+        if !payout_results.is_empty() {
+            for (market_id, summary) in &payout_results {
+                tracing::info!(
+                    "Protocol: Market {} auto-ossified with {} sats treasury + {} sats fees distributed to {} shareholders",
+                    market_id,
+                    summary.treasury_distributed,
+                    summary.author_fees_distributed,
+                    summary.shareholder_count
+                );
+            }
+        }
+    }
 
     for (vout, output) in body.coinbase.iter().enumerate() {
         let outpoint = OutPoint::Coinbase {
@@ -638,12 +748,15 @@ pub fn connect(
                 FilledOutputContent::BitcoinWithdrawal(withdrawal)
             }
             OutputContent::Votecoin(amount) => {
-                // Only allow Votecoin creation in the genesis block (height 0)
                 if height == 0 {
                     FilledOutputContent::Votecoin(amount)
                 } else {
                     return Err(Error::BadCoinbaseOutputContent);
                 }
+            }
+            OutputContent::MarketTreasury { .. }
+            | OutputContent::MarketAuthorFee { .. } => {
+                return Err(Error::BadCoinbaseOutputContent);
             }
         };
         let filled_output = FilledOutput {
@@ -657,18 +770,13 @@ pub fn connect(
             &filled_output,
         )?;
     }
-    // Phase 1: Transaction Processing and State Validation
-    // All transaction types are processed within the collected block state management
-    // ensuring atomic operations and perfect database-to-blockchain alignment
     let mut state_update = StateUpdate::new();
     let mut filled_transactions = Vec::new();
 
-    // Process all transactions through state management
     for transaction in &body.transactions {
         let filled_tx = state.fill_transaction(rwtxn, transaction)?;
         filled_transactions.push(filled_tx.clone());
 
-        // Process all transaction types within block state
         match &transaction.data {
             Some(TxData::BuyShares { .. }) => {
                 apply_market_trade(
@@ -697,15 +805,6 @@ pub fn connect(
                     height,
                 )?;
             }
-            Some(TxData::RedeemShares { .. }) => {
-                apply_share_redemption(
-                    state,
-                    rwtxn,
-                    &filled_tx,
-                    &mut state_update,
-                    height,
-                )?;
-            }
             Some(TxData::ClaimDecisionSlot { .. }) => {
                 apply_slot_claim(
                     state,
@@ -725,15 +824,6 @@ pub fn connect(
                     height,
                 )?;
             }
-            Some(TxData::RegisterVoter { .. }) => {
-                apply_register_voter(
-                    state,
-                    rwtxn,
-                    &filled_tx,
-                    &mut state_update,
-                    height,
-                )?;
-            }
             Some(TxData::SubmitVoteBatch { .. }) => {
                 apply_submit_vote_batch(
                     state,
@@ -743,24 +833,21 @@ pub fn connect(
                     height,
                 )?;
             }
-            None => {
-                // Regular UTXO-only transactions
-            }
+            Some(TxData::RegisterVoter { .. }) => {}
+            None => {}
         }
     }
 
-    // Validate all collected state changes
     state_update.validate_all_changes(state, rwtxn)?;
 
-    // Apply all validated state changes atomically
-
-    // Apply state changes first (these can fail with detailed error handling)
-    state_update.apply_all_changes(state, rwtxn, height)?;
-
-    // Apply UTXO changes after state validation succeeds
+    // First create UTXOs from transaction outputs (including MarketTreasury/MarketAuthorFee)
     for filled_tx in &filled_transactions {
         apply_utxo_changes(state, rwtxn, filled_tx)?;
     }
+
+    // Then apply state changes including market UTXO consolidation
+    // (consolidation merges new tx outputs with existing market UTXOs)
+    state_update.apply_all_changes(state, rwtxn, height)?;
 
     let block_hash = header.hash();
     state.tip.put(rwtxn, &(), &block_hash)?;
@@ -797,11 +884,9 @@ pub fn disconnect_tip(
     let height = state
         .try_get_height(rwtxn)?
         .expect("Height should not be None");
-    // revert txs, last-to-first
     body.transactions.iter().rev().try_for_each(|tx| {
         let txid = tx.txid();
         let filled_tx = state.fill_transaction_from_stxos(rwtxn, tx.clone())?;
-        // revert transaction effects
         match &tx.data {
             None => (),
             Some(TxData::ClaimDecisionSlot { .. }) => {
@@ -817,20 +902,15 @@ pub fn disconnect_tip(
             Some(TxData::BuyShares { .. }) => {
                 let () = revert_buy_shares(state, rwtxn, &filled_tx)?;
             }
-            Some(TxData::RedeemShares { .. }) => {
-                let () = revert_redeem_shares(state, rwtxn, &filled_tx)?;
-            }
             Some(TxData::SubmitVote { .. }) => {
                 let () = revert_submit_vote(state, rwtxn, &filled_tx)?;
-            }
-            Some(TxData::RegisterVoter { .. }) => {
-                let () = revert_register_voter(state, rwtxn, &filled_tx)?;
             }
             Some(TxData::SubmitVoteBatch { .. }) => {
                 let () = revert_submit_vote_batch(state, rwtxn, &filled_tx)?;
             }
+            Some(TxData::RegisterVoter { .. }) => {}
         }
-        // delete UTXOs, last-to-first
+
         tx.outputs.iter().enumerate().rev().try_for_each(
             |(vout, _output)| {
                 let outpoint = OutPoint::Regular {
@@ -844,10 +924,8 @@ pub fn disconnect_tip(
                 }
             },
         )?;
-        // unspend STXOs, last-to-first
         tx.inputs.iter().rev().try_for_each(|outpoint| {
             if let Some(spent_output) = state.stxos.try_get(rwtxn, outpoint)? {
-                // Remove STXO caches before deleting for O(1) sidechain wealth calculation
                 state.remove_stxo_caches(rwtxn, outpoint, &spent_output)?;
                 state.stxos.delete(rwtxn, outpoint)?;
                 state.insert_utxo_with_address_index(
@@ -863,7 +941,6 @@ pub fn disconnect_tip(
             }
         })
     })?;
-    // delete coinbase UTXOs, last-to-first
     body.coinbase.iter().enumerate().rev().try_for_each(
         |(vout, _output)| {
             let outpoint = OutPoint::Coinbase {
@@ -877,6 +954,18 @@ pub fn disconnect_tip(
             }
         },
     )?;
+
+    if height > 0 {
+        state
+            .slots()
+            .rollback_slot_states_to_height(rwtxn, (height - 1) as u64)?;
+
+        tracing::info!(
+            "Rolled back slot states to height {} during reorg",
+            height - 1
+        );
+    }
+
     match (header.prev_side_hash, height) {
         (None, 0) => {
             state.tip.delete(rwtxn, &())?;
@@ -935,10 +1024,6 @@ fn apply_claim_decision_slot(
         Some(block_height),
     )?;
 
-    // BITCOIN HIVEMIND PRINCIPLE: Periods are derived from slots, not stored separately
-    // When a slot is claimed in period N, it will be voted on in period N+1
-    // The slot ID encodes all necessary period information (10 bits for period index)
-    // No need to create or update voting period entities - they are calculated on-demand
     let slot_period = slot_id.period_index();
     let voting_period = slot_id.voting_period();
 
@@ -972,10 +1057,6 @@ fn revert_claim_decision_slot(
     Ok(())
 }
 
-/// Extract creator address from transaction's first spent UTXO
-///
-/// This is a common validation step for market creation transactions as per
-/// Bitcoin Hivemind whitepaper specifications.
 fn extract_creator_address(
     filled_tx: &FilledTransaction,
 ) -> Result<crate::types::Address, Error> {
@@ -988,10 +1069,6 @@ fn extract_creator_address(
         })
 }
 
-/// Configure common market builder fields from market data
-///
-/// This consolidates the common pattern of setting optional fields on MarketBuilder
-/// instances, following the DRY principle while maintaining Hivemind specification compliance.
 fn configure_market_builder(
     mut builder: crate::state::MarketBuilder,
     description: &str,
@@ -1016,16 +1093,11 @@ fn configure_market_builder(
     builder
 }
 
-/// Store market in database with consistent error handling
-///
-/// This provides a standardized way to store markets in the database while
-/// maintaining consistent error reporting across all market creation types.
 fn revert_create_market(
     _state: &State,
     _rwtxn: &mut RwTxn,
     _filled_tx: &FilledTransaction,
 ) -> Result<(), Error> {
-    // Markets are immutable once created in Bitcoin Hivemind - no reversion possible
     Ok(())
 }
 
@@ -1034,54 +1106,9 @@ fn revert_create_market_dimensional(
     _rwtxn: &mut RwTxn,
     _filled_tx: &FilledTransaction,
 ) -> Result<(), Error> {
-    // Markets are immutable once created in Bitcoin Hivemind - no reversion possible
     Ok(())
 }
 
-/// Apply a share redemption transaction according to Bitcoin Hivemind whitepaper
-///
-/// This function validates the redemption transaction and processes it for a resolved market.
-/// Users can redeem their shares for Bitcoin based on the final market resolution.
-/// The transaction data contains the market ID, outcome index, and share amount.
-fn apply_redeem_shares(
-    state: &State,
-    rwtxn: &mut RwTxn,
-    filled_tx: &FilledTransaction,
-    height: u32,
-) -> Result<(), Error> {
-    let redeem_data =
-        filled_tx
-            .redeem_shares()
-            .ok_or_else(|| Error::InvalidSlotId {
-                reason: "Not a redeem shares transaction".to_string(),
-            })?;
-
-    // Get the address from the transaction authorization
-    let trader_address = filled_tx
-        .spent_utxos
-        .first()
-        .ok_or_else(|| Error::InvalidSlotId {
-            reason: "Redeem shares transaction must have inputs".to_string(),
-        })?
-        .address;
-
-    // Apply the redemption to the market
-    state.markets().apply_share_redemption(
-        rwtxn,
-        &trader_address,
-        redeem_data.market_id,
-        redeem_data.outcome_index,
-        redeem_data.shares_to_redeem,
-        height as u64,
-    )?;
-
-    Ok(())
-}
-
-/// Revert a share buy transaction
-///
-/// This function reverts a previously applied buy transaction by applying
-/// the inverse operation (selling the same amount of shares).
 fn revert_buy_shares(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -1092,7 +1119,6 @@ fn revert_buy_shares(
             reason: "Not a buy shares transaction".to_string(),
         })?;
 
-    // Get the address from the transaction authorization
     let trader_address = filled_tx
         .spent_utxos
         .first()
@@ -1101,10 +1127,8 @@ fn revert_buy_shares(
         })?
         .address;
 
-    // Get current height for reversion
     let height = state.try_get_height(rwtxn)?.unwrap_or(0);
 
-    // Revert the trade (positive amount becomes sell during revert)
     state.markets().revert_share_trade(
         rwtxn,
         &trader_address,
@@ -1117,51 +1141,6 @@ fn revert_buy_shares(
     Ok(())
 }
 
-/// Revert a share redemption transaction
-///
-/// This function reverts a previously applied share redemption by restoring
-/// the user's shares and removing the Bitcoin payout.
-fn revert_redeem_shares(
-    state: &State,
-    rwtxn: &mut RwTxn,
-    filled_tx: &FilledTransaction,
-) -> Result<(), Error> {
-    let redeem_data =
-        filled_tx
-            .redeem_shares()
-            .ok_or_else(|| Error::InvalidSlotId {
-                reason: "Not a redeem shares transaction".to_string(),
-            })?;
-
-    // Get the address from the transaction authorization
-    let trader_address = filled_tx
-        .spent_utxos
-        .first()
-        .ok_or_else(|| Error::InvalidSlotId {
-            reason: "Redeem shares transaction must have inputs".to_string(),
-        })?
-        .address;
-
-    // Get current height for reversion
-    let height = state.try_get_height(rwtxn)?.unwrap_or(0);
-
-    // Revert the redemption
-    state.markets().revert_share_redemption(
-        rwtxn,
-        &trader_address,
-        redeem_data.market_id,
-        redeem_data.outcome_index,
-        redeem_data.shares_to_redeem,
-        height as u64,
-    )?;
-
-    Ok(())
-}
-
-/// Apply UTXO changes with state management
-///
-/// This function consolidates all UTXO operations within the single source of truth
-/// approach, ensuring atomic updates to both primary UTXO database and address index.
 fn apply_utxo_changes(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -1169,7 +1148,6 @@ fn apply_utxo_changes(
 ) -> Result<(), Error> {
     let txid = filled_tx.txid();
 
-    // Process inputs (spending UTXOs)
     for (vin, input) in filled_tx.inputs().iter().enumerate() {
         let spent_output = state
             .utxos
@@ -1185,11 +1163,9 @@ fn apply_utxo_changes(
         };
         state.delete_utxo_with_address_index(rwtxn, input)?;
         state.stxos.put(rwtxn, input, &spent_output)?;
-        // Update STXO caches for O(1) sidechain wealth calculation
         state.update_stxo_caches(rwtxn, input, &spent_output)?;
     }
 
-    // Process outputs (creating new UTXOs)
     let Some(filled_outputs) = filled_tx.filled_outputs() else {
         let err = error::FillTxOutputContents(Box::new(filled_tx.clone()));
         return Err(err.into());
@@ -1206,28 +1182,36 @@ fn apply_utxo_changes(
             &outpoint,
             filled_output,
         )?;
+
+        // Track pending market UTXOs for efficient consolidation
+        match &filled_output.content {
+            FilledOutputContent::MarketTreasury { market_id, .. } => {
+                let market_id = MarketId::new(*market_id);
+                state.markets().add_pending_treasury_utxo(rwtxn, &market_id, &outpoint)?;
+            }
+            FilledOutputContent::MarketAuthorFee { market_id, .. } => {
+                let market_id = MarketId::new(*market_id);
+                state.markets().add_pending_author_fee_utxo(rwtxn, &market_id, &outpoint)?;
+            }
+            _ => {}
+        }
     }
 
     Ok(())
 }
 
-/// Apply market trade with LMSR calculations
-///
-/// This function integrates LMSR mathematical operations directly into block processing,
-/// ensuring atomic market state updates aligned with Bitcoin Hivemind specifications.
 fn apply_market_trade(
     state: &State,
     rwtxn: &mut RwTxn,
     filled_tx: &FilledTransaction,
     state_update: &mut StateUpdate,
-    height: u32,
+    _height: u32,
 ) -> Result<(), Error> {
     let buy_data =
         filled_tx.buy_shares().ok_or_else(|| Error::InvalidSlotId {
             reason: "Not a buy shares transaction".to_string(),
         })?;
 
-    // Get current market for LMSR calculations (market_id is now standardized MarketId type)
     let market = state
         .markets()
         .get_market(rwtxn, &buy_data.market_id)?
@@ -1235,50 +1219,43 @@ fn apply_market_trade(
             reason: format!("Market {:?} does not exist", buy_data.market_id),
         })?;
 
-    // Validate market trading state using compute_state() as single source of truth
-    // Markets derive voting behavior from individual slot states, not persistent MarketState
-    let mainchain_timestamp = state
-        .try_get_mainchain_timestamp(rwtxn)?
-        .ok_or_else(|| Error::InvalidSlotId {
-            reason: "No mainchain timestamp available".to_string(),
-        })?;
-
-    let current_period = state
-        .slots()
-        .get_current_period(mainchain_timestamp, Some(height))?;
-
-    // Use compute_state() to determine if market is tradeable
-    // This delegates to slots layer for voting period checks
-    let market_state = market.compute_state(current_period);
-    if matches!(market_state, crate::state::MarketState::Voting) {
+    let market_state = market.state();
+    if !market_state.allows_trading() {
         return Err(Error::InvalidSlotId {
-            reason: "Cannot trade: market is in voting state".to_string(),
+            reason: format!(
+                "Cannot trade: market is in {:?} state",
+                market_state
+            ),
         });
     }
 
-    // Calculate new share quantities using integrated LMSR
-    let mut new_shares = market.shares().clone();
-    new_shares[buy_data.outcome_index as usize] += buy_data.shares_to_buy;
+    let outcome_index = buy_data.outcome_index as usize;
+    let shares_to_buy = buy_data.shares_to_buy;
 
-    // Calculate trade cost using comprehensive LMSR calculator
-    let trade_cost =
+    // Calculate cost based on current market state
+    let mut new_shares = market.shares().clone();
+    new_shares[outcome_index] += shares_to_buy;
+
+    let base_cost =
         query_update_cost(&market.shares(), &new_shares, market.b()).map_err(
             |e| Error::InvalidSlotId {
                 reason: format!("Failed to calculate trade cost: {:?}", e),
             },
         )?;
 
-    // Validate cost constraints
-    if trade_cost > buy_data.max_cost as f64 {
+    // Calculate fee for market author
+    let fee_amount = base_cost * market.trading_fee();
+    let total_cost = base_cost + fee_amount;
+
+    if total_cost > buy_data.max_cost as f64 {
         return Err(Error::InvalidSlotId {
             reason: format!(
-                "Trade cost {} exceeds max cost {}",
-                trade_cost, buy_data.max_cost
+                "Trade cost {} (base: {}, fee: {}) exceeds max cost {}",
+                total_cost, base_cost, fee_amount, buy_data.max_cost
             ),
         });
     }
 
-    // Get trader address
     let trader_address = filled_tx
         .spent_utxos
         .first()
@@ -1287,31 +1264,31 @@ fn apply_market_trade(
             reason: "No spent UTXOs found for trade".to_string(),
         })?;
 
-    // Calculate volume in sats (including fees)
-    let volume_sats = trade_cost.ceil() as u64;
+    let volume_sats = total_cost.ceil() as u64;
+    let fee_sats = fee_amount.ceil() as i64;
+    // Note: base_cost_sats is used for validation of explicit tx outputs
+    let _base_cost_sats = base_cost.ceil() as i64;
 
-    // CRITICAL: Bitcoin Economic Conservation per Hivemind Whitepaper
-    // When trader buys shares, Bitcoin flows from trader to market treasury.
-    // This Bitcoin payment is validated by the UTXO system (trader spends Bitcoin UTXOs).
-    // The market treasury is updated in the MarketStateUpdate to reflect the incoming Bitcoin.
-    // The trade_cost represents the Bitcoin amount transferred from trader to treasury.
-    // This ensures: Trader's Bitcoin Out = Market Treasury Bitcoin In = Share Value
-    // The actual UTXO transfer is handled by apply_utxo_changes which processes the transaction's
-    // inputs (trader's Bitcoin) and outputs (change back to trader if any).
-
-    // Add to collected changes for atomic application (market_id is now standardized MarketId type)
     state_update.add_market_update(MarketStateUpdate {
         market_id: buy_data.market_id.clone(),
-        new_shares: Some(new_shares),
+        share_delta: Some((outcome_index, shares_to_buy)),
         new_beta: None,
-        trader_address: Some(trader_address),
-        trade_cost: Some(trade_cost),
         transaction_id: Some(filled_tx.transaction.txid().0),
-        outcome_index: Some(buy_data.outcome_index),
         volume_sats: Some(volume_sats),
+        fee_sats: Some(fee_sats as u64),
     });
 
-    // Add share account change (market_id is now standardized MarketId type)
+    // Note: Treasury and fee values are now tracked via explicit transaction outputs
+    // (MarketTreasury and MarketAuthorFee UTXOs) rather than accumulators
+
+    tracing::info!(
+        "apply_market_trade: Adding share account change - trader={}, market={}, outcome={}, shares={}",
+        trader_address,
+        buy_data.market_id,
+        buy_data.outcome_index,
+        buy_data.shares_to_buy
+    );
+
     state_update.add_share_account_change(
         trader_address,
         buy_data.market_id,
@@ -1321,8 +1298,6 @@ fn apply_market_trade(
 
     Ok(())
 }
-
-/// Apply market creation to state
 fn apply_market_creation(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -1340,10 +1315,8 @@ fn apply_market_creation(
                 reason: "Not a market creation transaction".to_string(),
             })?;
 
-    // Get creator address using common helper
     let creator_address = extract_creator_address(filled_tx)?;
 
-    // Parse and collect decision slot data
     let mut slot_ids = Vec::new();
     let mut decisions = HashMap::new();
 
@@ -1370,7 +1343,6 @@ fn apply_market_creation(
         decisions.insert(slot_id, decision);
     }
 
-    // Build market using common helper
     let mut builder =
         MarketBuilder::new(market_data.title.clone(), creator_address);
     builder = configure_market_builder(
@@ -1397,8 +1369,6 @@ fn apply_market_creation(
         }
     };
 
-    // Initial liquidity is now calculated automatically based on beta parameter
-
     let market =
         builder
             .build(height as u64, None, &decisions)
@@ -1406,17 +1376,46 @@ fn apply_market_creation(
                 reason: format!("Market creation failed: {}", e),
             })?;
 
-    // Add to collected changes instead of direct application
-    state_update.add_market_creation(MarketCreation {
-        market,
-        creator_address,
-        height,
-    });
+    // Calculate initial treasury from beta: b * ln(num_outcomes)
+    let num_outcomes = market.get_outcome_count() as f64;
+    let initial_treasury_sats = (market.b() * num_outcomes.ln()).ceil() as u64;
+
+    // Create the initial MarketTreasury UTXO if there's initial liquidity
+    // The funds come from the transaction inputs (included in total_cost by wallet)
+    if initial_treasury_sats > 0 {
+        use crate::state::markets::generate_market_treasury_address;
+        use crate::types::{BitcoinOutputContent, FilledOutput, OutPoint};
+
+        let market_id = market.id.clone();
+        let market_id_bytes = *market_id.as_bytes();
+        let treasury_address = generate_market_treasury_address(&market_id);
+
+        let outpoint = OutPoint::Market {
+            market_id: market_id_bytes,
+            block_height: height,
+        };
+        let output = FilledOutput::new(
+            treasury_address,
+            FilledOutputContent::MarketTreasury {
+                market_id: market_id_bytes,
+                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(initial_treasury_sats)),
+            },
+        );
+
+        state.insert_utxo_with_address_index(rwtxn, &outpoint, &output)?;
+        state.markets().set_market_utxo(rwtxn, &market_id, &outpoint)?;
+
+        tracing::debug!(
+            "Created initial MarketTreasury UTXO for market {:?} with {} sats",
+            market_id,
+            initial_treasury_sats
+        );
+    }
+
+    state_update.add_market_creation(MarketCreation { market: market.clone() });
 
     Ok(())
 }
-
-/// Apply dimensional market creation to state
 fn apply_dimensional_market(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -1438,10 +1437,8 @@ fn apply_dimensional_market(
             }
         })?;
 
-    // Get creator address using common helper
     let creator_address = extract_creator_address(filled_tx)?;
 
-    // Parse dimension specification
     let dimension_specs =
         parse_dimensions(&market_data.dimensions).map_err(|_| {
             Error::InvalidSlotId {
@@ -1449,7 +1446,6 @@ fn apply_dimensional_market(
             }
         })?;
 
-    // Collect all slot IDs and validate decisions exist
     let mut decisions = HashMap::new();
     for spec in &dimension_specs {
         let slot_ids = match spec {
@@ -1474,7 +1470,6 @@ fn apply_dimensional_market(
         }
     }
 
-    // Build dimensional market using common helper
     let mut builder =
         MarketBuilder::new(market_data.title.clone(), creator_address);
     builder = configure_market_builder(
@@ -1485,10 +1480,7 @@ fn apply_dimensional_market(
         market_data.trading_fee,
     );
 
-    // Use the dimensional specification
     let builder = builder.with_dimensions(dimension_specs);
-
-    // Initial liquidity is now calculated automatically based on beta parameter
 
     let market =
         builder
@@ -1497,29 +1489,45 @@ fn apply_dimensional_market(
                 reason: format!("Dimensional market creation failed: {}", e),
             })?;
 
-    // Add to collected changes instead of direct application
-    state_update.add_market_creation(MarketCreation {
-        market,
-        creator_address,
-        height,
-    });
+    // Calculate initial treasury from beta: b * ln(num_outcomes)
+    let num_outcomes = market.get_outcome_count() as f64;
+    let initial_treasury_sats = (market.b() * num_outcomes.ln()).ceil() as u64;
+
+    // Create the initial MarketTreasury UTXO if there's initial liquidity
+    if initial_treasury_sats > 0 {
+        use crate::state::markets::generate_market_treasury_address;
+        use crate::types::{BitcoinOutputContent, FilledOutput, OutPoint};
+
+        let market_id = market.id.clone();
+        let market_id_bytes = *market_id.as_bytes();
+        let treasury_address = generate_market_treasury_address(&market_id);
+
+        let outpoint = OutPoint::Market {
+            market_id: market_id_bytes,
+            block_height: height,
+        };
+        let output = FilledOutput::new(
+            treasury_address,
+            FilledOutputContent::MarketTreasury {
+                market_id: market_id_bytes,
+                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(initial_treasury_sats)),
+            },
+        );
+
+        state.insert_utxo_with_address_index(rwtxn, &outpoint, &output)?;
+        state.markets().set_market_utxo(rwtxn, &market_id, &outpoint)?;
+
+        tracing::debug!(
+            "Created initial MarketTreasury UTXO for dimensional market {:?} with {} sats",
+            market_id,
+            initial_treasury_sats
+        );
+    }
+
+    state_update.add_market_creation(MarketCreation { market: market.clone() });
 
     Ok(())
 }
-
-/// Apply share redemption with LMSR treasury updates
-fn apply_share_redemption(
-    state: &State,
-    rwtxn: &mut RwTxn,
-    filled_tx: &FilledTransaction,
-    _state_update: &mut StateUpdate,
-    height: u32,
-) -> Result<(), Error> {
-    // Use existing share redemption logic
-    apply_redeem_shares(state, rwtxn, filled_tx, height)
-}
-
-/// Apply slot claim with period transition handling
 fn apply_slot_claim(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -1528,7 +1536,6 @@ fn apply_slot_claim(
     height: u32,
     mainchain_timestamp: u64,
 ) -> Result<(), Error> {
-    // Use existing slot claim logic
     apply_claim_decision_slot(
         state,
         rwtxn,
@@ -1538,32 +1545,6 @@ fn apply_slot_claim(
     )
 }
 
-// ================================================================================
-// Voting Transaction Processing
-// ================================================================================
-
-/// Apply a single vote submission transaction
-///
-/// This function processes a vote submission according to Bitcoin Hivemind
-/// whitepaper specifications for the consensus mechanism.
-///
-/// # Bitcoin Hivemind Compliance
-/// - Section 3.3: Vote Structure and Submission
-/// - Section 4: Consensus Algorithm - Vote Matrix Construction
-///
-/// # Arguments
-/// * `state` - Blockchain state
-/// * `rwtxn` - Database write transaction
-/// * `filled_tx` - Filled transaction containing vote data
-/// * `state_update` - State update tracker for rollback support
-/// * `height` - Block height when vote is included
-///
-/// # Validation Requirements
-/// 1. Voter must have Votecoin balance > 0
-/// 2. Voting period must be active
-/// 3. Decision slot must exist and be in voting period
-/// 4. Vote value must be valid for decision type (binary/scalar)
-/// 5. One vote per voter per decision per period
 fn apply_submit_vote(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -1573,16 +1554,16 @@ fn apply_submit_vote(
 ) -> Result<(), Error> {
     use crate::state::{
         slots::SlotId,
-        voting::types::{Vote, VoterId, VotingPeriodId},
+        voting::types::{Vote, VotingPeriodId},
     };
 
-    let vote_data = filled_tx.submit_vote().ok_or_else(|| {
-        Error::InvalidTransaction {
-            reason: "Not a vote submission transaction".to_string(),
-        }
-    })?;
+    let vote_data =
+        filled_tx
+            .submit_vote()
+            .ok_or_else(|| Error::InvalidTransaction {
+                reason: "Not a vote submission transaction".to_string(),
+            })?;
 
-    // Extract voter address from first spent UTXO
     let voter_address = filled_tx
         .spent_utxos
         .first()
@@ -1591,18 +1572,12 @@ fn apply_submit_vote(
         })?
         .address;
 
-    let voter_id = VoterId::from_address(&voter_address);
     let decision_id = SlotId::from_bytes(vote_data.slot_id_bytes)?;
 
-    // BITCOIN HIVEMIND PRINCIPLE: Voting period is derived from slot ID
-    // Slots claimed in period N are voted on in period N+1
-    // The slot ID encodes the period it was claimed in (10 bits for period index)
     let slot_claim_period = decision_id.period_index();
     let voting_period = decision_id.voting_period();
     let period_id = VotingPeriodId::new(voting_period);
 
-    // Validate that transaction's voting_period matches derived period (if provided)
-    // This ensures backward compatibility while enforcing the new constraint
     if vote_data.voting_period != voting_period {
         return Err(Error::InvalidTransaction {
             reason: format!(
@@ -1615,19 +1590,19 @@ fn apply_submit_vote(
         });
     }
 
-    // Get current timestamp for vote recording
-    let timestamp = state
-        .try_get_mainchain_timestamp(rwtxn)?
-        .ok_or_else(|| Error::InvalidTransaction {
-            reason: "No mainchain timestamp available".to_string(),
+    let timestamp =
+        state.try_get_mainchain_timestamp(rwtxn)?.ok_or_else(|| {
+            Error::InvalidTransaction {
+                reason: "No mainchain timestamp available".to_string(),
+            }
         })?;
 
-    // Convert vote value using centralized helper (single source of truth)
-    let vote_value = crate::validation::VoteValidator::convert_vote_value(vote_data.vote_value);
+    let vote_value = crate::validation::VoteValidator::convert_vote_value(
+        vote_data.vote_value,
+    );
 
-    // Create vote structure
     let vote = Vote::new(
-        voter_id,
+        voter_address,
         period_id,
         decision_id,
         vote_value,
@@ -1636,38 +1611,25 @@ fn apply_submit_vote(
         filled_tx.txid().0,
     );
 
-    // Defer vote storage to StateUpdate for atomic application
     state_update.add_vote_submission(vote);
 
     Ok(())
 }
 
-/// Revert a vote submission transaction
-///
-/// This function removes a previously submitted vote from the database
-/// to support blockchain reorganization per Bitcoin Hivemind specifications.
-///
-/// # Arguments
-/// * `state` - Blockchain state
-/// * `rwtxn` - Database write transaction
-/// * `filled_tx` - Filled transaction containing vote data to revert
 fn revert_submit_vote(
     state: &State,
     rwtxn: &mut RwTxn,
     filled_tx: &FilledTransaction,
 ) -> Result<(), Error> {
-    use crate::state::{
-        slots::SlotId,
-        voting::types::{VoterId, VotingPeriodId},
-    };
+    use crate::state::{slots::SlotId, voting::types::VotingPeriodId};
 
-    let vote_data = filled_tx.submit_vote().ok_or_else(|| {
-        Error::InvalidTransaction {
-            reason: "Not a vote submission transaction".to_string(),
-        }
-    })?;
+    let vote_data =
+        filled_tx
+            .submit_vote()
+            .ok_or_else(|| Error::InvalidTransaction {
+                reason: "Not a vote submission transaction".to_string(),
+            })?;
 
-    // Extract voter address from first spent UTXO
     let voter_address = filled_tx
         .spent_utxos
         .first()
@@ -1676,37 +1638,21 @@ fn revert_submit_vote(
         })?
         .address;
 
-    let voter_id = VoterId::from_address(&voter_address);
     let decision_id = SlotId::from_bytes(vote_data.slot_id_bytes)?;
 
-    // BITCOIN HIVEMIND PRINCIPLE: Derive voting period from slot ID
     let voting_period = decision_id.voting_period();
     let period_id = VotingPeriodId::new(voting_period);
 
-    // Delete vote from database
-    state
-        .voting()
-        .databases()
-        .delete_vote(rwtxn, period_id, voter_id, decision_id)?;
+    state.voting().databases().delete_vote(
+        rwtxn,
+        period_id,
+        voter_address,
+        decision_id,
+    )?;
 
     Ok(())
 }
 
-/// Apply a batch vote submission transaction
-///
-/// This function processes multiple votes in a single transaction for
-/// efficiency, following Bitcoin Hivemind specifications.
-///
-/// # Bitcoin Hivemind Compliance
-/// Batch submissions maintain atomicity while improving throughput during
-/// active voting periods.
-///
-/// # Arguments
-/// * `state` - Blockchain state
-/// * `rwtxn` - Database write transaction
-/// * `filled_tx` - Filled transaction containing batch vote data
-/// * `state_update` - State update tracker for rollback support
-/// * `height` - Block height when votes are included
 fn apply_submit_vote_batch(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -1716,7 +1662,7 @@ fn apply_submit_vote_batch(
 ) -> Result<(), Error> {
     use crate::state::{
         slots::SlotId,
-        voting::types::{Vote, VoterId, VotingPeriodId},
+        voting::types::{Vote, VotingPeriodId},
     };
 
     let batch_data = filled_tx.submit_vote_batch().ok_or_else(|| {
@@ -1725,7 +1671,6 @@ fn apply_submit_vote_batch(
         }
     })?;
 
-    // Extract voter address from first spent UTXO
     let voter_address = filled_tx
         .spent_utxos
         .first()
@@ -1734,27 +1679,20 @@ fn apply_submit_vote_batch(
         })?
         .address;
 
-    let voter_id = VoterId::from_address(&voter_address);
-
-    // Get current timestamp for vote recording
-    let timestamp = state
-        .try_get_mainchain_timestamp(rwtxn)?
-        .ok_or_else(|| Error::InvalidTransaction {
-            reason: "No mainchain timestamp available".to_string(),
+    let timestamp =
+        state.try_get_mainchain_timestamp(rwtxn)?.ok_or_else(|| {
+            Error::InvalidTransaction {
+                reason: "No mainchain timestamp available".to_string(),
+            }
         })?;
 
-    // BITCOIN HIVEMIND PRINCIPLE: All votes in batch must be for same period
-    // Verify all slots are from same claim period
     let mut expected_voting_period: Option<u32> = None;
 
-    // Process each vote in the batch
     for vote_item in &batch_data.votes {
         let decision_id = SlotId::from_bytes(vote_item.slot_id_bytes)?;
 
-        // Derive voting period from slot ID
         let voting_period = decision_id.voting_period();
 
-        // Ensure all votes in batch are for same voting period
         if let Some(expected) = expected_voting_period {
             if voting_period != expected {
                 return Err(Error::InvalidTransaction {
@@ -1769,13 +1707,11 @@ fn apply_submit_vote_batch(
         } else {
             expected_voting_period = Some(voting_period);
 
-            // Validate transaction's voting_period matches derived period
             if batch_data.voting_period != voting_period {
                 return Err(Error::InvalidTransaction {
                     reason: format!(
                         "Batch vote period mismatch: slots require period {} but transaction specifies period {}",
-                        voting_period,
-                        batch_data.voting_period
+                        voting_period, batch_data.voting_period
                     ),
                 });
             }
@@ -1783,12 +1719,12 @@ fn apply_submit_vote_batch(
 
         let period_id = VotingPeriodId::new(voting_period);
 
-        // Convert vote value using centralized helper (single source of truth)
-        let vote_value = crate::validation::VoteValidator::convert_vote_value(vote_item.vote_value);
+        let vote_value = crate::validation::VoteValidator::convert_vote_value(
+            vote_item.vote_value,
+        );
 
-        // Create vote structure
         let vote = Vote::new(
-            voter_id,
+            voter_address,
             period_id,
             decision_id,
             vote_value,
@@ -1797,31 +1733,18 @@ fn apply_submit_vote_batch(
             filled_tx.txid().0,
         );
 
-        // Defer vote storage to StateUpdate for atomic application
         state_update.add_vote_submission(vote);
     }
 
     Ok(())
 }
 
-/// Revert a batch vote submission transaction
-///
-/// This function removes all votes from a batch submission to support
-/// blockchain reorganization per Bitcoin Hivemind specifications.
-///
-/// # Arguments
-/// * `state` - Blockchain state
-/// * `rwtxn` - Database write transaction
-/// * `filled_tx` - Filled transaction containing batch vote data to revert
 fn revert_submit_vote_batch(
     state: &State,
     rwtxn: &mut RwTxn,
     filled_tx: &FilledTransaction,
 ) -> Result<(), Error> {
-    use crate::state::{
-        slots::SlotId,
-        voting::types::{VoterId, VotingPeriodId},
-    };
+    use crate::state::{slots::SlotId, voting::types::VotingPeriodId};
 
     let batch_data = filled_tx.submit_vote_batch().ok_or_else(|| {
         Error::InvalidTransaction {
@@ -1829,7 +1752,6 @@ fn revert_submit_vote_batch(
         }
     })?;
 
-    // Extract voter address from first spent UTXO
     let voter_address = filled_tx
         .spent_utxos
         .first()
@@ -1838,107 +1760,20 @@ fn revert_submit_vote_batch(
         })?
         .address;
 
-    let voter_id = VoterId::from_address(&voter_address);
-
-    // Delete each vote from the batch
     for vote_item in &batch_data.votes {
         let decision_id = SlotId::from_bytes(vote_item.slot_id_bytes)?;
 
-        // BITCOIN HIVEMIND PRINCIPLE: Derive voting period from slot ID
         let voting_period = decision_id.voting_period();
         let period_id = VotingPeriodId::new(voting_period);
 
-        state
-            .voting()
-            .databases()
-            .delete_vote(rwtxn, period_id, voter_id, decision_id)?;
+        state.voting().databases().delete_vote(
+            rwtxn,
+            period_id,
+            voter_address,
+            decision_id,
+        )?;
     }
 
     Ok(())
 }
 
-/// Apply voter registration transaction
-///
-/// This function registers a new voter in the Bitcoin Hivemind system.
-/// Note: In the Votecoin model, voter registration is simplified since
-/// voting rights are directly proportional to Votecoin holdings.
-///
-/// # Bitcoin Hivemind Specification
-/// Registration establishes initial reputation for a voter. The actual
-/// voting weight is calculated as: Base Reputation × Votecoin Proportion
-///
-/// # Arguments
-/// * `state` - Blockchain state
-/// * `rwtxn` - Database write transaction
-/// * `filled_tx` - Filled transaction containing registration data
-/// * `state_update` - State update tracker for rollback support
-/// * `height` - Block height when registration occurs
-fn apply_register_voter(
-    state: &State,
-    rwtxn: &mut RwTxn,
-    filled_tx: &FilledTransaction,
-    state_update: &mut StateUpdate,
-    height: u32,
-) -> Result<(), Error> {
-    use crate::state::voting::types::{VoterId, VoterReputation, VotingPeriodId};
-
-    let _register_data = filled_tx.register_voter().ok_or_else(|| {
-        Error::InvalidTransaction {
-            reason: "Not a voter registration transaction".to_string(),
-        }
-    })?;
-
-    // Extract voter address from first spent UTXO
-    let voter_address = filled_tx
-        .spent_utxos
-        .first()
-        .ok_or_else(|| Error::InvalidTransaction {
-            reason: "Voter registration transaction must have inputs".to_string(),
-        })?
-        .address;
-
-    let voter_id = VoterId::from_address(&voter_address);
-
-    crate::validation::VoterValidator::validate_voter_not_registered(state, rwtxn, voter_id)?;
-
-    // Get current timestamp
-    let timestamp = state
-        .try_get_mainchain_timestamp(rwtxn)?
-        .ok_or_else(|| Error::InvalidTransaction {
-            reason: "No mainchain timestamp available".to_string(),
-        })?;
-
-    // Create initial reputation (neutral starting point)
-    let period_id = VotingPeriodId::new(0); // Initial period
-    let mut reputation = VoterReputation::new_default(voter_id, timestamp, period_id);
-
-    // Update Votecoin proportion
-    let votecoin_proportion =
-        state.get_votecoin_proportion(rwtxn, &voter_address)?;
-    reputation.update_votecoin_proportion(votecoin_proportion, height as u64);
-
-    // Defer voter registration to StateUpdate for atomic application
-    state_update.add_voter_registration(voter_id, reputation);
-
-    Ok(())
-}
-
-/// Revert voter registration transaction
-///
-/// This function removes voter registration to support blockchain
-/// reorganization. Note: This should only be used during reorgs.
-///
-/// # Arguments
-/// * `state` - Blockchain state
-/// * `rwtxn` - Database write transaction
-/// * `filled_tx` - Filled transaction containing registration data to revert
-fn revert_register_voter(
-    _state: &State,
-    _rwtxn: &mut RwTxn,
-    _filled_tx: &FilledTransaction,
-) -> Result<(), Error> {
-    // Voter registration is immutable once created in Bitcoin Hivemind
-    // During reorgs, we keep the registration but may need to adjust reputation
-    // based on which votes are reverted. For now, we accept the registration.
-    Ok(())
-}

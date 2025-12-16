@@ -18,8 +18,6 @@ use truthcoin_dc::{
 use truthcoin_dc_app_rpc_api::RpcClient;
 use url::{Host, Url};
 
-// Core CLI helper functions for improved user experience and code reuse
-
 /// Parse comma-separated input into filtered string vector
 pub fn parse_comma_separated(input: &str) -> Vec<String> {
     input
@@ -100,7 +98,6 @@ pub fn format_slot_info(slot_id: &str, period: u32, index: u32) -> String {
     format!("Slot {} (Period {}, Index {})", slot_id, period, index)
 }
 
-/// Handle JSON pretty printing consistently  
 pub fn json_response<T>(data: &T) -> anyhow::Result<String>
 where
     T: Serialize,
@@ -116,7 +113,7 @@ pub enum Command {
     #[command(name = "status", alias = "stat", alias = "s")]
     Status,
 
-    /// Stop the node  
+    /// Stop the node
     #[command(name = "stop", alias = "shutdown")]
     Stop,
 
@@ -128,7 +125,7 @@ pub enum Command {
     },
 
     /// Show OpenAPI schema
-    #[command(name = "openapi-schema", alias = "schema", alias = "api-docs")]
+    #[command(name = "openapi-schema", alias = "schema")]
     OpenApiSchema,
 
     // === WALLET COMMANDS ===
@@ -137,27 +134,18 @@ pub enum Command {
     Balance,
 
     /// Get a new address
-    #[command(
-        name = "get-new-address",
-        alias = "address",
-        alias = "addr",
-        alias = "new-addr"
-    )]
+    #[command(name = "get-new-address", alias = "addr")]
     GetNewAddress,
 
-    /// Get wallet addresses  
-    #[command(
-        name = "get-wallet-addresses",
-        alias = "addresses",
-        alias = "addrs"
-    )]
+    /// Get wallet addresses
+    #[command(name = "get-wallet-addresses")]
     GetWalletAddresses,
 
     /// List owned UTXOs
-    #[command(name = "my-utxos", alias = "utxos", alias = "my-coins")]
+    #[command(name = "my-utxos", alias = "utxos")]
     MyUtxos,
 
-    /// List unconfirmed owned UTXOs  
+    /// List unconfirmed owned UTXOs
     #[command(name = "my-unconfirmed-utxos")]
     MyUnconfirmedUtxos,
 
@@ -165,12 +153,12 @@ pub enum Command {
     #[command(name = "get-wallet-utxos")]
     GetWalletUtxos,
 
-    /// List all UTXOs (admin)
+    /// List all UTXOs
     #[command(name = "list-utxos")]
     ListUtxos,
 
     /// Transfer funds to address
-    #[command(name = "transfer", alias = "send", alias = "tx")]
+    #[command(name = "transfer", alias = "send")]
     Transfer {
         dest: Address,
         #[arg(long)]
@@ -179,23 +167,8 @@ pub enum Command {
         fee_sats: u64,
     },
 
-    /// Transfer votecoin to address  
-    #[command(
-        name = "transfer-votecoin",
-        alias = "send-votecoin",
-        alias = "send-vc",
-        alias = "transfer-vc"
-    )]
-    TransferVotecoin {
-        dest: Address,
-        #[arg(long)]
-        amount: u32,
-        #[arg(long, default_value = "1000")]
-        fee_sats: u64,
-    },
-
     /// Initiate withdrawal to mainchain
-    #[command(name = "withdraw", alias = "wd", alias = "exit")]
+    #[command(name = "withdraw")]
     Withdraw {
         mainchain_address: bitcoin::Address<bitcoin::address::NetworkUnchecked>,
         #[arg(long)]
@@ -207,7 +180,7 @@ pub enum Command {
     },
 
     /// Deposit to address
-    #[command(name = "create-deposit", alias = "deposit", alias = "dep")]
+    #[command(name = "create-deposit", alias = "deposit")]
     CreateDeposit {
         address: Address,
         #[arg(long)]
@@ -221,43 +194,31 @@ pub enum Command {
     FormatDepositAddress { address: Address },
 
     /// Generate mnemonic seed phrase
-    #[command(
-        name = "generate-mnemonic",
-        alias = "gen-mnemonic",
-        alias = "mnemonic"
-    )]
+    #[command(name = "generate-mnemonic", alias = "mnemonic")]
     GenerateMnemonic,
 
     /// Set wallet seed from mnemonic
-    #[command(
-        name = "set-seed-from-mnemonic",
-        alias = "import-seed",
-        alias = "restore-seed"
-    )]
+    #[command(name = "set-seed-from-mnemonic")]
     SetSeedFromMnemonic { mnemonic: String },
 
     /// Get total sidechain wealth
-    #[command(
-        name = "sidechain-wealth",
-        alias = "wealth",
-        alias = "total-wealth"
-    )]
+    #[command(name = "sidechain-wealth")]
     SidechainWealth,
 
     // === BLOCKCHAIN COMMANDS ===
     /// Get current block count
-    #[command(name = "get-block-count", alias = "blockcount", alias = "height")]
+    #[command(name = "get-block-count", alias = "height")]
     GetBlockCount,
 
     /// Get block data
-    #[command(name = "get-block", alias = "block")]
+    #[command(name = "get-block")]
     GetBlock { block_hash: BlockHash },
 
     /// Get best mainchain block hash
     #[command(name = "get-best-mainchain-block-hash")]
     GetBestMainchainBlockHash,
 
-    /// Get best sidechain block hash  
+    /// Get best sidechain block hash
     #[command(name = "get-best-sidechain-block-hash")]
     GetBestSidechainBlockHash,
 
@@ -268,19 +229,11 @@ pub enum Command {
     },
 
     /// Get transaction by txid
-    #[command(
-        name = "get-transaction",
-        alias = "get-tx",
-        alias = "transaction"
-    )]
+    #[command(name = "get-transaction", alias = "get-tx")]
     GetTransaction { txid: Txid },
 
     /// Get transaction info
-    #[command(
-        name = "get-transaction-info",
-        alias = "txinfo",
-        alias = "tx-info"
-    )]
+    #[command(name = "get-transaction-info")]
     GetTransactionInfo { txid: Txid },
 
     /// Get pending withdrawal bundle
@@ -297,38 +250,20 @@ pub enum Command {
 
     // === NETWORK COMMANDS ===
     /// Connect to a peer
-    #[command(
-        name = "connect-peer",
-        alias = "connect",
-        alias = "peer",
-        alias = "add-peer"
-    )]
+    #[command(name = "connect-peer", alias = "connect")]
     ConnectPeer { addr: SocketAddr },
 
     /// List connected peers
-    #[command(
-        name = "list-peers",
-        alias = "peers",
-        alias = "connections",
-        alias = "network"
-    )]
+    #[command(name = "list-peers", alias = "peers")]
     ListPeers,
 
     // === CRYPTOGRAPHY COMMANDS ===
     /// Get new encryption key
-    #[command(
-        name = "get-new-encryption-key",
-        alias = "new-encryption-key",
-        alias = "new-enc-key"
-    )]
+    #[command(name = "get-new-encryption-key")]
     GetNewEncryptionKey,
 
     /// Get new verifying key
-    #[command(
-        name = "get-new-verifying-key",
-        alias = "new-verifying-key",
-        alias = "new-verify-key"
-    )]
+    #[command(name = "get-new-verifying-key")]
     GetNewVerifyingKey,
 
     /// Encrypt message
@@ -347,13 +282,12 @@ pub enum Command {
         encryption_pubkey: EncryptionPubKey,
         #[arg(long)]
         msg: String,
-        /// Decode as UTF-8
         #[arg(long)]
         utf8: bool,
     },
 
     /// Sign arbitrary message with verifying key
-    #[command(name = "sign-arbitrary-msg", alias = "sign", alias = "sign-msg")]
+    #[command(name = "sign-arbitrary-msg", alias = "sign")]
     SignArbitraryMsg {
         #[arg(long)]
         verifying_key: VerifyingKey,
@@ -362,11 +296,7 @@ pub enum Command {
     },
 
     /// Sign arbitrary message as address
-    #[command(
-        name = "sign-arbitrary-msg-as-addr",
-        alias = "sign-as-addr",
-        alias = "sign-addr"
-    )]
+    #[command(name = "sign-arbitrary-msg-as-addr")]
     SignArbitraryMsgAsAddr {
         #[arg(long)]
         address: Address,
@@ -375,11 +305,7 @@ pub enum Command {
     },
 
     /// Verify signature
-    #[command(
-        name = "verify-signature",
-        alias = "verify",
-        alias = "verify-sig"
-    )]
+    #[command(name = "verify-signature", alias = "verify")]
     VerifySignature {
         #[arg(long)]
         signature: Signature,
@@ -391,74 +317,32 @@ pub enum Command {
         msg: String,
     },
 
-    // === SLOT COMMANDS ===
-    /// Show slot system status
-    #[command(name = "slots-status")]
-    SlotsStatus,
+    // === SLOT COMMANDS (slot_*) ===
+    /// Get slot system status
+    #[command(name = "slot-status")]
+    SlotStatus,
 
-    /// List all available slots
-    #[command(name = "slots-list-all", alias = "slots", alias = "list-slots")]
-    SlotsListAll,
-
-    /// Get slots for specific period
-    #[command(name = "slots-get-quarter")]
-    SlotsGetQuarter { quarter: u32 },
-
-    /// Convert timestamp to period
-    #[command(name = "slots-convert-timestamp")]
-    SlotsConvertTimestamp { timestamp: u64 },
-
-    /// Get available slots in period
-    #[command(name = "get-available-slots")]
-    GetAvailableSlots {
+    /// List slots with optional filtering
+    #[command(name = "slot-list", alias = "slots")]
+    SlotList {
+        /// Filter by period
         #[arg(long)]
-        period_index: u32,
+        period: Option<u32>,
+        /// Filter by status: available, claimed, voting, ossified
+        #[arg(long)]
+        status: Option<String>,
     },
 
     /// Get slot by ID
-    #[command(name = "get-slot-by-id", alias = "slot", alias = "get-slot")]
-    GetSlotById {
-        #[arg(long)]
-        slot_id_hex: String,
+    #[command(name = "slot-get")]
+    SlotGet {
+        /// Slot ID (hex)
+        slot_id: String,
     },
 
-    /// Get claimed slots in period
-    #[command(name = "get-claimed-slots")]
-    GetClaimedSlots {
-        #[arg(long)]
-        period_index: u32,
-    },
-
-    /// Check if slot is in voting
-    #[command(name = "is-slot-in-voting")]
-    IsSlotInVoting {
-        #[arg(long)]
-        slot_id_hex: String,
-    },
-
-    /// Get voting periods
-    #[command(
-        name = "get-voting-periods",
-        alias = "voting-periods",
-        alias = "voting"
-    )]
-    GetVotingPeriods,
-
-    /// Get ossified slots
-    #[command(
-        name = "get-ossified-slots",
-        alias = "ossified-slots",
-        alias = "ossified"
-    )]
-    GetOssifiedSlots,
-
-    /// Claim decision slot
-    #[command(
-        name = "claim-decision-slot",
-        alias = "claim-slot",
-        alias = "claim"
-    )]
-    ClaimDecisionSlot {
+    /// Claim a decision slot
+    #[command(name = "slot-claim", alias = "claim")]
+    SlotClaim {
         #[arg(long)]
         period_index: u32,
         #[arg(long)]
@@ -477,68 +361,38 @@ pub enum Command {
         fee_sats: u64,
     },
 
-    // === MARKET COMMANDS ===
-    /// Create prediction market using dimensions specification
-    #[command(name = "create-market", alias = "cm", alias = "market")]
-    CreateMarket {
-        /// Market title
+    // === MARKET COMMANDS (market_*) ===
+    /// Create prediction market
+    #[command(name = "market-create", alias = "cm")]
+    MarketCreate {
         #[arg(long)]
         title: String,
-        /// Market description
         #[arg(long)]
         description: String,
-        /// Dimensions specification using bracket notation:
-        /// - "[050065]" = Single binary market
-        /// - "[050065,050066]" = Two independent binary dimensions
-        /// - "[[050065,050066,050067]]" = One categorical dimension (mutually exclusive)
-        /// - "[050065,[050066,050067],050068]" = Mixed: independent + categorical + independent
+        /// Dimensions: "[slot1]", "[slot1,slot2]", "[[slot1,slot2,slot3]]"
         #[arg(long)]
         dimensions: String,
-        /// LMSR beta parameter (liquidity sensitivity)
         #[arg(long, default_value = "7.0")]
         beta: f64,
-        /// Trading fee percentage
         #[arg(long, default_value = "0.005")]
         trading_fee: f64,
-        /// Market tags (comma-separated)
         #[arg(long)]
         tags: Option<String>,
-        /// Transaction fee
-        #[arg(long, default_value = "1000")]
-        fee_sats: u64,
-    },
-
-    /// Create yes/no prediction market (simplified)
-    #[command(name = "create-yes-no-market", alias = "yn", alias = "yes-no")]
-    CreateYesNoMarket {
-        /// Market question/title
-        #[arg(long)]
-        question: String,
-        /// Decision slot IDs (comma-separated)  
-        #[arg(long)]
-        decision_slots: String,
-        /// Market tags (comma-separated)
-        #[arg(long)]
-        tags: Option<String>,
-        /// LMSR beta parameter (liquidity sensitivity)
-        #[arg(long, default_value = "7.0")]
-        beta: f64,
-        /// Transaction fee
         #[arg(long, default_value = "1000")]
         fee_sats: u64,
     },
 
     /// List all markets
-    #[command(name = "list-markets", alias = "markets", alias = "ls-markets")]
-    ListMarkets,
+    #[command(name = "market-list", alias = "markets")]
+    MarketList,
 
-    /// View market details
-    #[command(name = "view-market", alias = "show-market", alias = "info")]
-    ViewMarket { market_id: String },
+    /// Get market details
+    #[command(name = "market-get")]
+    MarketGet { market_id: String },
 
-    /// Buy shares
-    #[command(name = "buy-shares", alias = "buy")]
-    BuyShares {
+    /// Buy/sell shares (use negative amount to sell)
+    #[command(name = "market-buy", alias = "buy")]
+    MarketBuy {
         #[arg(long)]
         market_id: String,
         #[arg(long)]
@@ -551,12 +405,17 @@ pub enum Command {
         fee_sats: u64,
     },
 
-    /// Calculate share cost
-    #[command(
-        name = "calculate-share-cost",
-        alias = "cost",
-        alias = "calc-cost"
-    )]
+    /// Get share positions for an address
+    #[command(name = "market-positions", alias = "positions")]
+    MarketPositions {
+        #[arg(long)]
+        address: Option<Address>,
+        #[arg(long)]
+        market_id: Option<String>,
+    },
+
+    /// Calculate share cost (dry run)
+    #[command(name = "calculate-share-cost", alias = "calc-cost")]
     CalculateShareCost {
         #[arg(long)]
         market_id: String,
@@ -566,64 +425,92 @@ pub enum Command {
         shares_amount: f64,
     },
 
-    /// Calculate initial liquidity required for market creation
-    #[command(
-        name = "calculate-initial-liquidity",
-        alias = "calc-liquidity",
-        alias = "liquidity"
-    )]
+    /// Calculate initial liquidity required
+    #[command(name = "calculate-initial-liquidity")]
     CalculateInitialLiquidity {
-        /// LMSR beta parameter
         #[arg(long)]
         beta: f64,
-        /// Market type: independent, categorical, dimensional
         #[arg(long, default_value = "independent")]
         market_type: String,
-        /// Number of outcomes (for preview mode)
         #[arg(long)]
         num_outcomes: Option<usize>,
-        /// Decision slot IDs (comma-separated)
         #[arg(long)]
         decision_slots: Option<String>,
-        /// Has residual outcome (for categorical markets)
         #[arg(long)]
         has_residual: Option<bool>,
-        /// Dimensional specification (for dimensional markets)
         #[arg(long)]
         dimensions: Option<String>,
     },
 
-    /// Redeem shares
-    #[command(name = "redeem-shares", alias = "redeem")]
-    RedeemShares {
+    // === VOTE COMMANDS (vote_*) ===
+    /// Register as a voter
+    #[command(name = "vote-register", alias = "register")]
+    VoteRegister {
         #[arg(long)]
-        market_id: String,
-        #[arg(long)]
-        outcome_index: usize,
-        #[arg(long)]
-        shares_amount: f64,
+        reputation_bond_sats: Option<u64>,
         #[arg(long, default_value = "1000")]
         fee_sats: u64,
     },
 
-    /// Get user share positions
-    #[command(
-        name = "get-user-share-positions",
-        alias = "positions",
-        alias = "portfolio"
-    )]
-    GetUserSharePositions {
-        #[arg(long)]
-        address: Option<Address>,
+    /// Get voter information
+    #[command(name = "vote-voter")]
+    VoteVoter {
+        /// Voter address
+        address: Address,
     },
 
-    /// Get market share positions
-    #[command(name = "get-market-share-positions")]
-    GetMarketSharePositions {
+    /// List all registered voters
+    #[command(name = "vote-voters", alias = "voters")]
+    VoteVoters,
+
+    /// Submit vote(s) - use comma-separated "id:value" for batch
+    #[command(name = "vote-submit", alias = "vote")]
+    VoteSubmit {
+        /// Single vote: --decision-id X --vote-value Y, or batch: --votes "id1:val1,id2:val2"
         #[arg(long)]
-        address: Option<Address>,
+        decision_id: Option<String>,
         #[arg(long)]
-        market_id: String,
+        vote_value: Option<f64>,
+        #[arg(long)]
+        votes: Option<String>,
+        #[arg(long, default_value = "1000")]
+        fee_sats: u64,
+    },
+
+    /// Query votes with filters
+    #[command(name = "vote-list")]
+    VoteList {
+        #[arg(long)]
+        voter: Option<Address>,
+        #[arg(long)]
+        decision_id: Option<String>,
+        #[arg(long)]
+        period_id: Option<u32>,
+    },
+
+    /// Get voting period info (omit period_id for current)
+    #[command(name = "vote-period")]
+    VotePeriod {
+        #[arg(long)]
+        period_id: Option<u32>,
+    },
+
+    // === VOTECOIN COMMANDS (votecoin_*) ===
+    /// Transfer votecoin
+    #[command(name = "votecoin-transfer")]
+    VotecoinTransfer {
+        dest: Address,
+        #[arg(long)]
+        amount: u32,
+        #[arg(long, default_value = "1000")]
+        fee_sats: u64,
+    },
+
+    /// Get votecoin balance
+    #[command(name = "votecoin-balance")]
+    VotecoinBalance {
+        /// Address to check
+        address: Address,
     },
 }
 
@@ -641,62 +528,22 @@ const DEFAULT_TIMEOUT_SECS: u64 = 60;
     long_about = "
 Truthcoin DC CLI - Command-line interface for Bitcoin Hivemind prediction markets
 
-COMMAND GROUPS:
+COMMANDS (matching RPC API namespaces):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🖥️  SYSTEM:
-    status (stat, s)         Check node status and connection
-    stop (shutdown)          Shutdown the node  
-    mine (m)                 Mine a sidechain block
-    openapi-schema (schema)  Show OpenAPI documentation
+SYSTEM:     status, stop, mine, openapi-schema
+WALLET:     balance, transfer, withdraw, create-deposit, my-utxos
+BLOCKCHAIN: get-block-count, get-block, get-transaction, list-peers
 
-💰 WALLET:
-    balance (bal, b)                    Check wallet balance
-    get-new-address (addr, address)     Generate new address
-    transfer (send, tx)                 Send funds to address
-    transfer-votecoin (send-vc)         Send votecoin to address
-    withdraw (wd, exit)                 Withdraw to Bitcoin mainchain
-    create-deposit (deposit, dep)       Create deposit transaction
-    my-utxos (utxos, my-coins)          List your unspent outputs
-    sidechain-wealth (wealth)           Show total sidechain value
-
-📊 MARKETS:
-    create-market (cm, market)          Create new prediction market with beta parameter
-    create-yes-no-market (yn, yes-no)   Quick yes/no market creation with beta parameter
-    list-markets (markets)              List all active markets
-    view-market (show-market, info)     View detailed market info
-    buy-shares (buy)                    Purchase market shares
-    redeem-shares (redeem)              Redeem winning shares
-    calculate-share-cost (cost)         Calculate share purchase cost
-    calculate-initial-liquidity (calc-liquidity) Calculate required initial liquidity
-    get-user-share-positions (positions) View your market positions
-
-🎰 SLOTS:
-    slots-list-all (slots)              List all available slots
-    claim-decision-slot (claim)         Claim a decision slot
-    get-slot-by-id (slot)              View slot details by ID
-    get-voting-periods (voting)         Show voting periods
-    get-ossified-slots (ossified)       Show finalized slots
-
-🔗 BLOCKCHAIN:
-    get-block-count (height, blockcount) Current blockchain height
-    get-block (block)                   Get block information
-    get-transaction (get-tx, transaction) Get transaction details
-    connect-peer (connect, peer)        Connect to network peer
-    list-peers (peers, network)         Show connected peers
-
-🔐 CRYPTO:
-    generate-mnemonic (mnemonic)        Generate seed phrase
-    encrypt-msg (encrypt)               Encrypt message
-    decrypt-msg (decrypt)               Decrypt message
-    sign-arbitrary-msg (sign)           Sign message with key
-    verify-signature (verify)           Verify message signature
-
+slot_*:     slot-status, slot-list, slot-get, slot-claim
+market_*:   market-create, market-list, market-get, market-buy, market-positions
+vote_*:     vote-register, vote-voter, vote-voters, vote-submit, vote-list, vote-period
+votecoin_*: votecoin-transfer, votecoin-balance
 
 QUICK START:
-    truthcoin_dc_app_cli status         # Check if node is running
-    truthcoin_dc_app_cli balance        # Check your wallet balance  
-    truthcoin_dc_app_cli markets        # Browse active markets
-    truthcoin_dc_app_cli yn --question 'Will it rain tomorrow?' --decision-slots abc123 --beta 7.0
+    truthcoin_dc_app_cli status                    # Check node status
+    truthcoin_dc_app_cli balance                   # Check wallet balance
+    truthcoin_dc_app_cli market-list               # List markets
+    truthcoin_dc_app_cli slot-list --status voting # List slots in voting
 
 For command details: truthcoin_dc_app_cli <command> --help
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -740,7 +587,7 @@ impl Cli {
             .unwrap()
     }
 }
-/// Handle a command, returning CLI output
+
 async fn handle_command<RpcClient>(
     rpc_client: &RpcClient,
     command: Command,
@@ -817,16 +664,6 @@ where
                 .transfer(dest, value_sats, fee_sats, None)
                 .await?;
             format_tx_success("Transfer", None, &txid.to_string())
-        }
-        Command::TransferVotecoin {
-            dest,
-            amount,
-            fee_sats,
-        } => {
-            let txid = rpc_client
-                .transfer_votecoin(dest, amount, fee_sats, None)
-                .await?;
-            format_tx_success("Votecoin transfer", None, &txid.to_string())
         }
         Command::Withdraw {
             mainchain_address,
@@ -971,244 +808,33 @@ where
             format!("{res}")
         }
 
-        // === SLOT COMMANDS ===
-        Command::SlotsStatus => {
-            let status = rpc_client.slots_status().await?;
-            let mut output = String::new();
-            output.push_str("Slot System Status:\n");
-            output.push_str("==================\n\n");
-
-            if status.is_testing_mode {
-                output.push_str("Mode: TESTING\n");
-                output.push_str(&format!(
-                    "Blocks per period: {}\n",
-                    status.blocks_per_period
-                ));
-                output.push_str("Slots are minted every N blocks instead of every quarter.\n");
+        // === SLOT COMMANDS (slot_*) ===
+        Command::SlotStatus => {
+            let status = rpc_client.slot_status().await?;
+            json_response(&status)?
+        }
+        Command::SlotList { period, status } => {
+            use truthcoin_dc_app_rpc_api::{SlotFilter, SlotState};
+            let slot_status = status.map(|s| match s.to_lowercase().as_str() {
+                "available" => SlotState::Available,
+                "claimed" => SlotState::Claimed,
+                "voting" => SlotState::Voting,
+                "ossified" => SlotState::Ossified,
+                _ => SlotState::Available,
+            });
+            let filter = if period.is_some() || slot_status.is_some() {
+                Some(SlotFilter { period, status: slot_status })
             } else {
-                output.push_str("Mode: PRODUCTION\n");
-                output.push_str("Slots are minted every calendar quarter based on Bitcoin timestamps.\n");
-            }
-
-            output.push_str(&format!(
-                "\nCurrent period: {} ({})\n",
-                status.current_period_name, status.current_period
-            ));
-            output
+                None
+            };
+            let slots = rpc_client.slot_list(filter).await?;
+            json_response(&slots)?
         }
-        Command::SlotsListAll => {
-            let slots = rpc_client.slots_list_all().await?;
-            let mut output = String::new();
-            output.push_str("Available Slots by Period:\n");
-            output.push_str("========================\n\n");
-            if slots.is_empty() {
-                output.push_str("No slots minted yet.\n");
-            } else {
-                for slot_info in slots {
-                    let period_name =
-                        rpc_client.quarter_to_string(slot_info.period).await?;
-                    output.push_str(&format!(
-                        "{}: {} slots\n",
-                        period_name, slot_info.slots
-                    ));
-                }
-            }
-            output
+        Command::SlotGet { slot_id } => {
+            let slot = rpc_client.slot_get(slot_id).await?;
+            json_response(&slot)?
         }
-        Command::SlotsGetQuarter { quarter } => {
-            let slot_count = rpc_client.slots_get_quarter(quarter).await?;
-            let period_name = rpc_client.quarter_to_string(quarter).await?;
-            format!("{}: {} slots", period_name, slot_count)
-        }
-        Command::SlotsConvertTimestamp { timestamp } => {
-            let quarter = rpc_client.timestamp_to_quarter(timestamp).await?;
-            let period_name = rpc_client.quarter_to_string(quarter).await?;
-            format!(
-                "Timestamp {} converts to: {} (Period {})",
-                timestamp, period_name, quarter
-            )
-        }
-        Command::GetAvailableSlots { period_index } => {
-            let available_slots = rpc_client
-                .get_available_slots_in_period(period_index)
-                .await?;
-            if available_slots.is_empty() {
-                format!("No available slots in period {}", period_index)
-            } else {
-                let mut result = format!(
-                    "Available slots in period {} ({} total):\n",
-                    period_index,
-                    available_slots.len()
-                );
-                for slot in available_slots {
-                    result.push_str(&format!(
-                        "  Slot {}: {}\n",
-                        slot.slot_index, slot.slot_id_hex
-                    ));
-                }
-                result
-            }
-        }
-        Command::GetSlotById { slot_id_hex } => {
-            let slot = rpc_client.get_slot_by_id(slot_id_hex.clone()).await?;
-            match slot {
-                Some(slot_details) => {
-                    let mut result = format!(
-                        "Slot {} (Period {}, Index {}):\n",
-                        slot_details.slot_id_hex,
-                        slot_details.period_index,
-                        slot_details.slot_index
-                    );
-
-                    match slot_details.content {
-                        truthcoin_dc_app_rpc_api::SlotContentInfo::Empty => {
-                            result.push_str(
-                                "  Status: EMPTY (available for claiming)\n",
-                            );
-                        }
-                        truthcoin_dc_app_rpc_api::SlotContentInfo::Decision(
-                            decision,
-                        ) => {
-                            result.push_str(&format!(
-                                "  Decision ID: {}\n",
-                                decision.id
-                            ));
-                            result.push_str(&format!(
-                                "  Market Maker: {}\n",
-                                decision.market_maker_pubkey_hash
-                            ));
-                            result.push_str(&format!(
-                                "  Type: {} | {}\n",
-                                if decision.is_standard {
-                                    "Standard"
-                                } else {
-                                    "Non-Standard"
-                                },
-                                if decision.is_scaled {
-                                    "Scaled"
-                                } else {
-                                    "Binary"
-                                }
-                            ));
-                            result.push_str(&format!(
-                                "  Question: {}\n",
-                                decision.question
-                            ));
-                            if let (Some(min), Some(max)) =
-                                (decision.min, decision.max)
-                            {
-                                result.push_str(&format!(
-                                    "  Range: {} to {}\n",
-                                    min, max
-                                ));
-                            }
-                        }
-                    }
-                    result
-                }
-                None => format!("Slot {} not found", slot_id_hex),
-            }
-        }
-        Command::GetClaimedSlots { period_index } => {
-            let claimed_slots =
-                rpc_client.get_claimed_slots_in_period(period_index).await?;
-            if claimed_slots.is_empty() {
-                format!("No claimed slots found in period {}", period_index)
-            } else {
-                let mut result = format!(
-                    "Claimed slots in period {} ({} total):\n",
-                    period_index,
-                    claimed_slots.len()
-                );
-                for slot in claimed_slots {
-                    result.push_str(&format!(
-                        "  Slot {} ({}): {} | {} | Market Maker: {} | \"{}\"\n",
-                        slot.slot_index,
-                        slot.slot_id_hex,
-                        if slot.is_standard {
-                            "Standard"
-                        } else {
-                            "Non-Standard"
-                        },
-                        if slot.is_scaled { "Scaled" } else { "Binary" },
-                        &slot.market_maker_pubkey_hash[..8], // Show first 8 chars of hash
-                        slot.question_preview
-                    ));
-                }
-                result
-            }
-        }
-        Command::IsSlotInVoting { slot_id_hex } => {
-            let is_voting =
-                rpc_client.is_slot_in_voting(slot_id_hex.clone()).await?;
-            if is_voting {
-                format!("Slot {} is in voting period", slot_id_hex)
-            } else {
-                format!("Slot {} is NOT in voting period", slot_id_hex)
-            }
-        }
-        Command::GetVotingPeriods => {
-            let voting_periods = rpc_client.get_voting_periods().await?;
-            if voting_periods.is_empty() {
-                "No periods currently in voting phase".to_string()
-            } else {
-                let mut result = format!(
-                    "Voting Periods ({} total):\n",
-                    voting_periods.len()
-                );
-                result.push_str("================================\n");
-                for period_info in voting_periods {
-                    result.push_str(&format!(
-                        "Period {}: {}/{} slots claimed ({:.1}%)\n",
-                        period_info.period,
-                        period_info.claimed_slots,
-                        period_info.total_slots,
-                        (period_info.claimed_slots as f64
-                            / period_info.total_slots as f64)
-                            * 100.0
-                    ));
-                }
-                result
-            }
-        }
-        Command::GetOssifiedSlots => {
-            let ossified_slots = rpc_client.get_ossified_slots().await?;
-            if ossified_slots.is_empty() {
-                "No ossified slots found".to_string()
-            } else {
-                let mut result = format!(
-                    "Ossified Slots ({} total):\n",
-                    ossified_slots.len()
-                );
-                result.push_str("==========================\n");
-                for slot in ossified_slots {
-                    result.push_str(&format!(
-                        "Slot {} (Period {}, Index {}): ",
-                        slot.slot_id_hex, slot.period_index, slot.slot_index
-                    ));
-                    if let Some(decision) = slot.decision {
-                        let question_preview = if decision.question.len() > 50 {
-                            format!("{}...", &decision.question[..50])
-                        } else {
-                            decision.question
-                        };
-                        result.push_str(&format!(
-                            "{} - {}\n",
-                            if decision.is_standard {
-                                "Standard"
-                            } else {
-                                "Non-standard"
-                            },
-                            question_preview
-                        ));
-                    } else {
-                        result.push_str("Empty slot\n");
-                    }
-                }
-                result
-            }
-        }
-        Command::ClaimDecisionSlot {
+        Command::SlotClaim {
             period_index,
             slot_index,
             is_standard,
@@ -1219,25 +845,13 @@ where
             fee_sats,
         } => {
             let txid = rpc_client
-                .claim_decision_slot(
-                    period_index,
-                    slot_index,
-                    is_standard,
-                    is_scaled,
-                    question,
-                    min,
-                    max,
-                    fee_sats,
-                )
+                .slot_claim(period_index, slot_index, is_standard, is_scaled, question, min, max, fee_sats)
                 .await?;
-            format!(
-                "Decision slot claimed successfully. Transaction ID: {}",
-                txid
-            )
+            format!("Slot claimed: {}", txid)
         }
 
-        // === MARKET COMMANDS ===
-        Command::CreateMarket {
+        // === MARKET COMMANDS (market_*) ===
+        Command::MarketCreate {
             title,
             description,
             dimensions,
@@ -1247,80 +861,29 @@ where
             fee_sats,
         } => {
             use truthcoin_dc_app_rpc_api::CreateMarketRequest;
-
-            // Extract decision slots from dimensions specification
             let slots = match extract_slots_from_dimensions(&dimensions) {
                 Ok(slots) => slots,
                 Err(err) => return Ok(err),
             };
-
-            // Parse tags if provided
             let parsed_tags = tags.map(|t| parse_comma_separated(&t));
-
-            // All markets now use dimensional specification
             let request = CreateMarketRequest {
                 title: title.clone(),
                 description,
                 market_type: "dimensional".to_string(),
                 decision_slots: slots,
                 dimensions: Some(dimensions),
-                has_residual: None, // Determined by dimensional specification
+                has_residual: None,
                 beta: Some(beta),
                 trading_fee: Some(trading_fee),
                 tags: parsed_tags,
-                initial_liquidity: None, // Liquidity is calculated automatically
+                initial_liquidity: None,
                 fee_sats,
             };
-
-            let result = rpc_client.create_market(request).await?;
-            format!(
-                "Market '{}' created successfully with ID: {}",
-                title, result
-            )
+            let txid = rpc_client.market_create(request).await?;
+            format!("Market '{}' created: {}", title, txid)
         }
-        Command::CreateYesNoMarket {
-            question,
-            decision_slots,
-            tags,
-            beta,
-            fee_sats,
-        } => {
-            use truthcoin_dc_app_rpc_api::CreateMarketRequest;
-
-            // Parse decision slots from comma-separated string
-            let slots = parse_comma_separated(&decision_slots);
-
-            if let Err(err) =
-                validate_non_empty_list(&slots, "decision slot ID")
-            {
-                return Ok(err);
-            }
-
-            // Parse tags if provided
-            let parsed_tags = tags.map(|t| parse_comma_separated(&t));
-
-            let request = CreateMarketRequest {
-                title: question.clone(),
-                description: format!("Yes/No market: {}", question),
-                market_type: "independent".to_string(),
-                decision_slots: slots,
-                dimensions: None,
-                has_residual: None,
-                beta: Some(beta),
-                trading_fee: Some(0.005),
-                tags: parsed_tags,
-                initial_liquidity: None, // Liquidity is calculated automatically
-                fee_sats,
-            };
-
-            let result = rpc_client.create_market(request).await?;
-            format!(
-                "Yes/No market '{}' created successfully with ID: {}",
-                question, result
-            )
-        }
-        Command::ListMarkets => {
-            let markets = rpc_client.list_markets().await?;
+        Command::MarketList => {
+            let markets = rpc_client.market_list().await?;
             if markets.is_empty() {
                 "No markets in Trading state found.".to_string()
             } else {
@@ -1372,127 +935,39 @@ where
                 output
             }
         }
-        Command::ViewMarket { market_id } => {
-            let market_details =
-                rpc_client.view_market(market_id.clone()).await?;
-            match market_details {
-                Some(details) => {
-                    let mut output = String::new();
-                    output.push_str(&format!(
-                        "Market Details: {}\n\n",
-                        details.market_id
-                    ));
-
-                    output.push_str(&format!("Title: {}\n", details.title));
-                    output.push_str(&format!(
-                        "Description: {}\n",
-                        details.description
-                    ));
-                    output.push_str(&format!(
-                        "Market Maker: {}\n",
-                        details.market_maker
-                    ));
-                    output.push_str(&format!("State: {}\n", details.state));
-
-                    if let Some(expiry) = details.expires_at {
-                        output
-                            .push_str(&format!("Expires: Block {}\n", expiry));
-                    } else {
-                        output.push_str("Expires: No expiry set\n");
-                    }
-
-                    output.push_str(&format!(
-                        "Beta Parameter: {:.2}\n",
-                        details.beta
-                    ));
-                    output.push_str(&format!(
-                        "Trading Fee: {:.1}%\n",
-                        details.trading_fee * 100.0
-                    ));
-                    output.push_str(&format!(
-                        "Created at Height: {}\n",
-                        details.created_at_height
-                    ));
-
-                    if !details.tags.is_empty() {
-                        output.push_str(&format!(
-                            "Tags: {}\n",
-                            details.tags.join(", ")
-                        ));
-                    }
-
-                    output.push_str("\nOutcomes:\n");
-                    let mut total_volume = 0.0;
-                    for (i, outcome) in details.outcomes.iter().enumerate() {
-                        output.push_str(&format!(
-                            "  {}. {:20} Price: {:6.3}  Probability: {:5.1}%  Volume: {:.0} sats\n",
-                            i + 1,
-                            outcome.name,
-                            outcome.current_price,
-                            outcome.probability * 100.0,
-                            outcome.volume
-                        ));
-                        total_volume += outcome.volume;
-                    }
-
-                    output.push_str(&format!(
-                        "\nTotal Volume: {:.0} sats\n",
-                        total_volume
-                    ));
-                    output.push_str(&format!(
-                        "Total Liquidity: {:.0} sats\n",
-                        details.liquidity
-                    ));
-                    output.push_str(&format!(
-                        "Treasury: {:.0} sats\n",
-                        details.treasury
-                    ));
-
-                    if !details.decision_slots.is_empty() {
-                        output.push_str("\nDecision Slots:\n");
-                        for slot_id in &details.decision_slots {
-                            let short_slot = if slot_id.len() > 16 {
-                                format!(
-                                    "{}...{}",
-                                    &slot_id[..8],
-                                    &slot_id[slot_id.len() - 8..]
-                                )
-                            } else {
-                                slot_id.clone()
-                            };
-                            output.push_str(&format!("  - {}\n", short_slot));
-                        }
-                    }
-
-                    output
-                }
-                None => format!("Market {} not found", market_id),
-            }
+        Command::MarketGet { market_id } => {
+            let market = rpc_client.market_get(market_id).await?;
+            json_response(&market)?
         }
-        Command::BuyShares {
+        Command::MarketBuy {
             market_id,
             outcome_index,
             shares_amount,
             max_cost,
             fee_sats,
         } => {
-            let txid = rpc_client
-                .buy_shares(
-                    market_id.clone(),
-                    outcome_index,
-                    shares_amount,
-                    max_cost,
-                    fee_sats,
-                )
-                .await?;
+            use truthcoin_dc_app_rpc_api::MarketBuyRequest;
+            let request = MarketBuyRequest {
+                market_id: market_id.clone(),
+                outcome_index,
+                shares_amount,
+                max_cost: Some(max_cost),
+                fee_sats: Some(fee_sats),
+                dry_run: Some(false),
+            };
+            let result = rpc_client.market_buy(request).await?;
             format!(
                 "Successfully submitted buy shares transaction!\n\
                 Market: {}\n\
                 Outcome Index: {}\n\
                 Shares: {:.4}\n\
-                Max Cost: {} sats\n\
+                Cost: {} sats\n\
                 Transaction ID: {}",
-                market_id, outcome_index, shares_amount, max_cost, txid
+                market_id,
+                outcome_index,
+                shares_amount,
+                result.cost_sats,
+                result.txid.unwrap_or_default()
             )
         }
         Command::CalculateShareCost {
@@ -1500,13 +975,16 @@ where
             outcome_index,
             shares_amount,
         } => {
-            let cost_sats = rpc_client
-                .calculate_share_cost(
-                    market_id.clone(),
-                    outcome_index,
-                    shares_amount,
-                )
-                .await?;
+            use truthcoin_dc_app_rpc_api::MarketBuyRequest;
+            let request = MarketBuyRequest {
+                market_id: market_id.clone(),
+                outcome_index,
+                shares_amount,
+                max_cost: None,
+                fee_sats: Some(0),
+                dry_run: Some(true),
+            };
+            let result = rpc_client.market_buy(request).await?;
 
             format!(
                 "Share Purchase Cost Calculation:\n\
@@ -1517,147 +995,17 @@ where
                 market_id,
                 outcome_index,
                 shares_amount,
-                cost_sats,
-                cost_sats as f64 / 100_000_000.0
+                result.cost_sats,
+                result.cost_sats as f64 / 100_000_000.0
             )
         }
-        Command::RedeemShares {
-            market_id,
-            outcome_index,
-            shares_amount,
-            fee_sats,
-        } => {
-            let txid = rpc_client
-                .redeem_shares(
-                    market_id.clone(),
-                    outcome_index,
-                    shares_amount,
-                    fee_sats,
-                )
-                .await?;
-            format!(
-                "Successfully submitted redeem shares transaction!\n\
-                Market: {}\n\
-                Outcome Index: {}\n\
-                Shares: {:.4}\n\
-                Transaction ID: {}",
-                market_id, outcome_index, shares_amount, txid
-            )
-        }
-        Command::GetUserSharePositions { address } => {
-            // Use provided address or get default wallet address
-            let addr = if let Some(addr) = address {
-                addr
-            } else {
-                rpc_client.get_new_address().await?
+        Command::MarketPositions { address, market_id } => {
+            let addr = match address {
+                Some(a) => a,
+                None => rpc_client.get_new_address().await?,
             };
-
-            let holdings = rpc_client.get_user_share_positions(addr).await?;
-
-            if holdings.positions.is_empty() {
-                "No share positions found.".to_string()
-            } else {
-                let mut output = String::new();
-                output.push_str(&format!(
-                    "Share Holdings for {}\n\n",
-                    holdings.address
-                ));
-                output.push_str(&format!("Portfolio Summary:\n"));
-                output.push_str(&format!(
-                    "  Total Value: {:.2} sats\n",
-                    holdings.total_value
-                ));
-                output.push_str(&format!(
-                    "  Total Cost Basis: {:.2} sats\n",
-                    holdings.total_cost_basis
-                ));
-                output.push_str(&format!(
-                    "  Unrealized P&L: {:.2} sats\n",
-                    holdings.total_unrealized_pnl
-                ));
-                output.push_str(&format!(
-                    "  Active Markets: {}\n\n",
-                    holdings.active_markets
-                ));
-
-                output.push_str("Individual Positions:\n");
-                output.push_str("┌──────────────────┬────────────┬──────────────┬───────────────┬────────────────┬─────────────────┐\n");
-                output.push_str("│ Market ID        │ Outcome    │ Shares       │ Avg Price     │ Current Value  │ P&L             │\n");
-                output.push_str("├──────────────────┼────────────┼──────────────┼───────────────┼────────────────┼─────────────────┤\n");
-
-                for pos in &holdings.positions {
-                    let short_market_id = &pos.market_id[..8]; // Show first 8 chars
-                    let short_outcome = if pos.outcome_name.len() > 10 {
-                        format!("{}...", &pos.outcome_name[..7])
-                    } else {
-                        pos.outcome_name.clone()
-                    };
-
-                    output.push_str(&format!(
-                        "│ {:16} │ {:10} │ {:12.4} │ {:13.6} │ {:14.2} │ {:15.2} │\n",
-                        short_market_id,
-                        short_outcome,
-                        pos.shares_held,
-                        pos.avg_purchase_price,
-                        pos.current_value,
-                        pos.unrealized_pnl
-                    ));
-                }
-
-                output.push_str("└──────────────────┴────────────┴──────────────┴───────────────┴────────────────┴─────────────────┘\n");
-                output
-            }
-        }
-        Command::GetMarketSharePositions { address, market_id } => {
-            // Use provided address or get default wallet address
-            let addr = if let Some(addr) = address {
-                addr
-            } else {
-                rpc_client.get_new_address().await?
-            };
-
-            let positions = rpc_client
-                .get_market_share_positions(addr, market_id.clone())
-                .await?;
-
-            if positions.is_empty() {
-                format!(
-                    "No positions found for market {} and address {}",
-                    market_id, addr
-                )
-            } else {
-                let mut output = String::new();
-                output.push_str(&format!(
-                    "Share Positions for Market {}\n",
-                    market_id
-                ));
-                output.push_str(&format!("User: {}\n\n", addr));
-
-                output.push_str("┌────────────┬────────────────────┬──────────────┬───────────────┬────────────────┬─────────────────┐\n");
-                output.push_str("│ Outcome #  │ Outcome Name       │ Shares       │ Avg Price     │ Current Value  │ P&L             │\n");
-                output.push_str("├────────────┼────────────────────┼──────────────┼───────────────┼────────────────┼─────────────────┤\n");
-
-                for pos in &positions {
-                    let short_outcome = if pos.outcome_name.len() > 18 {
-                        format!("{}...", &pos.outcome_name[..15])
-                    } else {
-                        pos.outcome_name.clone()
-                    };
-
-                    output.push_str(&format!(
-                        "│ {:10} │ {:18} │ {:12.4} │ {:13.6} │ {:14.2} │ {:15.2} │\n",
-                        pos.outcome_index,
-                        short_outcome,
-                        pos.shares_held,
-                        pos.avg_purchase_price,
-                        pos.current_value,
-                        pos.unrealized_pnl
-                    ));
-                }
-
-                output.push_str("└────────────┴────────────────────┴──────────────┴───────────────┴────────────────┴─────────────────┘\n");
-                output
-            }
+            let holdings = rpc_client.market_positions(addr, market_id).await?;
+            json_response(&holdings)?
         }
 
         Command::CalculateInitialLiquidity {
@@ -1714,6 +1062,81 @@ where
                 result.initial_liquidity_sats
             )
         }
+
+        // === VOTE COMMANDS (vote_*) ===
+        Command::VoteRegister {
+            reputation_bond_sats,
+            fee_sats,
+        } => {
+            use truthcoin_dc_app_rpc_api::RegisterVoterRequest;
+            let request = RegisterVoterRequest { reputation_bond_sats, fee_sats };
+            let txid = rpc_client.vote_register(request).await?;
+            format!("Voter registered: {}", txid)
+        }
+        Command::VoteVoter { address } => {
+            let voter = rpc_client.vote_voter(address).await?;
+            json_response(&voter)?
+        }
+        Command::VoteVoters => {
+            let voters = rpc_client.vote_voters().await?;
+            json_response(&voters)?
+        }
+        Command::VoteSubmit {
+            decision_id,
+            vote_value,
+            votes,
+            fee_sats,
+        } => {
+            use truthcoin_dc_app_rpc_api::VoteBatchItem;
+            let vote_items = if let Some(batch) = votes {
+                // Parse batch format: "id1:val1,id2:val2"
+                batch.split(',')
+                    .filter_map(|pair| {
+                        let parts: Vec<&str> = pair.trim().split(':').collect();
+                        if parts.len() == 2 {
+                            let val: f64 = parts[1].parse().ok()?;
+                            Some(VoteBatchItem { decision_id: parts[0].to_string(), vote_value: val })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else if let (Some(id), Some(val)) = (decision_id, vote_value) {
+                vec![VoteBatchItem { decision_id: id, vote_value: val }]
+            } else {
+                return Ok("Error: provide --decision-id and --vote-value, or --votes".to_string());
+            };
+            let txid = rpc_client.vote_submit(vote_items, fee_sats).await?;
+            format!("Vote submitted: {}", txid)
+        }
+        Command::VoteList {
+            voter,
+            decision_id,
+            period_id,
+        } => {
+            use truthcoin_dc_app_rpc_api::VoteFilter;
+            let filter = VoteFilter { voter, decision_id, period_id };
+            let votes = rpc_client.vote_list(filter).await?;
+            json_response(&votes)?
+        }
+        Command::VotePeriod { period_id } => {
+            let period = rpc_client.vote_period(period_id).await?;
+            json_response(&period)?
+        }
+
+        // === VOTECOIN COMMANDS (votecoin_*) ===
+        Command::VotecoinTransfer {
+            dest,
+            amount,
+            fee_sats,
+        } => {
+            let txid = rpc_client.votecoin_transfer(dest, amount, fee_sats, None).await?;
+            format!("Votecoin transferred: {}", txid)
+        }
+        Command::VotecoinBalance { address } => {
+            let balance = rpc_client.votecoin_balance(address).await?;
+            format!("{}", balance)
+        }
     })
 }
 
@@ -1734,8 +1157,6 @@ impl Cli {
             set_tracing_subscriber()?;
         }
 
-        // Direct RPC communication without status checks
-
         let request_id = uuid::Uuid::new_v4().as_simple().to_string();
         tracing::info!(%request_id);
         let builder = HttpClientBuilder::default()
@@ -1747,7 +1168,6 @@ impl Cli {
             )]));
         let client = builder.build(self.rpc_url())?;
 
-        // Direct RPC communication
         let result = handle_command(&client, self.command).await?;
         Ok(result)
     }

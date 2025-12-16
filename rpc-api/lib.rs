@@ -1,5 +1,3 @@
-//! RPC API
-
 use std::net::SocketAddr;
 
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
@@ -9,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use truthcoin_dc::{
     authorization::{Dst, Signature},
     net::{Peer, PeerConnectionStatus},
-    state::voting::types::{VoterId, VotingPeriodId},
     types::{
         Address, AssetId, Authorization, BitcoinOutputContent, Block,
         BlockHash, Body, EncryptionPubKey, FilledOutputContent, Header,
@@ -34,6 +31,117 @@ pub struct TxInfo {
 pub struct SlotInfo {
     pub period: u32,
     pub slots: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub enum SlotState {
+    Available,
+    Claimed,
+    Voting,
+    Ossified,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct SlotFilter {
+    pub period: Option<u32>,
+    pub status: Option<SlotState>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct SlotListItem {
+    pub slot_id_hex: String,
+    pub period_index: u32,
+    pub slot_index: u32,
+    pub state: SlotState,
+    pub decision: Option<DecisionInfo>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct MarketBuyRequest {
+    pub market_id: String,
+    pub outcome_index: usize,
+    pub shares_amount: f64,
+    pub max_cost: Option<u64>,
+    pub fee_sats: Option<u64>,
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct MarketBuyResponse {
+    pub txid: Option<String>,
+    pub cost_sats: u64,
+    pub new_price: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct VoteFilter {
+    pub voter: Option<Address>,
+    pub decision_id: Option<String>,
+    pub period_id: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct VotingPeriodFull {
+    pub period_id: u32,
+    pub status: String,
+    pub start_height: u32,
+    pub end_height: u32,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub decisions: Vec<DecisionSummary>,
+    pub stats: PeriodStats,
+    pub consensus: Option<ConsensusResults>,
+    pub redistribution: Option<RedistributionInfo>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct DecisionSummary {
+    pub slot_id_hex: String,
+    pub question: String,
+    pub is_standard: bool,
+    pub is_scaled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct PeriodStats {
+    pub total_voters: u64,
+    pub active_voters: u64,
+    pub total_votes: u64,
+    pub participation_rate: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct ConsensusResults {
+    pub outcomes: std::collections::HashMap<String, f64>,
+    pub first_loading: Vec<f64>,
+    pub explained_variance: f64,
+    pub certainty: f64,
+    pub reputation_updates: std::collections::HashMap<String, ReputationUpdate>,
+    pub outliers: Vec<String>,
+    pub vote_matrix_dimensions: (usize, usize),
+    pub algorithm_version: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct VoterInfoFull {
+    pub address: String,
+    pub is_registered: bool,
+    pub reputation: f64,
+    pub votecoin_balance: u32,
+    pub total_votes: u64,
+    pub periods_active: u32,
+    pub accuracy_score: f64,
+    pub registered_at_height: u64,
+    pub is_active: bool,
+    pub current_period_participation: Option<ParticipationStats>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct ParticipationStats {
+    pub period_id: u32,
+    pub votes_cast: u32,
+    pub decisions_available: u32,
+    pub participation_rate: f64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -77,6 +185,19 @@ pub struct VotingPeriodInfo {
     pub period: u32,
     pub claimed_slots: u64,
     pub total_slots: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct RedistributionInfo {
+    pub period_id: u32,
+    pub total_redistributed: u64,
+    pub winners_count: u32,
+    pub losers_count: u32,
+    pub unchanged_count: u32,
+    pub conservation_check: i64,
+    pub block_height: u64,
+    pub is_applied: bool,
+    pub slots_affected: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -128,6 +249,20 @@ pub struct MarketData {
     pub total_volume: f64,
     pub liquidity: f64,
     pub decision_slots: Vec<String>,
+    pub resolution: Option<MarketResolution>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct MarketResolution {
+    pub winning_outcomes: Vec<WinningOutcome>,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct WinningOutcome {
+    pub outcome_index: usize,
+    pub outcome_name: String,
+    pub final_price: f64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -210,7 +345,6 @@ pub struct RegisterVoterRequest {
 pub struct SubmitVoteRequest {
     pub decision_id: String,
     pub vote_value: f64,
-    pub period_id: u32,
     pub fee_sats: u64,
 }
 
@@ -223,7 +357,6 @@ pub struct VoteBatchItem {
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct SubmitVoteBatchRequest {
     pub votes: Vec<VoteBatchItem>,
-    pub period_id: u32,
     pub fee_sats: u64,
 }
 
@@ -299,14 +432,17 @@ pub struct VotingConsensusResults {
     truthcoin_schema::BitcoinAddr, truthcoin_schema::BitcoinBlockHash,
     truthcoin_schema::BitcoinTransaction, truthcoin_schema::BitcoinOutPoint,
     truthcoin_schema::SocketAddr, Address, AssetId, Authorization,
-    BitcoinOutputContent, BlockHash, Body, CalculateInitialLiquidityRequest,
-    CreateMarketRequest, EncryptionPubKey, FilledOutputContent, Header,
-    InitialLiquidityCalculation, MarketData, MarketOutcome, MarketSummary,
+    BitcoinOutputContent, BlockHash, Body,
+    CalculateInitialLiquidityRequest, ConsensusResults, CreateMarketRequest, DecisionSummary,
+    EncryptionPubKey, FilledOutputContent, Header, InitialLiquidityCalculation,
+    MarketBuyRequest, MarketBuyResponse, MarketData, MarketOutcome, MarketSummary,
     MerkleRoot, OutPoint, Output, OutputContent,
-    PeerConnectionStatus, RegisterVoterRequest, ReputationUpdate, SharePosition, Signature, SlotInfo, SlotStatus,
-    SubmitVoteRequest, SubmitVoteBatchRequest, Transaction, TxData, Txid, TxIn, UserHoldings,
-    VoteBatchItem, VoteInfo, VoterInfo, VoterParticipation, VotingConsensusResults,
-    VotingPeriodDetails, VotingPeriodInfo, WithdrawalOutputContent, VerifyingKey,
+    ParticipationStats, PeerConnectionStatus, PeriodStats,
+    RedistributionInfo, RegisterVoterRequest, ReputationUpdate,
+    SharePosition, Signature, SlotDetails, SlotFilter, SlotInfo, SlotListItem, SlotState, SlotStatus,
+    Transaction, TxData, Txid, TxIn, UserHoldings,
+    VoteBatchItem, VoteFilter, VoteInfo, VoterInfo, VoterInfoFull,
+    VotingPeriodFull, WithdrawalOutputContent, VerifyingKey,
 ])]
 #[rpc(client, server)]
 pub trait Rpc {
@@ -453,11 +589,6 @@ pub trait Rpc {
     #[method(name = "mine")]
     async fn mine(&self, fee: Option<u64>) -> RpcResult<()>;
 
-    /*
-    #[method(name = "my_unconfirmed_stxos")]
-    async fn my_unconfirmed_stxos(&self) -> RpcResult<Vec<InPoint>>;
-    */
-
     /// List unconfirmed owned UTXOs
     #[method(name = "my_unconfirmed_utxos")]
     async fn my_unconfirmed_utxos(&self) -> RpcResult<Vec<PointedOutput>>;
@@ -560,36 +691,32 @@ pub trait Rpc {
         mainchain_fee_sats: u64,
     ) -> RpcResult<Txid>;
 
-    /// Get all available slots by quarter/period
-    #[method(name = "slots_list_all")]
-    async fn slots_list_all(&self) -> RpcResult<Vec<SlotInfo>>;
-
-    /// Get slots for a specific quarter/period
-    #[method(name = "slots_get_quarter")]
-    async fn slots_get_quarter(&self, quarter: u32) -> RpcResult<u64>;
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "refresh_wallet")]
+    async fn refresh_wallet(&self) -> RpcResult<()>;
 
     /// Get slot system status and configuration
-    #[method(name = "slots_status")]
-    async fn slots_status(&self) -> RpcResult<SlotStatus>;
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "slot_status")]
+    async fn slot_status(&self) -> RpcResult<SlotStatus>;
 
-    /// Convert timestamp to quarter/period index
-    #[method(name = "timestamp_to_quarter")]
-    async fn timestamp_to_quarter(&self, timestamp: u64) -> RpcResult<u32>;
-
-    /// Convert quarter/period index to human readable string
-    #[method(name = "quarter_to_string")]
-    async fn quarter_to_string(&self, quarter: u32) -> RpcResult<String>;
-
-    /// Convert block height to testing period (testing mode only)
-    #[method(name = "block_height_to_testing_period")]
-    async fn block_height_to_testing_period(
+    /// List slots with optional filtering by period and state
+    #[open_api_method(output_schema(ToSchema = "Vec<SlotListItem>"))]
+    #[method(name = "slot_list")]
+    async fn slot_list(
         &self,
-        block_height: u32,
-    ) -> RpcResult<u32>;
+        filter: Option<SlotFilter>,
+    ) -> RpcResult<Vec<SlotListItem>>;
 
-    /// Claim a decision slot with a new decision/question
-    #[method(name = "claim_decision_slot")]
-    async fn claim_decision_slot(
+    /// Get a specific slot by ID (includes is_voting status)
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "slot_get")]
+    async fn slot_get(&self, slot_id: String)
+    -> RpcResult<Option<SlotDetails>>;
+
+    /// Claim a decision slot
+    #[method(name = "slot_claim")]
+    async fn slot_claim(
         &self,
         period_index: u32,
         slot_index: u32,
@@ -601,236 +728,106 @@ pub trait Rpc {
         fee_sats: u64,
     ) -> RpcResult<Txid>;
 
-    /// Get all available (unclaimed) slot IDs in a specific period
-    #[method(name = "get_available_slots_in_period")]
-    async fn get_available_slots_in_period(
-        &self,
-        period_index: u32,
-    ) -> RpcResult<Vec<AvailableSlotId>>;
-
-    /// Get a specific slot by its ID
-    #[method(name = "get_slot_by_id")]
-    async fn get_slot_by_id(
-        &self,
-        slot_id_hex: String,
-    ) -> RpcResult<Option<SlotDetails>>;
-
-    /// Get all claimed slots for a specific period
-    #[method(name = "get_claimed_slots_in_period")]
-    async fn get_claimed_slots_in_period(
-        &self,
-        period_index: u32,
-    ) -> RpcResult<Vec<ClaimedSlotSummary>>;
-
-    /// Get periods currently in voting phase with claimed/total slot counts
-    #[method(name = "get_voting_periods")]
-    async fn get_voting_periods(&self) -> RpcResult<Vec<VotingPeriodInfo>>;
-
-    /// Check if a slot is in voting period
-    #[method(name = "is_slot_in_voting")]
-    async fn is_slot_in_voting(&self, slot_id_hex: String) -> RpcResult<bool>;
-
-    /// Get ossified slots (slots whose voting period has ended)
-    #[method(name = "get_ossified_slots")]
-    async fn get_ossified_slots(&self) -> RpcResult<Vec<OssifiedSlotInfo>>;
-
-    /// Create a new prediction market supporting all market types
-    /// according to Bitcoin Hivemind whitepaper Section 3.1 - Market Creation
-    #[method(name = "create_market")]
-    async fn create_market(
+    /// Create a new prediction market
+    #[method(name = "market_create")]
+    async fn market_create(
         &self,
         request: CreateMarketRequest,
-    ) -> RpcResult<String>; // Returns market ID
+    ) -> RpcResult<String>;
 
-    /// List all markets in Trading state with lightweight data
+    /// List all markets
     #[open_api_method(output_schema(ToSchema = "Vec<MarketSummary>"))]
-    #[method(name = "list_markets")]
-    async fn list_markets(&self) -> RpcResult<Vec<MarketSummary>>;
+    #[method(name = "market_list")]
+    async fn market_list(&self) -> RpcResult<Vec<MarketSummary>>;
 
-    /// View detailed information for a specific market
+    /// Get detailed market information
     #[open_api_method(output_schema(ToSchema))]
-    #[method(name = "view_market")]
-    async fn view_market(
+    #[method(name = "market_get")]
+    async fn market_get(
         &self,
         market_id: String,
     ) -> RpcResult<Option<MarketData>>;
 
-    /// Calculate initial liquidity required for market creation based on beta parameter
-    /// Uses formula: Initial Liquidity = β × ln(Number of States in the Market)
-    /// Helpful for previewing costs and GUI parameter selection
+    /// Buy shares (with dry_run support for cost calculation)
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "market_buy")]
+    async fn market_buy(
+        &self,
+        request: MarketBuyRequest,
+    ) -> RpcResult<MarketBuyResponse>;
+
+    /// Get share positions for an address (optionally filtered by market)
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "market_positions")]
+    async fn market_positions(
+        &self,
+        address: Address,
+        market_id: Option<String>,
+    ) -> RpcResult<UserHoldings>;
+
+    /// Register as a voter
+    #[open_api_method(output_schema(ToSchema = "String"))]
+    #[method(name = "vote_register")]
+    async fn vote_register(
+        &self,
+        request: RegisterVoterRequest,
+    ) -> RpcResult<String>;
+
+    /// Get full voter information (registration, reputation, participation)
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "vote_voter")]
+    async fn vote_voter(
+        &self,
+        address: Address,
+    ) -> RpcResult<Option<VoterInfoFull>>;
+
+    /// List all registered voters
+    #[open_api_method(output_schema(ToSchema = "Vec<VoterInfo>"))]
+    #[method(name = "vote_voters")]
+    async fn vote_voters(&self) -> RpcResult<Vec<VoterInfo>>;
+
+    /// Submit one or more votes (batch)
+    #[open_api_method(output_schema(ToSchema = "String"))]
+    #[method(name = "vote_submit")]
+    async fn vote_submit(
+        &self,
+        votes: Vec<VoteBatchItem>,
+        fee_sats: u64,
+    ) -> RpcResult<String>;
+
+    /// Query votes with filters (by voter, decision, or period)
+    #[open_api_method(output_schema(ToSchema = "Vec<VoteInfo>"))]
+    #[method(name = "vote_list")]
+    async fn vote_list(&self, filter: VoteFilter) -> RpcResult<Vec<VoteInfo>>;
+
+    /// Get full voting period information (null period_id = current)
+    #[open_api_method(output_schema(ToSchema))]
+    #[method(name = "vote_period")]
+    async fn vote_period(
+        &self,
+        period_id: Option<u32>,
+    ) -> RpcResult<Option<VotingPeriodFull>>;
+
+    /// Transfer votecoin
+    #[method(name = "votecoin_transfer")]
+    async fn votecoin_transfer(
+        &self,
+        dest: Address,
+        amount: u32,
+        fee_sats: u64,
+        memo: Option<String>,
+    ) -> RpcResult<Txid>;
+
+    /// Get votecoin balance for an address
+    #[open_api_method(output_schema(ToSchema = "u32"))]
+    #[method(name = "votecoin_balance")]
+    async fn votecoin_balance(&self, address: Address) -> RpcResult<u32>;
+
+    /// Calculate initial liquidity required for market creation
     #[open_api_method(output_schema(ToSchema))]
     #[method(name = "calculate_initial_liquidity")]
     async fn calculate_initial_liquidity(
         &self,
         request: CalculateInitialLiquidityRequest,
     ) -> RpcResult<InitialLiquidityCalculation>;
-
-    /// Get share positions for a specific user address
-    /// Returns all positions across all markets according to Hivemind Section 4.3
-    #[open_api_method(output_schema(ToSchema))]
-    #[method(name = "get_user_share_positions")]
-    async fn get_user_share_positions(
-        &self,
-        address: Address,
-    ) -> RpcResult<UserHoldings>;
-
-    /// Get share positions for a specific market and user
-    #[open_api_method(output_schema(ToSchema = "Vec<SharePosition>"))]
-    #[method(name = "get_market_share_positions")]
-    async fn get_market_share_positions(
-        &self,
-        address: Address,
-        market_id: String,
-    ) -> RpcResult<Vec<SharePosition>>;
-
-    /// Buy shares in a prediction market using LMSR pricing
-    /// Implements optimal pricing according to Hivemind Section 2.3 - LMSR Mechanics
-    #[method(name = "buy_shares")]
-    async fn buy_shares(
-        &self,
-        market_id: String,
-        outcome_index: usize,
-        shares_amount: f64,
-        max_cost: u64, // Maximum cost in sats (slippage protection)
-        fee_sats: u64, // Transaction fee
-    ) -> RpcResult<String>; // Returns transaction ID
-
-    /// Calculate share purchase cost using current market snapshot
-    /// Provides accurate pricing without executing the trade
-    #[method(name = "calculate_share_cost")]
-    async fn calculate_share_cost(
-        &self,
-        market_id: String,
-        outcome_index: usize,
-        shares_amount: f64,
-    ) -> RpcResult<u64>; // Returns cost in sats
-
-    /// Redeem shares in a resolved prediction market
-    #[method(name = "redeem_shares")]
-    async fn redeem_shares(
-        &self,
-        market_id: String,
-        outcome_index: usize,
-        shares_amount: f64,
-        fee_sats: u64, // Transaction fee
-    ) -> RpcResult<String>; // Returns transaction ID
-
-    /// Register as a voter in the Bitcoin Hivemind voting system
-    /// This is a one-time registration that establishes voter identity and reputation bond
-    #[open_api_method(output_schema(ToSchema = "String"))]
-    #[method(name = "register_voter")]
-    async fn register_voter(
-        &self,
-        request: RegisterVoterRequest,
-    ) -> RpcResult<String>; // Returns transaction ID
-
-    /// Submit a single vote for a decision in the current voting period
-    /// Vote value should be 0.0-1.0 for binary decisions, scaled appropriately for scalar decisions
-    #[open_api_method(output_schema(ToSchema = "String"))]
-    #[method(name = "submit_vote")]
-    async fn submit_vote(
-        &self,
-        request: SubmitVoteRequest,
-    ) -> RpcResult<String>; // Returns transaction ID
-
-    /// Submit multiple votes efficiently in a single transaction
-    /// Useful for voters who want to vote on many decisions at once
-    #[open_api_method(output_schema(ToSchema = "String"))]
-    #[method(name = "submit_vote_batch")]
-    async fn submit_vote_batch(
-        &self,
-        request: SubmitVoteBatchRequest,
-    ) -> RpcResult<String>; // Returns transaction ID
-
-    /// Get information about a specific voter including reputation and voting history
-    #[open_api_method(output_schema(ToSchema))]
-    #[method(name = "get_voter_info")]
-    async fn get_voter_info(
-        &self,
-        address: Address,
-    ) -> RpcResult<Option<VoterInfo>>;
-
-    /// Get detailed information about a specific voting period
-    #[open_api_method(output_schema(ToSchema))]
-    #[method(name = "get_voting_period_details")]
-    async fn get_voting_period_details(
-        &self,
-        period_id: u32,
-    ) -> RpcResult<Option<VotingPeriodDetails>>;
-
-    /// Get all votes cast by a specific voter in a voting period
-    #[open_api_method(output_schema(ToSchema = "Vec<VoteInfo>"))]
-    #[method(name = "get_voter_votes")]
-    async fn get_voter_votes(
-        &self,
-        address: Address,
-        period_id: Option<u32>, // If None, returns votes from all periods
-    ) -> RpcResult<Vec<VoteInfo>>;
-
-    /// Get all votes cast for a specific decision slot
-    #[open_api_method(output_schema(ToSchema = "Vec<VoteInfo>"))]
-    #[method(name = "get_decision_votes")]
-    async fn get_decision_votes(
-        &self,
-        slot_id: String,
-    ) -> RpcResult<Vec<VoteInfo>>;
-
-    /// Get voter participation summary for a specific period
-    #[open_api_method(output_schema(ToSchema))]
-    #[method(name = "get_voter_participation")]
-    async fn get_voter_participation(
-        &self,
-        address: Address,
-        period_id: u32,
-    ) -> RpcResult<Option<VoterParticipation>>;
-
-    /// List all registered voters with their current reputation
-    #[open_api_method(output_schema(ToSchema = "Vec<VoterInfo>"))]
-    #[method(name = "list_voters")]
-    async fn list_voters(&self) -> RpcResult<Vec<VoterInfo>>;
-
-    /// Check if an address is registered as a voter
-    #[open_api_method(output_schema(ToSchema = "bool"))]
-    #[method(name = "is_registered_voter")]
-    async fn is_registered_voter(&self, address: Address) -> RpcResult<bool>;
-
-    /// Get the Votecoin balance for an address
-    /// Votecoin balance determines voting power in consensus calculations
-    #[open_api_method(output_schema(ToSchema = "u32"))]
-    #[method(name = "get_votecoin_balance")]
-    async fn get_votecoin_balance(&self, address: Address) -> RpcResult<u32>;
-
-    /// Get voting statistics for the current active voting period
-    /// Returns aggregated data about participation and vote counts
-    #[open_api_method(output_schema(ToSchema))]
-    #[method(name = "get_current_voting_stats")]
-    async fn get_current_voting_stats(
-        &self,
-    ) -> RpcResult<Option<VotingPeriodDetails>>;
-
-    /// Get the consensus results for a voting period including SVD analysis
-    /// Returns detailed consensus outcomes, reputation updates, and SVD metrics
-    #[open_api_method(output_schema(ToSchema))]
-    #[method(name = "get_voting_consensus_results")]
-    async fn get_voting_consensus_results(
-        &self,
-        period_id: u32,
-    ) -> RpcResult<VotingConsensusResults>;
-
-    /// Refresh wallet UTXOs from chain state
-    /// Manually synchronizes wallet database with current chain state
-    /// Useful for test environments to sync wallet after mining
-    #[open_api_method(output_schema(ToSchema))]
-    #[method(name = "refresh_wallet")]
-    async fn refresh_wallet(&self) -> RpcResult<()>;
-
-    /// Get the reputation value for a specific voter
-    #[open_api_method(output_schema(ToSchema))]
-    #[method(name = "get_voter_reputation")]
-    async fn get_voter_reputation(&self, voter_id: String) -> RpcResult<f64>;
-
-    /// Get the status of a voting period
-    #[open_api_method(output_schema(ToSchema))]
-    #[method(name = "get_voting_period_status")]
-    async fn get_voting_period_status(&self, period_id: u32) -> RpcResult<String>;
 }

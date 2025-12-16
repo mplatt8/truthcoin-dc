@@ -69,6 +69,16 @@ pub enum OutPoint {
         #[borsh(serialize_with = "borsh_serialize_bitcoin_outpoint")]
         bitcoin::OutPoint,
     ),
+    // Market treasury UTXO - tracks the single source of truth for market funds
+    Market {
+        market_id: [u8; 6],
+        block_height: u32,
+    },
+    // Market author fee UTXO - accumulates trading fees for the market creator
+    MarketAuthorFee {
+        market_id: [u8; 6],
+        block_height: u32,
+    },
 }
 
 impl std::fmt::Display for OutPoint {
@@ -80,6 +90,12 @@ impl std::fmt::Display for OutPoint {
             }
             Self::Deposit(bitcoin::OutPoint { txid, vout }) => {
                 write!(f, "deposit {txid} {vout}")
+            }
+            Self::Market { market_id, block_height } => {
+                write!(f, "market {} {}", hex::encode(market_id), block_height)
+            }
+            Self::MarketAuthorFee { market_id, block_height } => {
+                write!(f, "market_author_fee {} {}", hex::encode(market_id), block_height)
             }
         }
     }
@@ -209,11 +225,6 @@ pub enum TransactionData {
         /// The voting period these votes belong to
         voting_period: u32,
     },
-    /// Claim accumulated trading fees as market author
-    ClaimAuthorFees {
-        /// Market ID to claim fees from
-        market_id: MarketId,
-    },
 }
 
 pub type TxData = TransactionData;
@@ -252,11 +263,6 @@ impl TxData {
     /// `true` if the tx data corresponds to submitting a batch of votes
     pub fn is_submit_vote_batch(&self) -> bool {
         matches!(self, Self::SubmitVoteBatch { .. })
-    }
-
-    /// `true` if the tx data corresponds to claiming author fees
-    pub fn is_claim_author_fees(&self) -> bool {
-        matches!(self, Self::ClaimAuthorFees { .. })
     }
 }
 
@@ -353,13 +359,6 @@ pub struct SubmitVoteBatch {
     pub votes: Vec<VoteBatchItem>,
     /// The voting period these votes belong to
     pub voting_period: u32,
-}
-
-/// Struct describing a claim of trading fees by market author
-#[derive(Clone, Debug, PartialEq)]
-pub struct ClaimAuthorFees {
-    /// Market ID to claim fees from
-    pub market_id: MarketId,
 }
 
 #[derive(
@@ -609,18 +608,6 @@ impl FilledTransaction {
         }
     }
 
-    /// If the tx is a claim author fees, returns the corresponding [`ClaimAuthorFees`].
-    pub fn claim_author_fees(&self) -> Option<ClaimAuthorFees> {
-        match &self.transaction.data {
-            Some(TransactionData::ClaimAuthorFees { market_id }) => {
-                Some(ClaimAuthorFees {
-                    market_id: market_id.clone(),
-                })
-            }
-            _ => None,
-        }
-    }
-
     /// Accessor for txid
     pub fn txid(&self) -> Txid {
         self.transaction.txid()
@@ -795,6 +782,26 @@ impl FilledTransaction {
                     }
                     OutputContent::Withdrawal(withdrawal) => {
                         FilledOutputContent::BitcoinWithdrawal(withdrawal)
+                    }
+                    OutputContent::MarketTreasury { market_id, amount } => {
+                        let new_max =
+                            output_bitcoin_max_value.checked_sub(amount.0);
+                        if new_max.is_none() {
+                            return None;
+                        }
+
+                        output_bitcoin_max_value = new_max.unwrap();
+                        FilledOutputContent::MarketTreasury { market_id, amount }
+                    }
+                    OutputContent::MarketAuthorFee { market_id, amount } => {
+                        let new_max =
+                            output_bitcoin_max_value.checked_sub(amount.0);
+                        if new_max.is_none() {
+                            return None;
+                        }
+
+                        output_bitcoin_max_value = new_max.unwrap();
+                        FilledOutputContent::MarketAuthorFee { market_id, amount }
                     }
                 };
                 Some(FilledOutput {

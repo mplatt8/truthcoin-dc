@@ -1,5 +1,3 @@
-//! Matrix Operations for Bitcoin Hivemind Voting
-
 use super::constants::{
     BITCOIN_HIVEMIND_NEUTRAL_VALUE, SVD_NUMERICAL_TOLERANCE,
 };
@@ -223,7 +221,6 @@ pub enum NormalizationMethod {
 pub struct MatrixAnalyzer;
 
 impl MatrixAnalyzer {
-    /// Decision correlations identify related questions and potential voter manipulation.
     pub fn decision_correlation_matrix(
         matrix: &Array2<f64>,
     ) -> Result<Array2<f64>, VotingMathError> {
@@ -251,7 +248,6 @@ impl MatrixAnalyzer {
         Ok(correlation)
     }
 
-    /// Voter correlations identify coordinated behavior and potential Sybil attacks.
     pub fn voter_correlation_matrix(
         matrix: &Array2<f64>,
     ) -> Result<Array2<f64>, VotingMathError> {
@@ -390,7 +386,6 @@ impl MatrixAnalyzer {
 pub struct ConsensusOps;
 
 impl ConsensusOps {
-    /// Weight votes by reputation so accurate voters have more influence.
     pub fn apply_reputation_weighting(
         matrix: &Array2<f64>,
         reputations: &Array1<f64>,
@@ -440,7 +435,6 @@ impl ConsensusOps {
         Ok(outcomes)
     }
 
-    /// Incentivize truthful reporting by rewarding voters who agree with consensus.
     pub fn update_reputations(
         votes: &Array2<f64>,
         outcomes: &Array1<f64>,
@@ -503,11 +497,8 @@ mod tests {
     use crate::types::Address;
 
     fn create_test_sparse_matrix() -> SparseVoteMatrix {
-        let voters = vec![
-            Address([1u8; 20]),
-            Address([2u8; 20]),
-            Address([3u8; 20]),
-        ];
+        let voters =
+            vec![Address([1u8; 20]), Address([2u8; 20]), Address([3u8; 20])];
 
         let decisions =
             vec![SlotId::new(1, 0).unwrap(), SlotId::new(1, 1).unwrap()];

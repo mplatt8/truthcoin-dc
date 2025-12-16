@@ -1,8 +1,3 @@
-//! Bitcoin Hivemind Period Calculator
-//!
-//! SINGLE SOURCE OF TRUTH for period-related operations including status calculation,
-//! state transitions, period boundaries, and decision slot queries.
-
 use crate::state::{
     Error,
     slots::{Dbs as SlotsDbs, SlotConfig, SlotId},
@@ -88,8 +83,6 @@ pub fn calculate_voting_period(
     let decision_slots =
         get_decision_slots_for_period(rotxn, period_id, slots_db)?;
 
-    // In testing mode, boundaries are block heights, so compare against current_height.
-    // In production mode, boundaries are timestamps, so compare against current_timestamp.
     let effective_current = if config.testing_mode {
         current_height as u64
     } else {
@@ -142,8 +135,6 @@ pub fn get_all_active_periods(
         let (start_boundary, end_boundary) =
             calculate_period_boundaries(period_index, config);
 
-        // In testing mode, boundaries are block heights, so compare against current_height.
-        // In production mode, boundaries are timestamps, so compare against current_timestamp.
         let effective_current = if config.testing_mode {
             current_height as u64
         } else {

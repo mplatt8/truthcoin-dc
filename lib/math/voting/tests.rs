@@ -1,16 +1,9 @@
-//! Comprehensive tests for Bitcoin Hivemind voting mathematics
-//!
-//! This module tests the mathematical foundations of the voting system,
-//! including sparse matrix operations, reputation calculations, and
-//! vote aggregation algorithms.
-
 use super::*;
 use crate::state::slots::SlotId;
 use crate::types::Address;
 use approx::assert_relative_eq;
 use std::collections::HashMap;
 
-// Helper functions for creating test data
 fn create_test_voter_ids(count: usize) -> Vec<Address> {
     (0..count)
         .map(|i| {
@@ -27,7 +20,6 @@ fn create_test_decision_ids(count: usize) -> Vec<SlotId> {
         .collect()
 }
 
-/// Test sparse vote matrix creation and basic operations
 #[test]
 fn test_sparse_vote_matrix_creation() {
     let voters = create_test_voter_ids(3);

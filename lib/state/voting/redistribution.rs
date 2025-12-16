@@ -1,8 +1,3 @@
-//! VoteCoin Redistribution System
-//!
-//! Implements Bitcoin Hivemind Section 4.2: VoteCoin flows from dissenters to consensus voters.
-//! Total VoteCoin supply remains constant (conservation property).
-
 use crate::math::voting::constants::round_reputation;
 use crate::state::{
     Error, State, UtxoManager, slots::SlotId, voting::types::VotingPeriodId,
@@ -299,8 +294,6 @@ fn generate_transfer_records(
     Ok(transfers)
 }
 
-/// Adjust deltas for voters with insufficient balances to ensure blockchain liveness.
-/// Prevents halt from malicious voters transferring VoteCoin before redistribution.
 fn adjust_deltas_for_insufficient_balances(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -414,8 +407,6 @@ fn adjust_deltas_for_insufficient_balances(
     Ok(total_deficit)
 }
 
-/// SINGLE SOURCE OF TRUTH for VoteCoin redistribution after consensus.
-/// Must be called immediately after consensus calculation and reputation updates.
 pub fn redistribute_votecoin_after_consensus(
     state: &State,
     rwtxn: &mut RwTxn,
@@ -551,8 +542,6 @@ pub fn redistribute_votecoin_after_consensus(
     Ok(summary)
 }
 
-/// Apply VoteCoin redistribution as protocol-enforced state changes.
-/// This is NOT a voluntary transaction - it's automatic consensus-layer enforcement.
 pub fn apply_votecoin_redistribution(
     state: &State,
     rwtxn: &mut RwTxn,

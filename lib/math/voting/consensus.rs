@@ -1,12 +1,6 @@
-//! Bitcoin Hivemind Consensus Algorithm Implementation
-//!
-//! This module implements the reference consensus algorithm from the Bitcoin Hivemind
-//! specification, using Principal Component Analysis (PCA) with Singular Value
-//! Decomposition (SVD) for truth extraction from voting data.
-
 use super::constants::{
-    round_outcome, round_reputation, BITCOIN_HIVEMIND_NEUTRAL_VALUE,
-    CONSENSUS_CATCH_TOLERANCE, SVD_NUMERICAL_TOLERANCE,
+    BITCOIN_HIVEMIND_NEUTRAL_VALUE, CONSENSUS_CATCH_TOLERANCE,
+    SVD_NUMERICAL_TOLERANCE, round_outcome, round_reputation,
 };
 use super::{ReputationVector, SparseVoteMatrix, VotingMathError};
 use crate::state::slots::SlotId;
@@ -303,11 +297,8 @@ pub fn get_reward_weights(
     })
 }
 
-/// Result of fill_na including information about which decisions had actual votes.
 pub struct FillNaResult {
-    /// The vote matrix with NaN values filled.
     pub filled: DMatrix<f64>,
-    /// For each decision (column), true if at least one voter cast a non-NaN vote.
     pub has_votes: Vec<bool>,
 }
 
@@ -378,7 +369,6 @@ pub struct FactoryResult {
     pub filled: DMatrix<f64>,
     pub agents: RewardWeightsResult,
     pub decisions: DVector<f64>,
-    /// For each decision, true if at least one voter cast a vote (false = unanimous abstention).
     pub has_votes: Vec<bool>,
     pub certainty: f64,
     pub first_loading: DVector<f64>,
@@ -471,7 +461,6 @@ pub fn factory(
 }
 
 pub struct DetailedConsensusOutput {
-    /// Decision outcomes. `None` indicates unanimous abstention (no votes cast).
     pub outcomes: HashMap<SlotId, Option<f64>>,
     pub first_loading: Vec<f64>,
     pub explained_variance: f64,
@@ -520,7 +509,6 @@ pub fn run_consensus(
 
     let mut outcomes = HashMap::new();
     for (j, decision_id) in decisions.iter().enumerate() {
-        // If no votes were cast for this decision, return None (unanimous abstention)
         let outcome = if result.has_votes[j] {
             Some(round_outcome(result.decisions[j]))
         } else {

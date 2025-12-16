@@ -1,5 +1,3 @@
-//! Bitcoin Hivemind Voting Mathematics
-
 pub mod consensus;
 pub mod constants;
 pub mod matrix;
@@ -191,8 +189,6 @@ impl SparseVoteMatrix {
     }
 }
 
-/// Voting weights combining reputation and Votecoin holdings.
-/// Final Weight = Base Reputation × Votecoin Holdings Proportion
 #[derive(Debug, Clone)]
 pub struct ReputationVector {
     reputations: HashMap<crate::types::Address, f64>,

@@ -72,10 +72,6 @@ impl VotingSystem {
         Ok(())
     }
 
-    /// Calculate and store consensus outcomes for a voting period.
-    ///
-    /// SINGLE SOURCE OF TRUTH for consensus calculation and reputation updates.
-    /// Uses SVD-based PCA as specified in Bitcoin Hivemind Section 4.2.
     pub(crate) fn calculate_and_store_consensus(
         &self,
         rwtxn: &mut RwTxn,
@@ -227,8 +223,6 @@ impl VotingSystem {
         self.databases.put_period_stats(rwtxn, &period_stats)?;
 
         for (slot_id, outcome_value) in &consensus_result.outcomes {
-            // Handle unanimous abstention: if outcome is None, skip storing outcome
-            // but still process the slot (it will be marked as unresolved)
             let Some(outcome_f64) = outcome_value else {
                 tracing::warn!(
                     "Slot {} has unanimous abstention - no consensus outcome stored",
@@ -269,7 +263,6 @@ impl VotingSystem {
                 current_height,
             )?;
 
-        // ATOMIC: Apply redistribution immediately in the same transaction
         redistribution::apply_votecoin_redistribution(
             state,
             rwtxn,
@@ -282,14 +275,12 @@ impl VotingSystem {
             slots_in_period.push(*slot_id);
         }
 
-        // Transition all slots to Resolved atomically
-        // Slots with no votes resolve to 0.5 (neutral outcome)
         for slot_id in &slots_in_period {
             let outcome_value = consensus_result
                 .outcomes
                 .get(slot_id)
                 .and_then(|v| *v)
-                .unwrap_or(0.5); // No votes = neutral outcome
+                .unwrap_or(0.5);
 
             slots_db.transition_slot_to_resolved(
                 rwtxn,
@@ -319,24 +310,24 @@ impl VotingSystem {
             .copied()
             .collect();
 
-        // Store redistribution record as already applied for auditability
-        let mut period_redistribution = redistribution::PeriodRedistribution::new(
-            period_id,
-            resolved_slot_ids.clone(),
-            redistribution_summary,
-            current_height,
-        );
+        let mut period_redistribution =
+            redistribution::PeriodRedistribution::new(
+                period_id,
+                resolved_slot_ids.clone(),
+                redistribution_summary,
+                current_height,
+            );
         period_redistribution.mark_applied(current_height);
 
         self.databases
             .put_pending_redistribution(rwtxn, &period_redistribution)?;
 
-        // Market redemption transitions are now handled in block.rs connect_body
-        // via transition_resolved_markets_to_redemption which checks SlotStateHistory
-        // directly. This ensures a single source of truth for market state transitions.
         tracing::debug!(
             "Slots ossified during consensus: {:?}",
-            resolved_slot_ids.iter().map(|s| hex::encode(s.as_bytes())).collect::<Vec<_>>()
+            resolved_slot_ids
+                .iter()
+                .map(|s| hex::encode(s.as_bytes()))
+                .collect::<Vec<_>>()
         );
 
         let abstained_count = slots_in_period.len() - resolved_slot_ids.len();
@@ -377,8 +368,13 @@ impl VotingSystem {
         config: &crate::state::slots::SlotConfig,
         slots_db: &crate::state::slots::Dbs,
     ) -> Result<Option<VotingPeriod>, Error> {
-        let all_periods =
-            self.get_all_periods(rotxn, current_timestamp, current_height, config, slots_db)?;
+        let all_periods = self.get_all_periods(
+            rotxn,
+            current_timestamp,
+            current_height,
+            config,
+            slots_db,
+        )?;
 
         for period in all_periods.values() {
             if period.status == VotingPeriodStatus::Active {
@@ -482,7 +478,7 @@ impl VotingSystem {
         &self,
         rotxn: &RoTxn,
         period_id: VotingPeriodId,
-        config: &crate::state::slots::SlotConfig,
+        _config: &crate::state::slots::SlotConfig,
         slots_db: &crate::state::slots::Dbs,
     ) -> Result<(u64, u64, f64), Error> {
         let votes = self.databases.get_votes_for_period(rotxn, period_id)?;
@@ -562,8 +558,6 @@ impl VotingSystem {
         Ok(weights)
     }
 
-    /// Get voting weights with fresh Votecoin proportions from current UTXO set.
-    /// Use this for all consensus calculations to ensure accuracy.
     pub fn get_fresh_reputation_weights(
         &self,
         rwtxn: &mut RwTxn,
@@ -640,8 +634,6 @@ impl VotingSystem {
         config: &crate::state::slots::SlotConfig,
         slots_db: &crate::state::slots::Dbs,
     ) -> Result<Vec<DecisionOutcome>, Error> {
-        use crate::types::Txid;
-
         let has_outcomes = self.databases.has_consensus(rwtxn, period_id)?;
         let period = period_calculator::calculate_voting_period(
             rwtxn,
@@ -653,7 +645,6 @@ impl VotingSystem {
             has_outcomes,
         )?;
 
-        // In testing mode, use block_height for transition validation
         let effective_time = if config.testing_mode {
             block_height
         } else {

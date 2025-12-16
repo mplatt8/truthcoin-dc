@@ -36,7 +36,6 @@ pub trait UtxoManager {
         rwtxn: &mut RwTxn,
     ) -> Result<(), Error>;
 
-    /// Insert UTXO without affecting total VoteCoin supply (for redistribution)
     fn insert_utxo_supply_neutral(
         &self,
         rwtxn: &mut RwTxn,
@@ -44,7 +43,6 @@ pub trait UtxoManager {
         filled_output: &FilledOutput,
     ) -> Result<(), Error>;
 
-    /// Delete UTXO without affecting total VoteCoin supply (for redistribution)
     fn delete_utxo_supply_neutral(
         &self,
         rwtxn: &mut RwTxn,
@@ -219,7 +217,6 @@ impl State {
             version.put(&mut rwtxn, &(), &*VERSION)?;
         }
 
-        // Initialize cache values to zero if they don't exist
         if cached_deposit_utxo_value.try_get(&rwtxn, &())?.is_none() {
             cached_deposit_utxo_value.put(&mut rwtxn, &(), &0u64)?;
         }
@@ -393,7 +390,6 @@ impl UtxoManager for State {
                 &new_balance,
             )?;
 
-            // Update total VoteCoin supply cache
             let current_supply = self
                 .cached_votecoin_supply
                 .try_get(rwtxn, &())?
@@ -441,7 +437,6 @@ impl UtxoManager for State {
                 &new_balance,
             )?;
 
-            // Update total VoteCoin supply cache
             let current_supply = self
                 .cached_votecoin_supply
                 .try_get(rwtxn, &())?
@@ -537,7 +532,6 @@ impl UtxoManager for State {
             &(),
         )?;
 
-        // Update per-address balance but NOT total supply (for redistribution)
         if let crate::types::FilledOutputContent::Votecoin(amount) =
             &filled_output.content
         {
@@ -568,7 +562,6 @@ impl UtxoManager for State {
                 return Ok(false);
             };
 
-        // Update per-address balance but NOT total supply (for redistribution)
         if let crate::types::FilledOutputContent::Votecoin(amount) =
             &filled_output.content
         {
@@ -590,7 +583,6 @@ impl UtxoManager for State {
         let deleted = self.utxos.delete(rwtxn, outpoint)?;
 
         if !deleted {
-            // Restore state if deletion failed
             self.utxos_by_address.put(
                 rwtxn,
                 &(filled_output.address, *outpoint),
@@ -931,17 +923,6 @@ impl State {
             }
         }
 
-        if tx
-            .transaction
-            .data
-            .as_ref()
-            .map_or(false, |data| data.is_claim_author_fees())
-        {
-            crate::validation::MarketValidator::validate_claim_author_fees(
-                self, rotxn, tx,
-            )?;
-        }
-
         tx.bitcoin_fee()?.ok_or(Error::NotEnoughValueIn)
     }
 
@@ -1150,28 +1131,6 @@ impl State {
             .get_claimed_slot_count_in_period(rotxn, period_index)
     }
 
-    // Votecoin Balance Queries for Voting System Integration
-
-    /// Get Votecoin balance for a specific address
-    ///
-    /// This method calculates the total Votecoin holdings for an address by
-    /// summing all Votecoin UTXOs owned by that address. This is essential
-    /// for the Bitcoin Hivemind voting weight calculation.
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only database transaction
-    /// * `address` - Address to query Votecoin balance for
-    ///
-    /// # Returns
-    /// Total Votecoin balance (u32) for the address
-    ///
-    /// # Bitcoin Hivemind Specification
-    /// According to the Bitcoin Hivemind whitepaper, voting weight is calculated as:
-    /// **Final Voting Weight = Base Reputation × Votecoin Holdings Proportion**
-    /// This method provides the Votecoin holdings component of that calculation.
-    ///
-    /// # Performance
-    /// O(1) lookup using cached balance database, updated atomically with UTXO operations
     pub fn get_votecoin_balance(
         &self,
         rotxn: &RoTxn,

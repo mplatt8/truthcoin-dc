@@ -29,8 +29,6 @@ struct MarketStateUpdate {
     /// Share delta: (outcome_index, shares_to_add)
     share_delta: Option<(usize, f64)>,
     new_beta: Option<f64>,
-    trader_address: Option<Address>,
-    trade_cost: Option<f64>,
     transaction_id: Option<[u8; 32]>,
     volume_sats: Option<u64>,
     /// Trading fee collected for the market author (in satoshis)
@@ -45,8 +43,6 @@ struct SlotStateChange {
 
 struct MarketCreation {
     market: crate::state::Market,
-    creator_address: Address,
-    height: u32,
 }
 
 struct VoteSubmission {
@@ -54,14 +50,11 @@ struct VoteSubmission {
 }
 
 struct VoterRegistration {
-    address: crate::types::Address,
     initial_reputation: crate::state::voting::types::VoterReputation,
 }
 
 struct ReputationUpdate {
-    address: crate::types::Address,
     updated_reputation: crate::state::voting::types::VoterReputation,
-    old_reputation: crate::state::voting::types::VoterReputation,
 }
 
 impl StateUpdate {
@@ -237,15 +230,11 @@ impl StateUpdate {
                 })?;
 
             let mut new_shares = market.shares().clone();
-            let mut total_fee_sats: u64 = 0;
             let mut last_txid: Option<[u8; 32]> = None;
 
             // Apply all deltas for this market
-            for (outcome_index, delta, volume_sats, fee_sats, txid) in &deltas {
+            for (outcome_index, delta, volume_sats, _fee_sats, txid) in &deltas {
                 new_shares[*outcome_index] += delta;
-                if let Some(fee) = fee_sats {
-                    total_fee_sats += fee;
-                }
                 if let Some(vol) = volume_sats {
                     market
                         .update_trading_volume(*outcome_index, *vol)
@@ -256,14 +245,8 @@ impl StateUpdate {
                 last_txid = *txid;
             }
 
-            let new_treasury =
-                LmsrService::calculate_treasury(&new_shares, market.b())
-                    .map_err(|e| Error::InvalidSlotId {
-                        reason: format!("Treasury calculation failed: {:?}", e),
-                    })?;
-
             let _new_state_hash = market
-                .create_new_state_version_with_fees(
+                .create_new_state_version(
                     last_txid,
                     height as u64,
                     None,
@@ -271,15 +254,12 @@ impl StateUpdate {
                     None,
                     Some(new_shares),
                     None,
-                    Some(new_treasury),
-                    if total_fee_sats > 0 {
-                        Some(total_fee_sats)
-                    } else {
-                        None
-                    },
                 )
                 .map_err(|e| Error::InvalidSlotId {
-                    reason: format!("Failed to create new market state: {:?}", e),
+                    reason: format!(
+                        "Failed to create new market state: {:?}",
+                        e
+                    ),
                 })?;
 
             state.markets().update_market(rwtxn, &market)?;
@@ -386,8 +366,136 @@ impl StateUpdate {
                 .put_voter_reputation(rwtxn, &update.updated_reputation)?;
         }
 
+        // Consolidate any MarketTreasury/MarketAuthorFee UTXOs from explicit tx outputs
+        // This merges new outputs from BuyShares txs with the previous Market/Fee UTXOs
+        Self::consolidate_market_utxos(state, rwtxn, height)?;
+
         Ok(())
     }
+
+    /// Consolidate all MarketTreasury and MarketAuthorFee UTXOs for each market
+    /// into a single UTXO per market. This is called at block end to merge:
+    /// - The previous block's Market/Fee UTXO (if exists)
+    /// - Any new outputs from BuyShares transactions in this block
+    ///
+    /// Uses pending UTXO tracking for O(m) efficiency where m = markets with trades,
+    /// instead of O(n) where n = total UTXOs.
+    fn consolidate_market_utxos(
+        state: &State,
+        rwtxn: &mut RwTxn,
+        height: u32,
+    ) -> Result<(), Error> {
+        use crate::state::markets::{
+            generate_market_author_fee_address, generate_market_treasury_address,
+        };
+        use crate::types::{BitcoinOutputContent, FilledOutput, OutPoint};
+
+        // Get markets that have pending UTXOs to consolidate (O(m) where m = active markets)
+        let markets_to_consolidate = state.markets().get_markets_with_pending_utxos(rwtxn)?;
+
+        if markets_to_consolidate.is_empty() {
+            return Ok(());
+        }
+
+        for market_id_bytes in markets_to_consolidate {
+            let market_id = MarketId::new(market_id_bytes);
+
+            // Collect treasury UTXOs: existing consolidated + pending from transactions
+            let mut treasury_total = 0u64;
+            let mut treasury_utxos_to_consume = Vec::new();
+
+            // Get existing consolidated treasury UTXO (if any)
+            if let Some(existing_outpoint) = state.markets().get_market_utxo(rwtxn, &market_id)? {
+                if let Some(utxo) = state.utxos.try_get(rwtxn, &existing_outpoint)? {
+                    treasury_total += utxo.get_bitcoin_value().to_sat();
+                    treasury_utxos_to_consume.push(existing_outpoint);
+                }
+            }
+
+            // Get pending treasury UTXOs from transactions
+            let pending_treasury = state.markets().get_pending_treasury_utxos(rwtxn, &market_id)?;
+            for outpoint in pending_treasury {
+                if let Some(utxo) = state.utxos.try_get(rwtxn, &outpoint)? {
+                    treasury_total += utxo.get_bitcoin_value().to_sat();
+                    treasury_utxos_to_consume.push(outpoint);
+                }
+            }
+
+            // Collect fee UTXOs: existing consolidated + pending from transactions
+            let mut fee_total = 0u64;
+            let mut fee_utxos_to_consume = Vec::new();
+
+            // Get existing consolidated fee UTXO (if any)
+            if let Some(existing_outpoint) = state.markets().get_author_fee_utxo(rwtxn, &market_id)? {
+                if let Some(utxo) = state.utxos.try_get(rwtxn, &existing_outpoint)? {
+                    fee_total += utxo.get_bitcoin_value().to_sat();
+                    fee_utxos_to_consume.push(existing_outpoint);
+                }
+            }
+
+            // Get pending fee UTXOs from transactions
+            let pending_fees = state.markets().get_pending_author_fee_utxos(rwtxn, &market_id)?;
+            for outpoint in pending_fees {
+                if let Some(utxo) = state.utxos.try_get(rwtxn, &outpoint)? {
+                    fee_total += utxo.get_bitcoin_value().to_sat();
+                    fee_utxos_to_consume.push(outpoint);
+                }
+            }
+
+            // Consolidate treasury UTXOs into a single OutPoint::Market
+            if !treasury_utxos_to_consume.is_empty() && treasury_total > 0 {
+                for outpoint in &treasury_utxos_to_consume {
+                    state.delete_utxo_with_address_index(rwtxn, outpoint)?;
+                }
+                state.markets().clear_market_utxo(rwtxn, &market_id)?;
+
+                let treasury_address = generate_market_treasury_address(&market_id);
+                let new_outpoint = OutPoint::Market {
+                    market_id: market_id_bytes,
+                    block_height: height,
+                };
+                let new_output = FilledOutput::new(
+                    treasury_address,
+                    FilledOutputContent::MarketTreasury {
+                        market_id: market_id_bytes,
+                        amount: BitcoinOutputContent(bitcoin::Amount::from_sat(treasury_total)),
+                    },
+                );
+                state.insert_utxo_with_address_index(rwtxn, &new_outpoint, &new_output)?;
+                state.markets().set_market_utxo(rwtxn, &market_id, &new_outpoint)?;
+            }
+
+            // Consolidate fee UTXOs into a single OutPoint::MarketAuthorFee
+            if !fee_utxos_to_consume.is_empty() && fee_total > 0 {
+                for outpoint in &fee_utxos_to_consume {
+                    state.delete_utxo_with_address_index(rwtxn, outpoint)?;
+                }
+                state.markets().clear_author_fee_utxo(rwtxn, &market_id)?;
+
+                let fee_address = generate_market_author_fee_address(&market_id);
+                let new_outpoint = OutPoint::MarketAuthorFee {
+                    market_id: market_id_bytes,
+                    block_height: height,
+                };
+                let new_output = FilledOutput::new(
+                    fee_address,
+                    FilledOutputContent::MarketAuthorFee {
+                        market_id: market_id_bytes,
+                        amount: BitcoinOutputContent(bitcoin::Amount::from_sat(fee_total)),
+                    },
+                );
+                state.insert_utxo_with_address_index(rwtxn, &new_outpoint, &new_output)?;
+                state.markets().set_author_fee_utxo(rwtxn, &market_id, &new_outpoint)?;
+            }
+
+            // Clear pending UTXOs after consolidation - data is now in consolidated UTXO
+            state.markets().clear_pending_treasury_utxos(rwtxn, &market_id)?;
+            state.markets().clear_pending_author_fee_utxos(rwtxn, &market_id)?;
+        }
+
+        Ok(())
+    }
+
     fn add_market_update(&mut self, update: MarketStateUpdate) {
         self.market_updates.push(update);
     }
@@ -408,28 +516,6 @@ impl StateUpdate {
     }
     fn add_vote_submission(&mut self, vote: crate::state::voting::types::Vote) {
         self.vote_submissions.push(VoteSubmission { vote });
-    }
-    fn add_voter_registration(
-        &mut self,
-        address: crate::types::Address,
-        reputation: crate::state::voting::types::VoterReputation,
-    ) {
-        self.voter_registrations.push(VoterRegistration {
-            address,
-            initial_reputation: reputation,
-        });
-    }
-    fn add_reputation_update(
-        &mut self,
-        address: crate::types::Address,
-        old_reputation: crate::state::voting::types::VoterReputation,
-        updated_reputation: crate::state::voting::types::VoterReputation,
-    ) {
-        self.reputation_updates.push(ReputationUpdate {
-            address,
-            updated_reputation,
-            old_reputation,
-        });
     }
 }
 fn query_update_cost(
@@ -536,11 +622,6 @@ pub fn connect(
         return Err(err);
     }
 
-    // Note: VoteCoin redistribution is now applied atomically with consensus
-    // calculation in calculate_and_store_consensus(). This eliminates the
-    // one-block window of inconsistent state that existed when redistribution
-    // was pending.
-
     if height == 0 {
         state
             .slots()
@@ -624,7 +705,7 @@ pub fn connect(
                     )?;
 
                     tracing::info!(
-                        "Protocol: Successfully calculated consensus for period {} - pending redistribution will be applied in next block",
+                        "Protocol: Successfully calculated consensus for period {}",
                         period_id.0
                     );
                 }
@@ -632,16 +713,14 @@ pub fn connect(
         }
     }
 
-    let current_period = state.slots().block_height_to_testing_period(height);
-
     {
-        // Automatically transition resolved markets to Ossified with share payouts
-        let payout_results = state.markets().transition_and_payout_resolved_markets(
-            rwtxn,
-            state,
-            state.slots(),
-            height,
-        )?;
+        let payout_results =
+            state.markets().transition_and_payout_resolved_markets(
+                rwtxn,
+                state,
+                state.slots(),
+                height,
+            )?;
 
         if !payout_results.is_empty() {
             for (market_id, summary) in &payout_results {
@@ -674,6 +753,10 @@ pub fn connect(
                 } else {
                     return Err(Error::BadCoinbaseOutputContent);
                 }
+            }
+            OutputContent::MarketTreasury { .. }
+            | OutputContent::MarketAuthorFee { .. } => {
+                return Err(Error::BadCoinbaseOutputContent);
             }
         };
         let filled_output = FilledOutput {
@@ -750,14 +833,6 @@ pub fn connect(
                     height,
                 )?;
             }
-            Some(TxData::ClaimAuthorFees { .. }) => {
-                apply_claim_author_fees(
-                    state,
-                    rwtxn,
-                    &filled_tx,
-                    height,
-                )?;
-            }
             Some(TxData::RegisterVoter { .. }) => {}
             None => {}
         }
@@ -765,11 +840,14 @@ pub fn connect(
 
     state_update.validate_all_changes(state, rwtxn)?;
 
-    state_update.apply_all_changes(state, rwtxn, height)?;
-
+    // First create UTXOs from transaction outputs (including MarketTreasury/MarketAuthorFee)
     for filled_tx in &filled_transactions {
         apply_utxo_changes(state, rwtxn, filled_tx)?;
     }
+
+    // Then apply state changes including market UTXO consolidation
+    // (consolidation merges new tx outputs with existing market UTXOs)
+    state_update.apply_all_changes(state, rwtxn, height)?;
 
     let block_hash = header.hash();
     state.tip.put(rwtxn, &(), &block_hash)?;
@@ -829,9 +907,6 @@ pub fn disconnect_tip(
             }
             Some(TxData::SubmitVoteBatch { .. }) => {
                 let () = revert_submit_vote_batch(state, rwtxn, &filled_tx)?;
-            }
-            Some(TxData::ClaimAuthorFees { .. }) => {
-                let () = revert_claim_author_fees(state, rwtxn, &filled_tx)?;
             }
             Some(TxData::RegisterVoter { .. }) => {}
         }
@@ -1107,6 +1182,19 @@ fn apply_utxo_changes(
             &outpoint,
             filled_output,
         )?;
+
+        // Track pending market UTXOs for efficient consolidation
+        match &filled_output.content {
+            FilledOutputContent::MarketTreasury { market_id, .. } => {
+                let market_id = MarketId::new(*market_id);
+                state.markets().add_pending_treasury_utxo(rwtxn, &market_id, &outpoint)?;
+            }
+            FilledOutputContent::MarketAuthorFee { market_id, .. } => {
+                let market_id = MarketId::new(*market_id);
+                state.markets().add_pending_author_fee_utxo(rwtxn, &market_id, &outpoint)?;
+            }
+            _ => {}
+        }
     }
 
     Ok(())
@@ -1177,18 +1265,21 @@ fn apply_market_trade(
         })?;
 
     let volume_sats = total_cost.ceil() as u64;
-    let fee_sats = fee_amount.ceil() as u64;
+    let fee_sats = fee_amount.ceil() as i64;
+    // Note: base_cost_sats is used for validation of explicit tx outputs
+    let _base_cost_sats = base_cost.ceil() as i64;
 
     state_update.add_market_update(MarketStateUpdate {
         market_id: buy_data.market_id.clone(),
         share_delta: Some((outcome_index, shares_to_buy)),
         new_beta: None,
-        trader_address: Some(trader_address),
-        trade_cost: Some(total_cost),
         transaction_id: Some(filled_tx.transaction.txid().0),
         volume_sats: Some(volume_sats),
-        fee_sats: Some(fee_sats),
+        fee_sats: Some(fee_sats as u64),
     });
+
+    // Note: Treasury and fee values are now tracked via explicit transaction outputs
+    // (MarketTreasury and MarketAuthorFee UTXOs) rather than accumulators
 
     tracing::info!(
         "apply_market_trade: Adding share account change - trader={}, market={}, outcome={}, shares={}",
@@ -1285,11 +1376,43 @@ fn apply_market_creation(
                 reason: format!("Market creation failed: {}", e),
             })?;
 
-    state_update.add_market_creation(MarketCreation {
-        market,
-        creator_address,
-        height,
-    });
+    // Calculate initial treasury from beta: b * ln(num_outcomes)
+    let num_outcomes = market.get_outcome_count() as f64;
+    let initial_treasury_sats = (market.b() * num_outcomes.ln()).ceil() as u64;
+
+    // Create the initial MarketTreasury UTXO if there's initial liquidity
+    // The funds come from the transaction inputs (included in total_cost by wallet)
+    if initial_treasury_sats > 0 {
+        use crate::state::markets::generate_market_treasury_address;
+        use crate::types::{BitcoinOutputContent, FilledOutput, OutPoint};
+
+        let market_id = market.id.clone();
+        let market_id_bytes = *market_id.as_bytes();
+        let treasury_address = generate_market_treasury_address(&market_id);
+
+        let outpoint = OutPoint::Market {
+            market_id: market_id_bytes,
+            block_height: height,
+        };
+        let output = FilledOutput::new(
+            treasury_address,
+            FilledOutputContent::MarketTreasury {
+                market_id: market_id_bytes,
+                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(initial_treasury_sats)),
+            },
+        );
+
+        state.insert_utxo_with_address_index(rwtxn, &outpoint, &output)?;
+        state.markets().set_market_utxo(rwtxn, &market_id, &outpoint)?;
+
+        tracing::debug!(
+            "Created initial MarketTreasury UTXO for market {:?} with {} sats",
+            market_id,
+            initial_treasury_sats
+        );
+    }
+
+    state_update.add_market_creation(MarketCreation { market: market.clone() });
 
     Ok(())
 }
@@ -1366,11 +1489,42 @@ fn apply_dimensional_market(
                 reason: format!("Dimensional market creation failed: {}", e),
             })?;
 
-    state_update.add_market_creation(MarketCreation {
-        market,
-        creator_address,
-        height,
-    });
+    // Calculate initial treasury from beta: b * ln(num_outcomes)
+    let num_outcomes = market.get_outcome_count() as f64;
+    let initial_treasury_sats = (market.b() * num_outcomes.ln()).ceil() as u64;
+
+    // Create the initial MarketTreasury UTXO if there's initial liquidity
+    if initial_treasury_sats > 0 {
+        use crate::state::markets::generate_market_treasury_address;
+        use crate::types::{BitcoinOutputContent, FilledOutput, OutPoint};
+
+        let market_id = market.id.clone();
+        let market_id_bytes = *market_id.as_bytes();
+        let treasury_address = generate_market_treasury_address(&market_id);
+
+        let outpoint = OutPoint::Market {
+            market_id: market_id_bytes,
+            block_height: height,
+        };
+        let output = FilledOutput::new(
+            treasury_address,
+            FilledOutputContent::MarketTreasury {
+                market_id: market_id_bytes,
+                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(initial_treasury_sats)),
+            },
+        );
+
+        state.insert_utxo_with_address_index(rwtxn, &outpoint, &output)?;
+        state.markets().set_market_utxo(rwtxn, &market_id, &outpoint)?;
+
+        tracing::debug!(
+            "Created initial MarketTreasury UTXO for dimensional market {:?} with {} sats",
+            market_id,
+            initial_treasury_sats
+        );
+    }
+
+    state_update.add_market_creation(MarketCreation { market: market.clone() });
 
     Ok(())
 }
@@ -1623,105 +1777,3 @@ fn revert_submit_vote_batch(
     Ok(())
 }
 
-/// Apply a claim author fees transaction.
-///
-/// This claims all accumulated trading fees for the market author,
-/// resetting the collected_fees counter to 0.
-fn apply_claim_author_fees(
-    state: &State,
-    rwtxn: &mut RwTxn,
-    filled_tx: &FilledTransaction,
-    height: u32,
-) -> Result<(), Error> {
-    let claim_data =
-        filled_tx
-            .claim_author_fees()
-            .ok_or_else(|| Error::InvalidTransaction {
-                reason: "Not a claim author fees transaction".to_string(),
-            })?;
-
-    let mut market = state
-        .markets()
-        .get_market(rwtxn, &claim_data.market_id)?
-        .ok_or_else(|| Error::InvalidSlotId {
-            reason: format!("Market {:?} does not exist", claim_data.market_id),
-        })?;
-
-    // Validate caller is the market creator
-    let caller_address = filled_tx
-        .spent_utxos
-        .first()
-        .ok_or_else(|| Error::InvalidTransaction {
-            reason: "Claim fees transaction must have inputs".to_string(),
-        })?
-        .address;
-
-    if caller_address != market.creator_address {
-        return Err(Error::InvalidTransaction {
-            reason: format!(
-                "Only market creator can claim fees. Expected {}, got {}",
-                market.creator_address, caller_address
-            ),
-        });
-    }
-
-    // Claim the fees (resets collected_fees to 0)
-    let fees_claimed = market
-        .claim_collected_fees(Some(filled_tx.transaction.txid().0), height as u64)
-        .map_err(|e| Error::InvalidSlotId {
-            reason: format!("Failed to claim fees: {:?}", e),
-        })?;
-
-    // Update market in database
-    state.markets().update_market(rwtxn, &market)?;
-
-    tracing::info!(
-        "Market author {} claimed {} sats in fees from market {}",
-        caller_address,
-        fees_claimed,
-        claim_data.market_id
-    );
-
-    Ok(())
-}
-
-/// Revert a claim author fees transaction.
-///
-/// This restores the collected_fees that were claimed by reverting
-/// to the previous market state version.
-fn revert_claim_author_fees(
-    state: &State,
-    rwtxn: &mut RwTxn,
-    filled_tx: &FilledTransaction,
-) -> Result<(), Error> {
-    let claim_data =
-        filled_tx
-            .claim_author_fees()
-            .ok_or_else(|| Error::InvalidTransaction {
-                reason: "Not a claim author fees transaction".to_string(),
-            })?;
-
-    let mut market = state
-        .markets()
-        .get_market(rwtxn, &claim_data.market_id)?
-        .ok_or_else(|| Error::InvalidSlotId {
-            reason: format!("Market {:?} does not exist", claim_data.market_id),
-        })?;
-
-    // Revert by removing the last state version
-    if market.state_history.len() > 1 {
-        market.state_history.pop();
-        if let Some(last_state) = market.state_history.last() {
-            market.current_state_hash = last_state.state_hash.clone();
-        }
-    }
-
-    state.markets().update_market(rwtxn, &market)?;
-
-    tracing::info!(
-        "Reverted claim author fees for market {}",
-        claim_data.market_id
-    );
-
-    Ok(())
-}

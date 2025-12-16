@@ -9,7 +9,7 @@ use crate::state::Error;
 use crate::state::UtxoManager;
 use crate::state::slots::{Decision, SlotId};
 use crate::types::hashes;
-use crate::types::{Address, OutPoint};
+use crate::types::{Address, GetBitcoinValue, OutPoint};
 use thiserror::Error as ThisError;
 
 pub const MAX_MARKET_OUTCOMES: usize = 256;
@@ -56,10 +56,6 @@ pub struct MarketStateVersion {
     pub shares: Array<f64, Ix1>,
     #[serde(with = "ndarray_1d_serde")]
     pub final_prices: Array<f64, Ix1>,
-    pub treasury: f64,
-    /// Accumulated trading fees collected for the market author (in satoshis)
-    #[serde(default)]
-    pub collected_fees: u64,
     pub timestamp: u64,
 }
 
@@ -74,12 +70,10 @@ impl MarketStateVersion {
         trading_fee: f64,
         shares: Array<f64, Ix1>,
         final_prices: Array<f64, Ix1>,
-        treasury: f64,
-        collected_fees: u64,
         timestamp: u64,
     ) -> Self {
         let state_data = format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{}:{}",
             version,
             previous_state_hash
                 .as_ref()
@@ -96,8 +90,6 @@ impl MarketStateVersion {
                 .map(|v| v.to_string())
                 .collect::<Vec<_>>()
                 .join(","),
-            treasury,
-            collected_fees,
         );
 
         let state_hash = MarketStateHash::from_data(&state_data);
@@ -113,8 +105,6 @@ impl MarketStateVersion {
             trading_fee,
             shares,
             final_prices,
-            treasury,
-            collected_fees,
             timestamp,
         }
     }
@@ -332,7 +322,7 @@ impl utoipa::PartialSchema for MarketId {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::Schema> {
         let schema = utoipa::openapi::ObjectBuilder::new()
             .description(Some("6-byte market identifier"))
-            .example(Some(serde_json::json!("0x0123456789ab")))
+            .examples([serde_json::json!("0x0123456789ab")])
             .build();
         utoipa::openapi::RefOr::T(utoipa::openapi::Schema::Object(schema))
     }
@@ -464,8 +454,6 @@ pub struct MarketSnapshot {
     pub shares: Array<f64, Ix1>,
     pub b: f64,
     pub trading_fee: f64,
-    pub treasury: f64,
-    pub collected_fees: u64,
 }
 
 impl BatchedMarketTrade {
@@ -481,8 +469,6 @@ impl BatchedMarketTrade {
             shares: market.shares().clone(),
             b: market.b(),
             trading_fee: market.trading_fee(),
-            treasury: market.treasury(),
-            collected_fees: market.collected_fees(),
         };
 
         Self {
@@ -501,7 +487,9 @@ impl BatchedMarketTrade {
     }
 
     /// Calculate trade cost and return both total cost and fee amount separately
-    pub fn calculate_trade_cost_with_fee(&self) -> Result<(f64, f64), MarketError> {
+    pub fn calculate_trade_cost_with_fee(
+        &self,
+    ) -> Result<(f64, f64), MarketError> {
         use crate::math::lmsr::LmsrService;
 
         let mut new_shares = self.market_snapshot.shares.clone();
@@ -585,7 +573,6 @@ pub struct MarketBuilder {
     dimension_specs: Option<Vec<DimensionSpec>>,
     b: f64,
     trading_fee: f64,
-    initial_liquidity_sats: Option<u64>,
 }
 
 impl MarketBuilder {
@@ -600,7 +587,6 @@ impl MarketBuilder {
             dimension_specs: None,
             b: 7.0,
             trading_fee: 0.005,
-            initial_liquidity_sats: None,
         }
     }
 
@@ -641,22 +627,6 @@ impl MarketBuilder {
     pub fn with_tags(mut self, tags: Vec<String>) -> Self {
         self.tags = tags;
         self
-    }
-
-    fn calculate_initial_liquidity(&self) -> u64 {
-        let n_outcomes = self.get_outcome_count() as f64;
-        let initial_liquidity = self.b * n_outcomes.ln();
-        initial_liquidity.ceil() as u64
-    }
-
-    fn get_outcome_count(&self) -> usize {
-        if let Some(specs) = &self.dimension_specs {
-            count_total_outcomes(specs)
-        } else if let Some((slots, has_residual)) = &self.categorical_slots {
-            slots.len() + if *has_residual { 1 } else { 0 }
-        } else {
-            2_usize.pow(self.decision_slots.len() as u32)
-        }
     }
 
     pub fn with_dimensions(
@@ -708,8 +678,6 @@ impl MarketBuilder {
                 (self.decision_slots.clone(), d_funcs, combos)
             };
 
-        let calculated_liquidity = self.calculate_initial_liquidity();
-
         Market::new(
             self.title,
             self.description,
@@ -723,7 +691,6 @@ impl MarketBuilder {
             created_at_height,
             expires_at_height,
             decisions,
-            Some(calculated_liquidity),
         )
     }
 }
@@ -1167,14 +1134,6 @@ fn calculate_max_tau(
         .unwrap_or(5)
 }
 
-fn count_total_outcomes(dimension_specs: &[DimensionSpec]) -> usize {
-    if dimension_specs.is_empty() {
-        return 2;
-    }
-
-    dimension_specs.len() * 2
-}
-
 impl Market {
     pub fn new(
         title: String,
@@ -1189,7 +1148,6 @@ impl Market {
         created_at_height: u64,
         expires_at_height: Option<u64>,
         decisions: &HashMap<SlotId, Decision>,
-        initial_liquidity_sats: Option<u64>,
     ) -> Result<Self, MarketError> {
         if decision_slots.is_empty() {
             return Err(MarketError::InvalidDimensions);
@@ -1219,17 +1177,7 @@ impl Market {
         let shares = Array::zeros(share_vector_length);
         let final_prices = Array::zeros(share_vector_length);
 
-        let n_outcomes = share_vector_length as f64;
         let final_b = b;
-
-        let calculated_treasury = b * n_outcomes.ln();
-
-        let initial_treasury =
-            if let Some(capital_sats) = initial_liquidity_sats {
-                (capital_sats as f64).max(calculated_treasury)
-            } else {
-                calculated_treasury
-            };
 
         let genesis_state = MarketStateVersion::new(
             0,
@@ -1241,8 +1189,6 @@ impl Market {
             trading_fee,
             shares.clone(),
             final_prices.clone(),
-            initial_treasury,
-            0, // collected_fees starts at 0
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1348,74 +1294,12 @@ impl Market {
         self.get_current_state().trading_fee
     }
 
-    /// Returns the total trading fees collected for the market author (in satoshis)
-    pub fn collected_fees(&self) -> u64 {
-        self.get_current_state().collected_fees
-    }
-
-    /// Claim all collected fees, resetting the counter to 0.
-    /// Returns the amount of fees claimed (in satoshis).
-    ///
-    /// Creates a new state version with collected_fees reset to 0.
-    pub fn claim_collected_fees(
-        &mut self,
-        transaction_id: Option<[u8; 32]>,
-        height: u64,
-    ) -> Result<u64, MarketError> {
-        let current_state = self.get_current_state();
-        let fees_to_claim = current_state.collected_fees;
-
-        if fees_to_claim == 0 {
-            return Err(MarketError::InvalidDimensions); // No fees to claim
-        }
-
-        let next_version = current_state.version + 1;
-
-        // Create new state with collected_fees reset to 0
-        let new_state_version = MarketStateVersion::new(
-            next_version,
-            Some(self.current_state_hash.clone()),
-            height,
-            transaction_id,
-            current_state.market_state,
-            current_state.b,
-            current_state.trading_fee,
-            current_state.shares.clone(),
-            current_state.final_prices.clone(),
-            current_state.treasury,
-            0, // Reset collected_fees to 0
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        );
-
-        let new_state_hash = new_state_version.get_state_hash().clone();
-
-        self.state_history.push(new_state_version);
-        self.current_state_hash = new_state_hash;
-
-        self.calculate_size();
-
-        tracing::info!(
-            "Claimed {} sats in fees from market {}",
-            fees_to_claim,
-            self.id
-        );
-
-        Ok(fees_to_claim)
-    }
-
     pub fn shares(&self) -> &Array<f64, Ix1> {
         &self.get_current_state().shares
     }
 
     pub fn final_prices(&self) -> &Array<f64, Ix1> {
         &self.get_current_state().final_prices
-    }
-
-    pub fn treasury(&self) -> f64 {
-        self.get_current_state().treasury
     }
 
     pub fn create_new_state_version(
@@ -1427,32 +1311,6 @@ impl Market {
         new_trading_fee: Option<f64>,
         new_shares: Option<Array<f64, Ix1>>,
         new_final_prices: Option<Array<f64, Ix1>>,
-        new_treasury: Option<f64>,
-    ) -> Result<MarketStateHash, MarketError> {
-        self.create_new_state_version_with_fees(
-            transaction_id,
-            height,
-            new_market_state,
-            new_b,
-            new_trading_fee,
-            new_shares,
-            new_final_prices,
-            new_treasury,
-            None,
-        )
-    }
-
-    pub fn create_new_state_version_with_fees(
-        &mut self,
-        transaction_id: Option<[u8; 32]>,
-        height: u64,
-        new_market_state: Option<MarketState>,
-        new_b: Option<f64>,
-        new_trading_fee: Option<f64>,
-        new_shares: Option<Array<f64, Ix1>>,
-        new_final_prices: Option<Array<f64, Ix1>>,
-        new_treasury: Option<f64>,
-        additional_fees: Option<u64>,
     ) -> Result<MarketStateHash, MarketError> {
         let current_state = self.get_current_state();
         let next_version = current_state.version + 1;
@@ -1464,9 +1322,6 @@ impl Market {
         let shares = new_shares.unwrap_or_else(|| current_state.shares.clone());
         let final_prices = new_final_prices
             .unwrap_or_else(|| current_state.final_prices.clone());
-        let treasury = new_treasury.unwrap_or(current_state.treasury);
-        let collected_fees = current_state.collected_fees
-            + additional_fees.unwrap_or(0);
 
         if b <= 0.0 {
             return Err(MarketError::InvalidBeta(b));
@@ -1495,8 +1350,6 @@ impl Market {
             trading_fee,
             shares,
             final_prices,
-            treasury,
-            collected_fees,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1511,22 +1364,6 @@ impl Market {
         self.calculate_size();
 
         Ok(new_state_hash)
-    }
-
-    pub fn calc_treasury(&self) -> f64 {
-        use crate::math::lmsr::LmsrService;
-        let current_state = self.get_current_state();
-        LmsrService::calculate_treasury(&current_state.shares, current_state.b)
-            .unwrap_or_else(|_| {
-                current_state.b * (current_state.shares.len() as f64).ln()
-            })
-    }
-
-    pub fn calc_treasury_with_shares(&self, shares: &Array<f64, Ix1>) -> f64 {
-        use crate::math::lmsr::LmsrService;
-        let current_state = self.get_current_state();
-        LmsrService::calculate_treasury(shares, current_state.b)
-            .unwrap_or_else(|_| current_state.b * (shares.len() as f64).ln())
     }
 
     pub fn current_prices(&self) -> Array<f64, Ix1> {
@@ -1585,18 +1422,6 @@ impl Market {
             return Err(MarketError::InvalidDimensions);
         }
 
-        let current_state = self.get_current_state();
-        let new_treasury = crate::math::lmsr::calculate_cost(
-            &new_shares.to_vec(),
-            current_state.b,
-        )
-        .map_err(|e| {
-            MarketError::DatabaseError(format!(
-                "LMSR calculation failed: {:?}",
-                e
-            ))
-        })?;
-
         self.create_new_state_version(
             transaction_id,
             height,
@@ -1605,7 +1430,6 @@ impl Market {
             None,
             Some(new_shares),
             None,
-            Some(new_treasury),
         )
     }
 
@@ -1669,6 +1493,14 @@ impl Market {
 
         use crate::math::lmsr::Lmsr;
         let lmsr = Lmsr::new(current_state.shares.len());
+        let current_cost = lmsr
+            .cost_function(current_state.b, &current_state.shares.view())
+            .map_err(|e| {
+                MarketError::DatabaseError(format!(
+                    "LMSR calculation failed: {:?}",
+                    e
+                ))
+            })?;
         let new_cost = lmsr
             .cost_function(new_b, &current_state.shares.view())
             .map_err(|e| {
@@ -1678,7 +1510,7 @@ impl Market {
                 ))
             })?;
 
-        Ok(new_cost - current_state.treasury)
+        Ok(new_cost - current_cost)
     }
 
     pub fn cancel_market(
@@ -1687,17 +1519,15 @@ impl Market {
         height: u64,
     ) -> Result<MarketStateHash, MarketError> {
         match self.state() {
-            MarketState::Trading if self.treasury() == 0.0 => self
-                .create_new_state_version(
-                    transaction_id,
-                    height,
-                    Some(MarketState::Cancelled),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
+            MarketState::Trading => self.create_new_state_version(
+                transaction_id,
+                height,
+                Some(MarketState::Cancelled),
+                None,
+                None,
+                None,
+                None,
+            ),
             current_state => Err(MarketError::InvalidStateTransition {
                 from: current_state,
                 to: MarketState::Cancelled,
@@ -1719,7 +1549,6 @@ impl Market {
                 None,
                 None,
                 None,
-                None,
             ),
             current_state => Err(MarketError::InvalidStateTransition {
                 from: current_state,
@@ -1736,28 +1565,57 @@ impl Market {
     ///
     /// # Arguments
     /// * `slot_outcomes` - Map of SlotId to consensus outcome value (0.0-1.0)
+    /// * `decisions` - Map of SlotId to Decision (needed for scaled decision handling)
     ///
     /// # Returns
     /// Array of final prices, one per market outcome, summing to 1.0
     pub fn calculate_final_prices(
         &self,
         slot_outcomes: &std::collections::HashMap<SlotId, f64>,
+        decisions: &HashMap<SlotId, Decision>,
     ) -> Result<Array<f64, Ix1>, MarketError> {
         // Build resolved combo from slot outcomes
-        // outcome > 0.7 → 1 (YES/TRUE)
-        // outcome < 0.3 → 0 (NO/FALSE)
-        // otherwise → 2 (ABSTAIN/UNCERTAIN)
+        // For binary decisions: outcome > 0.7 → 1 (YES), outcome < 0.3 → 0 (NO), else 2 (ABSTAIN)
+        // For scaled decisions: outcome maps to [min, max] range index
         let resolved_combo: Vec<usize> = self
             .decision_slots
             .iter()
             .map(|slot_id| {
-                let outcome = slot_outcomes.get(slot_id).copied().unwrap_or(0.5);
-                if outcome > 0.7 {
-                    1
-                } else if outcome < 0.3 {
-                    0
+                let outcome =
+                    slot_outcomes.get(slot_id).copied().unwrap_or(0.5);
+
+                // Check if this is a scaled decision
+                if let Some(decision) = decisions.get(slot_id) {
+                    if decision.is_scaled {
+                        // For scaled decisions, map 0.0-1.0 to the [min, max] range
+                        let min = decision.min.unwrap_or(0) as f64;
+                        let max = decision.max.unwrap_or(100) as f64;
+                        let range = max - min;
+
+                        // Map outcome to scaled index
+                        // outcome 0.0 → 0, outcome 1.0 → (max-min)
+                        let scaled_index = (outcome * range).round() as usize;
+                        // Clamp to valid range
+                        scaled_index.min((max - min) as usize)
+                    } else {
+                        // Binary decision: use threshold logic
+                        if outcome > 0.7 {
+                            1
+                        } else if outcome < 0.3 {
+                            0
+                        } else {
+                            2 // ABSTAIN
+                        }
+                    }
                 } else {
-                    2
+                    // Default to binary if decision not found
+                    if outcome > 0.7 {
+                        1
+                    } else if outcome < 0.3 {
+                        0
+                    } else {
+                        2
+                    }
                 }
             })
             .collect();
@@ -1780,13 +1638,14 @@ impl Market {
             // Check for partial matches - outcomes that are consistent with
             // the resolved combo (where ABSTAIN acts as wildcard)
             for (i, state_combo) in self.state_combos.iter().enumerate() {
-                let matches = resolved_combo.iter().zip(state_combo.iter()).all(
-                    |(resolved, state)| {
+                let matches = resolved_combo
+                    .iter()
+                    .zip(state_combo.iter())
+                    .all(|(resolved, state)| {
                         // ABSTAIN (2) in resolved means any value is acceptable
                         // Otherwise must match exactly
                         *resolved == 2 || resolved == state
-                    },
-                );
+                    });
                 if matches {
                     prices[i] = 1.0;
                 }
@@ -1948,6 +1807,14 @@ pub struct MarketsDatabase {
         DatabaseUnique<SerdeBincode<SlotId>, SerdeBincode<Vec<MarketId>>>,
     share_accounts:
         DatabaseUnique<SerdeBincode<Address>, SerdeBincode<ShareAccount>>,
+    /// Maps MarketId -> Current UTXO OutPoint for the market's treasury
+    market_utxos: DatabaseUnique<SerdeBincode<[u8; 6]>, SerdeBincode<OutPoint>>,
+    /// Maps MarketId -> Current UTXO OutPoint for accumulated author fees
+    market_author_fee_utxos: DatabaseUnique<SerdeBincode<[u8; 6]>, SerdeBincode<OutPoint>>,
+    /// Maps MarketId -> Pending treasury UTXOs from transactions (not yet consolidated)
+    pending_treasury_utxos: DatabaseUnique<SerdeBincode<[u8; 6]>, SerdeBincode<Vec<OutPoint>>>,
+    /// Maps MarketId -> Pending author fee UTXOs from transactions (not yet consolidated)
+    pending_author_fee_utxos: DatabaseUnique<SerdeBincode<[u8; 6]>, SerdeBincode<Vec<OutPoint>>>,
 }
 
 impl MarketsDatabase {
@@ -2139,7 +2006,7 @@ impl MarketsDatabase {
     ) -> Result<(), Error> {
         crate::validation::MarketStateValidator::validate_market_state_transition(from_state, to_state)
     }
-    pub const NUM_DBS: u32 = 5;
+    pub const NUM_DBS: u32 = 9;
 
     pub fn new(env: &Env, rwtxn: &mut RwTxn) -> Result<Self, Error> {
         let markets = DatabaseUnique::create(env, rwtxn, "markets")?;
@@ -2150,6 +2017,14 @@ impl MarketsDatabase {
         let slot_index = DatabaseUnique::create(env, rwtxn, "markets_by_slot")?;
         let share_accounts =
             DatabaseUnique::create(env, rwtxn, "share_accounts")?;
+        let market_utxos =
+            DatabaseUnique::create(env, rwtxn, "market_utxos")?;
+        let market_author_fee_utxos =
+            DatabaseUnique::create(env, rwtxn, "market_author_fee_utxos")?;
+        let pending_treasury_utxos =
+            DatabaseUnique::create(env, rwtxn, "pending_treasury_utxos")?;
+        let pending_author_fee_utxos =
+            DatabaseUnique::create(env, rwtxn, "pending_author_fee_utxos")?;
 
         Ok(MarketsDatabase {
             markets,
@@ -2157,6 +2032,10 @@ impl MarketsDatabase {
             expiry_index,
             slot_index,
             share_accounts,
+            market_utxos,
+            market_author_fee_utxos,
+            pending_treasury_utxos,
+            pending_author_fee_utxos,
         })
     }
 
@@ -2517,7 +2396,8 @@ impl MarketsDatabase {
         current_height: u32,
     ) -> Result<Vec<(MarketId, MarketPayoutSummary)>, Error> {
         let mut results = Vec::new();
-        let trading_markets = self.get_markets_by_state(txn, MarketState::Trading)?;
+        let trading_markets =
+            self.get_markets_by_state(txn, MarketState::Trading)?;
 
         for mut market in trading_markets {
             if market.decision_slots.is_empty() {
@@ -2525,19 +2405,31 @@ impl MarketsDatabase {
             }
 
             let mut all_slots_resolved = true;
-            let mut slot_outcomes: std::collections::HashMap<SlotId, f64> = std::collections::HashMap::new();
+            let mut slot_outcomes: std::collections::HashMap<SlotId, f64> =
+                std::collections::HashMap::new();
+            let mut decisions: HashMap<SlotId, Decision> = HashMap::new();
 
             for slot_id in &market.decision_slots {
-                let slot_state = slots_db.get_slot_current_state(txn, *slot_id)?;
+                let slot_state =
+                    slots_db.get_slot_current_state(txn, *slot_id)?;
 
                 if slot_state != crate::state::slots::SlotState::Resolved {
                     all_slots_resolved = false;
                     break;
                 }
 
-                if let Some(history) = slots_db.get_slot_state_history(txn, *slot_id)? {
+                if let Some(history) =
+                    slots_db.get_slot_state_history(txn, *slot_id)?
+                {
                     if let Some(outcome) = history.get_consensus_outcome() {
                         slot_outcomes.insert(*slot_id, outcome);
+                    }
+                }
+
+                // Get decision for scaled handling
+                if let Some(slot) = slots_db.get_slot(txn, *slot_id)? {
+                    if let Some(decision) = slot.decision {
+                        decisions.insert(*slot_id, decision);
                     }
                 }
             }
@@ -2546,13 +2438,18 @@ impl MarketsDatabase {
                 let market_id = market.id.clone();
 
                 // Calculate final prices from slot outcomes
-                let final_prices = market.calculate_final_prices(&slot_outcomes).map_err(|e| {
-                    Error::DatabaseError(format!("Failed to calculate final prices: {:?}", e))
-                })?;
+                let final_prices = market
+                    .calculate_final_prices(&slot_outcomes, &decisions)
+                    .map_err(|e| {
+                        Error::DatabaseError(format!(
+                            "Failed to calculate final prices: {:?}",
+                            e
+                        ))
+                    })?;
 
                 // Create intermediate state with final prices (still Trading) to enable payout calculation
                 market
-                    .create_new_state_version_with_fees(
+                    .create_new_state_version(
                         None,
                         current_height as u64,
                         None, // Keep Trading temporarily
@@ -2560,15 +2457,21 @@ impl MarketsDatabase {
                         None,
                         None,
                         Some(final_prices),
-                        None,
-                        None,
                     )
                     .map_err(|e| {
-                        Error::DatabaseError(format!("Failed to set final prices: {:?}", e))
+                        Error::DatabaseError(format!(
+                            "Failed to set final prices: {:?}",
+                            e
+                        ))
                     })?;
 
                 // Calculate payouts based on shares and final prices
-                let payout_summary = self.calculate_share_payouts(txn, &market, current_height as u64)?;
+                let payout_summary = self.calculate_share_payouts(
+                    txn,
+                    state,
+                    &market,
+                    current_height as u64,
+                )?;
 
                 // Apply payouts (creates Bitcoin UTXOs, removes shares)
                 self.apply_automatic_share_payouts(
@@ -2579,9 +2482,9 @@ impl MarketsDatabase {
                     current_height as u64,
                 )?;
 
-                // Transition directly to Ossified with zero treasury and zero collected_fees
+                // Transition directly to Ossified
                 market
-                    .create_new_state_version_with_fees(
+                    .create_new_state_version(
                         None,
                         current_height as u64,
                         Some(MarketState::Ossified),
@@ -2589,11 +2492,12 @@ impl MarketsDatabase {
                         None,
                         None,
                         None,
-                        Some(0.0), // Treasury emptied
-                        Some(0),   // Collected fees distributed
                     )
                     .map_err(|e| {
-                        Error::DatabaseError(format!("Failed to ossify market: {:?}", e))
+                        Error::DatabaseError(format!(
+                            "Failed to ossify market: {:?}",
+                            e
+                        ))
                     })?;
 
                 self.update_market(txn, &market)?;
@@ -2877,9 +2781,6 @@ impl MarketsDatabase {
                 }
             }
 
-            let new_treasury =
-                market.calc_treasury_with_shares(&new_shares_array);
-
             market
                 .create_new_state_version(
                     None,
@@ -2889,7 +2790,6 @@ impl MarketsDatabase {
                     None,
                     Some(new_shares_array),
                     None,
-                    Some(new_treasury),
                 )
                 .map_err(|e| {
                     Error::DatabaseError(format!(
@@ -2908,9 +2808,8 @@ impl MarketsDatabase {
             })?;
 
             tracing::debug!(
-                "Successfully updated market {} with new treasury: {:.4}",
+                "Successfully updated market {} with new shares",
                 market_id,
-                market.treasury()
             );
         }
 
@@ -3137,23 +3036,55 @@ impl MarketsDatabase {
     }
 
     /// Calculate share payouts for a resolved market
+    ///
+    /// Payout formula: payout_i = (shares_i * final_price_i / total_weighted_shares) * treasury
+    /// where total_weighted_shares = sum over all positions of (shares * final_price)
+    ///
+    /// This ensures the entire treasury is distributed proportionally to winning positions.
     pub fn calculate_share_payouts(
         &self,
         txn: &RoTxn,
+        state: &crate::state::State,
         market: &Market,
         block_height: u64,
     ) -> Result<MarketPayoutSummary, Error> {
-        let treasury_sats = market.treasury() as u64;
+        let treasury_sats = self.get_market_treasury_sats(txn, state, &market.id)?;
         let final_prices = market.final_prices();
 
         let shareholders = self.get_shareholders_for_market(txn, &market.id)?;
+
+        // Calculate total weighted shares for normalization
+        let total_weighted_shares: f64 = shareholders
+            .iter()
+            .flat_map(|(_, positions)| positions.iter())
+            .map(|(outcome_index, shares)| {
+                let final_price = final_prices[*outcome_index as usize];
+                shares * final_price
+            })
+            .sum();
+
+        // If no winning positions, nothing to distribute
+        if total_weighted_shares <= 0.0 {
+            return Ok(MarketPayoutSummary {
+                market_id: market.id.clone(),
+                treasury_distributed: 0,
+                author_fees_distributed: 0,
+                shareholder_count: 0,
+                payouts: Vec::new(),
+                block_height,
+            });
+        }
+
         let mut payouts = Vec::new();
         let mut total_distributed: u64 = 0;
 
         for (address, positions) in shareholders {
             for (outcome_index, shares) in positions {
                 let final_price = final_prices[outcome_index as usize];
-                let payout_sats = (shares * final_price * treasury_sats as f64).floor() as u64;
+                let weighted_shares = shares * final_price;
+                let payout_sats = (weighted_shares / total_weighted_shares
+                    * treasury_sats as f64)
+                    .floor() as u64;
 
                 if payout_sats > 0 {
                     payouts.push(SharePayoutRecord {
@@ -3183,10 +3114,13 @@ impl MarketsDatabase {
             }
         }
 
+        // Get author fees from Author Fee UTXO
+        let author_fees_distributed = self.get_author_fee_sats(txn, state, &market.id)?;
+
         Ok(MarketPayoutSummary {
             market_id: market.id.clone(),
             treasury_distributed: total_distributed,
-            author_fees_distributed: market.collected_fees(),
+            author_fees_distributed,
             shareholder_count: payouts.len() as u32,
             payouts,
             block_height,
@@ -3194,6 +3128,7 @@ impl MarketsDatabase {
     }
 
     /// Apply automatic share payouts - creates Bitcoin UTXOs for shareholders
+    /// Always consumes the Market UTXO when called, even if no payouts to distribute
     pub fn apply_automatic_share_payouts(
         &self,
         state: &crate::state::State,
@@ -3202,11 +3137,9 @@ impl MarketsDatabase {
         market: &Market,
         block_height: u64,
     ) -> Result<(), Error> {
-        use crate::types::{FilledOutput, FilledOutputContent, BitcoinOutputContent};
-
-        if payout_summary.payouts.is_empty() && payout_summary.author_fees_distributed == 0 {
-            return Ok(());
-        }
+        use crate::types::{
+            BitcoinOutputContent, FilledOutput, FilledOutputContent,
+        };
 
         let mut sequence = 0u32;
 
@@ -3242,7 +3175,7 @@ impl MarketsDatabase {
             sequence += 1;
         }
 
-        // Auto-pay collected fees to market creator
+        // Pay accumulated author fees from Author Fee UTXO to market creator
         if payout_summary.author_fees_distributed > 0 {
             let fee_outpoint = generate_share_payout_outpoint(
                 &payout_summary.market_id,
@@ -3254,12 +3187,40 @@ impl MarketsDatabase {
             let fee_output = FilledOutput {
                 address: market.creator_address,
                 content: FilledOutputContent::Bitcoin(BitcoinOutputContent(
-                    bitcoin::Amount::from_sat(payout_summary.author_fees_distributed),
+                    bitcoin::Amount::from_sat(
+                        payout_summary.author_fees_distributed,
+                    ),
                 )),
                 memo: vec![],
             };
 
-            state.insert_utxo_with_address_index(txn, &fee_outpoint, &fee_output)?;
+            state.insert_utxo_with_address_index(
+                txn,
+                &fee_outpoint,
+                &fee_output,
+            )?;
+        }
+
+        // Consume the Market UTXO (treasury is now distributed to shareholders)
+        if let Some(market_utxo) = self.get_market_utxo(txn, &payout_summary.market_id)? {
+            state.delete_utxo_with_address_index(txn, &market_utxo)?;
+            self.clear_market_utxo(txn, &payout_summary.market_id)?;
+            tracing::debug!(
+                "Consumed market UTXO {:?} during payout for market {}",
+                market_utxo,
+                payout_summary.market_id
+            );
+        }
+
+        // Consume the Author Fee UTXO (fees now paid to market creator)
+        if let Some(fee_utxo) = self.get_author_fee_utxo(txn, &payout_summary.market_id)? {
+            state.delete_utxo_with_address_index(txn, &fee_utxo)?;
+            self.clear_author_fee_utxo(txn, &payout_summary.market_id)?;
+            tracing::debug!(
+                "Consumed author fee UTXO {:?} during payout for market {}",
+                fee_utxo,
+                payout_summary.market_id
+            );
         }
 
         tracing::info!(
@@ -3329,6 +3290,232 @@ impl MarketsDatabase {
 
         Ok(())
     }
+
+    /// Get the current UTXO OutPoint for a market's treasury
+    pub fn get_market_utxo(
+        &self,
+        txn: &RoTxn,
+        market_id: &MarketId,
+    ) -> Result<Option<OutPoint>, Error> {
+        Ok(self.market_utxos.try_get(txn, market_id.as_bytes())?)
+    }
+
+    /// Set the current UTXO OutPoint for a market's treasury
+    pub fn set_market_utxo(
+        &self,
+        txn: &mut RwTxn,
+        market_id: &MarketId,
+        outpoint: &OutPoint,
+    ) -> Result<(), Error> {
+        self.market_utxos.put(txn, market_id.as_bytes(), outpoint)?;
+        Ok(())
+    }
+
+    /// Clear the market UTXO (when market is fully drained/ossified)
+    pub fn clear_market_utxo(
+        &self,
+        txn: &mut RwTxn,
+        market_id: &MarketId,
+    ) -> Result<(), Error> {
+        self.market_utxos.delete(txn, market_id.as_bytes())?;
+        Ok(())
+    }
+
+    /// Get the actual treasury balance for a market from its UTXO
+    pub fn get_market_treasury_sats(
+        &self,
+        txn: &RoTxn,
+        state: &crate::state::State,
+        market_id: &MarketId,
+    ) -> Result<u64, Error> {
+        match self.get_market_utxo(txn, market_id)? {
+            Some(outpoint) => {
+                let utxo = state
+                    .utxos
+                    .try_get(txn, &outpoint)?
+                    .ok_or(Error::NoUtxo { outpoint })?;
+                Ok(utxo.get_bitcoin_value().to_sat())
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Get the current UTXO OutPoint for a market's author fees
+    pub fn get_author_fee_utxo(
+        &self,
+        txn: &RoTxn,
+        market_id: &MarketId,
+    ) -> Result<Option<OutPoint>, Error> {
+        Ok(self.market_author_fee_utxos.try_get(txn, market_id.as_bytes())?)
+    }
+
+    /// Set the current UTXO OutPoint for a market's author fees
+    pub fn set_author_fee_utxo(
+        &self,
+        txn: &mut RwTxn,
+        market_id: &MarketId,
+        outpoint: &OutPoint,
+    ) -> Result<(), Error> {
+        self.market_author_fee_utxos.put(txn, market_id.as_bytes(), outpoint)?;
+        Ok(())
+    }
+
+    /// Clear the author fee UTXO (when fees are paid out to author)
+    pub fn clear_author_fee_utxo(
+        &self,
+        txn: &mut RwTxn,
+        market_id: &MarketId,
+    ) -> Result<(), Error> {
+        self.market_author_fee_utxos.delete(txn, market_id.as_bytes())?;
+        Ok(())
+    }
+
+    /// Get the actual author fee balance for a market from its UTXO
+    pub fn get_author_fee_sats(
+        &self,
+        txn: &RoTxn,
+        state: &crate::state::State,
+        market_id: &MarketId,
+    ) -> Result<u64, Error> {
+        match self.get_author_fee_utxo(txn, market_id)? {
+            Some(outpoint) => {
+                let utxo = state
+                    .utxos
+                    .try_get(txn, &outpoint)?
+                    .ok_or(Error::NoUtxo { outpoint })?;
+                Ok(utxo.get_bitcoin_value().to_sat())
+            }
+            None => Ok(0),
+        }
+    }
+
+    /// Register a pending treasury UTXO from a BuyShares transaction
+    pub fn add_pending_treasury_utxo(
+        &self,
+        txn: &mut RwTxn,
+        market_id: &MarketId,
+        outpoint: &OutPoint,
+    ) -> Result<(), Error> {
+        let mut pending = self
+            .pending_treasury_utxos
+            .try_get(txn, market_id.as_bytes())?
+            .unwrap_or_default();
+        pending.push(*outpoint);
+        self.pending_treasury_utxos.put(txn, market_id.as_bytes(), &pending)?;
+        Ok(())
+    }
+
+    /// Register a pending author fee UTXO from a BuyShares transaction
+    pub fn add_pending_author_fee_utxo(
+        &self,
+        txn: &mut RwTxn,
+        market_id: &MarketId,
+        outpoint: &OutPoint,
+    ) -> Result<(), Error> {
+        let mut pending = self
+            .pending_author_fee_utxos
+            .try_get(txn, market_id.as_bytes())?
+            .unwrap_or_default();
+        pending.push(*outpoint);
+        self.pending_author_fee_utxos.put(txn, market_id.as_bytes(), &pending)?;
+        Ok(())
+    }
+
+    /// Get all pending treasury UTXOs for a market
+    pub fn get_pending_treasury_utxos(
+        &self,
+        txn: &RoTxn,
+        market_id: &MarketId,
+    ) -> Result<Vec<OutPoint>, Error> {
+        Ok(self
+            .pending_treasury_utxos
+            .try_get(txn, market_id.as_bytes())?
+            .unwrap_or_default())
+    }
+
+    /// Get all pending author fee UTXOs for a market
+    pub fn get_pending_author_fee_utxos(
+        &self,
+        txn: &RoTxn,
+        market_id: &MarketId,
+    ) -> Result<Vec<OutPoint>, Error> {
+        Ok(self
+            .pending_author_fee_utxos
+            .try_get(txn, market_id.as_bytes())?
+            .unwrap_or_default())
+    }
+
+    /// Clear pending treasury UTXOs after consolidation
+    pub fn clear_pending_treasury_utxos(
+        &self,
+        txn: &mut RwTxn,
+        market_id: &MarketId,
+    ) -> Result<(), Error> {
+        self.pending_treasury_utxos.delete(txn, market_id.as_bytes())?;
+        Ok(())
+    }
+
+    /// Clear pending author fee UTXOs after consolidation
+    pub fn clear_pending_author_fee_utxos(
+        &self,
+        txn: &mut RwTxn,
+        market_id: &MarketId,
+    ) -> Result<(), Error> {
+        self.pending_author_fee_utxos.delete(txn, market_id.as_bytes())?;
+        Ok(())
+    }
+
+    /// Get all market IDs that have pending UTXOs to consolidate
+    pub fn get_markets_with_pending_utxos(
+        &self,
+        txn: &RoTxn,
+    ) -> Result<HashSet<[u8; 6]>, Error> {
+        let mut markets = HashSet::new();
+
+        let mut treasury_iter = self.pending_treasury_utxos.iter(txn)?;
+        while let Some((market_id_bytes, _)) = treasury_iter.next()? {
+            markets.insert(market_id_bytes);
+        }
+
+        let mut fee_iter = self.pending_author_fee_utxos.iter(txn)?;
+        while let Some((market_id_bytes, _)) = fee_iter.next()? {
+            markets.insert(market_id_bytes);
+        }
+
+        Ok(markets)
+    }
+}
+
+/// Generate a deterministic address for market treasury
+/// This address is not spendable by any user - it's a system address
+pub fn generate_market_treasury_address(market_id: &MarketId) -> Address {
+    use blake3::Hasher;
+
+    let mut hasher = Hasher::new();
+    hasher.update(b"MARKET_TREASURY_ADDRESS");
+    hasher.update(&market_id.0);
+
+    let hash = hasher.finalize();
+    let mut address_bytes = [0u8; 20];
+    address_bytes.copy_from_slice(&hash.as_bytes()[0..20]);
+
+    Address(address_bytes)
+}
+
+/// Generate a deterministic address for market author fees
+/// This address is not spendable by any user - it's a system address
+pub fn generate_market_author_fee_address(market_id: &MarketId) -> Address {
+    use blake3::Hasher;
+
+    let mut hasher = Hasher::new();
+    hasher.update(b"MARKET_AUTHOR_FEE_ADDRESS");
+    hasher.update(&market_id.0);
+
+    let hash = hasher.finalize();
+    let mut address_bytes = [0u8; 20];
+    address_bytes.copy_from_slice(&hash.as_bytes()[0..20]);
+
+    Address(address_bytes)
 }
 
 /// Generate a deterministic outpoint for share payouts
@@ -3501,8 +3688,6 @@ mod tests {
             shares,
             b: 10.0,
             trading_fee: 0.01,
-            treasury: 1000.0,
-            collected_fees: 0,
         };
 
         let trade = BatchedMarketTrade {
@@ -3663,4 +3848,5 @@ mod tests {
             "Adequate liquidity should result in positive, finite shares"
         );
     }
+
 }

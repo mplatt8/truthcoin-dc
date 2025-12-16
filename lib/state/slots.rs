@@ -415,7 +415,6 @@ impl SlotStateHistory {
     ) -> Result<(), Error> {
         self.transition_to_voting(voting_period, block_height as u32)
     }
-
 }
 
 #[derive(
@@ -519,8 +518,6 @@ pub struct Dbs {
         DatabaseUnique<SerdeBincode<u32>, SerdeBincode<BTreeSet<Slot>>>,
     claimed_slot_ids:
         DatabaseUnique<SerdeBincode<u32>, SerdeBincode<BTreeSet<SlotId>>>,
-    /// Slot state histories: SlotId -> SlotStateHistory
-    /// SINGLE SOURCE OF TRUTH for slot states
     slot_state_histories:
         DatabaseUnique<SerdeBincode<SlotId>, SerdeBincode<SlotStateHistory>>,
     config: SlotConfig,
@@ -571,14 +568,12 @@ impl Dbs {
         Ok((current, current + FUTURE_PERIODS - 1))
     }
 
-    // Optimized declining pattern: 500→475→450→...→25 over 20 future periods
     #[inline]
     const fn calculate_available_slots(
         &self,
         period: u32,
         current_period: u32,
     ) -> u64 {
-        // Fast path for historical periods (ossified or in voting)
         if period < current_period {
             return 0;
         }
@@ -588,7 +583,6 @@ impl Dbs {
             return 0;
         }
 
-        // Optimized calculation using const arithmetic
         INITIAL_SLOTS_PER_PERIOD
             .saturating_sub((offset as u64) * SLOTS_DECLINING_RATE)
     }
@@ -638,7 +632,6 @@ impl Dbs {
                 let empty_period: BTreeSet<Slot> = BTreeSet::new();
                 self.period_slots.put(rwtxn, &period, &empty_period)?;
 
-                // Initialize claimed_slot_ids for this period as well
                 let empty_claimed: BTreeSet<SlotId> = BTreeSet::new();
                 self.claimed_slot_ids.put(rwtxn, &period, &empty_claimed)?;
             }
@@ -692,8 +685,6 @@ impl Dbs {
     }
 
     pub fn block_height_to_testing_period(&self, block_height: u32) -> u32 {
-        // Block heights are 0-indexed and directly map to periods
-        // Heights 0-9 = period 1, 10-19 = period 2, etc.
         if self.config.testing_blocks_per_period == 0 {
             0
         } else {
@@ -709,9 +700,6 @@ impl Dbs {
         quarter_to_string(quarter_idx, &self.config)
     }
 
-    /// Check if a slot period is ossified (past voting and resolution periods)
-    /// Ossification occurs 4 periods after voting ends (7 periods after claim)
-    /// Voting ends at period N+3, so ossification is at N+7
     pub fn is_period_ossified(
         &self,
         slot_period: u32,
@@ -721,17 +709,9 @@ impl Dbs {
         let current_period = self
             .get_current_period(current_ts, current_height)
             .unwrap_or(0);
-        // Ossified when current_period > slot_period + 7
         current_period > slot_period.saturating_add(7)
     }
 
-    /// REMOVED: is_period_in_voting()
-    /// This function duplicated voting logic and violated single source of truth.
-    /// Use SlotStateHistory (get_slot_current_state) as the authoritative source.
-    /// Bitcoin Hivemind: Slot state is stored, not calculated.
-
-    /// Check if a specific slot is ossified
-    /// Delegates to is_period_ossified for single source of truth
     pub fn is_slot_ossified(
         &self,
         slot_id: SlotId,
@@ -742,9 +722,6 @@ impl Dbs {
         self.is_period_ossified(period, current_ts, current_height)
     }
 
-    /// Check if a specific slot is in voting state
-    /// Uses SlotStateHistory as the SINGLE SOURCE OF TRUTH
-    /// Bitcoin Hivemind: Slot state is authoritative, not calculated
     pub fn is_slot_in_voting(
         &self,
         rotxn: &RoTxn,
@@ -753,8 +730,6 @@ impl Dbs {
         Ok(self.get_slot_current_state(rotxn, slot_id)? == SlotState::Voting)
     }
 
-    /// Get all ossified slots across all periods
-    /// Delegates to is_period_ossified for consistency
     pub fn get_ossified_slots(
         &self,
         rotxn: &sneed::RoTxn,
@@ -766,7 +741,6 @@ impl Dbs {
         let mut iter = self.period_slots.iter(rotxn)?;
         while let Some((period, slots)) = iter.next()? {
             if self.is_period_ossified(period, current_ts, current_height) {
-                // These slots are ossified (voting has ended)
                 ossified_slots.extend(slots.iter().cloned());
             }
         }
@@ -774,8 +748,6 @@ impl Dbs {
         Ok(ossified_slots)
     }
 
-    /// Validate that a slot can be claimed without actually claiming it
-    /// This is the single source of truth for slot claim validation
     pub fn validate_slot_claim(
         &self,
         rotxn: &RoTxn,
@@ -792,14 +764,10 @@ impl Dbs {
         if self.is_slot_ossified(slot_id, current_ts, current_height) {
             return Err(Error::SlotNotAvailable {
                 slot_id,
-                reason: format!(
-                    "Slot period {} is ossified (voting has ended)",
-                    period_index
-                ),
+                reason: format!("Slot period {} is ossified", period_index),
             });
         }
 
-        // Check if slot is in voting state using SlotStateHistory (source of truth)
         if self.is_slot_in_voting(rotxn, slot_id)? {
             return Err(Error::SlotNotAvailable {
                 slot_id,
@@ -871,8 +839,6 @@ impl Dbs {
             }
         }
 
-        // Check if slot is already claimed using O(log n) BTreeSet lookup
-        // This is a significant performance improvement over the previous O(n) linear search
         let claimed_slots = self
             .claimed_slot_ids
             .try_get(rotxn, &period_index)?
@@ -893,7 +859,6 @@ impl Dbs {
         current_ts: u64,
         current_height: Option<u32>,
     ) -> Result<(), Error> {
-        // Use the single source of truth for validation
         self.validate_slot_claim(
             rwtxn,
             slot_id,
@@ -902,10 +867,8 @@ impl Dbs {
             current_height,
         )?;
 
-        // Now perform the actual claim using optimized BTreeSet operations
         let period_index = slot_id.period_index();
 
-        // Update period_slots with BTreeSet::insert (O(log n))
         let mut period_slots = self
             .period_slots
             .try_get(rwtxn, &period_index)?
@@ -914,12 +877,11 @@ impl Dbs {
         let new_slot = Slot {
             slot_id,
             decision: Some(decision),
-            state_history: None, // State history stored separately in slot_state_histories
+            state_history: None,
         };
         period_slots.insert(new_slot);
         self.period_slots.put(rwtxn, &period_index, &period_slots)?;
 
-        // Update claimed_slot_ids for O(log n) lookups
         let mut claimed_slots = self
             .claimed_slot_ids
             .try_get(rwtxn, &period_index)?
@@ -928,16 +890,13 @@ impl Dbs {
         self.claimed_slot_ids
             .put(rwtxn, &period_index, &claimed_slots)?;
 
-        // Initialize slot state history - SINGLE SOURCE OF TRUTH
         let block_height = current_height.unwrap_or(0) as u64;
         let mut slot_history =
             SlotStateHistory::new(slot_id, block_height, current_ts);
 
-        // Transition to Claimed state
         slot_history
             .transition_to_claimed_with_timestamp(block_height, current_ts)?;
 
-        // Store the history
         self.slot_state_histories
             .put(rwtxn, &slot_id, &slot_history)?;
 
@@ -951,26 +910,20 @@ impl Dbs {
     ) -> Result<Option<Slot>, Error> {
         let period = slot_id.period_index();
         if let Some(period_slots) = self.period_slots.try_get(rotxn, &period)? {
-            // Use BTreeSet's efficient search instead of linear iteration
-            // Create a dummy slot for binary search
             let search_slot = Slot {
                 slot_id,
                 decision: None,
                 state_history: None,
             };
 
-            // BTreeSet search is O(log n) vs O(n) linear search
             if let Some(found_slot) = period_slots.get(&search_slot) {
                 return Ok(Some(found_slot.clone()));
             }
 
-            // If exact match not found, try to find slot with matching ID but different decision
-            // This handles the case where the slot exists but has a decision
             for slot in period_slots.range(search_slot..) {
                 if slot.slot_id == slot_id {
                     return Ok(Some(slot.clone()));
                 }
-                // Early termination since BTreeSet is ordered
                 if slot.slot_id > slot_id {
                     break;
                 }
@@ -992,20 +945,16 @@ impl Dbs {
         let max_slot_index =
             std::cmp::min(total_slots, (STANDARD_SLOT_MAX + 1) as u64);
 
-        // Pre-allocate with known capacity to avoid reallocations
         let mut available_slots = Vec::with_capacity(max_slot_index as usize);
 
-        // Get claimed slots for this period once (O(log n) database lookup)
         let claimed_slots = self
             .claimed_slot_ids
             .try_get(rotxn, &period_index)?
             .unwrap_or_default();
 
-        // Efficient availability check using the claimed_slots index
         for slot_index in 0..max_slot_index {
             let slot_id = SlotId::new(period_index, slot_index as u32)?;
 
-            // O(log k) lookup where k = claimed slots in period, much faster than O(n) get_slot call
             if !claimed_slots.contains(&slot_id) {
                 available_slots.push(slot_id);
             }
@@ -1039,7 +988,6 @@ impl Dbs {
         rotxn: &sneed::RoTxn,
         period_index: u32,
     ) -> Result<u64, Error> {
-        // Use the claimed_slots index for O(1) count lookup instead of O(n) iteration
         let claimed_slots = self
             .claimed_slot_ids
             .try_get(rotxn, &period_index)?
@@ -1048,27 +996,14 @@ impl Dbs {
         Ok(claimed_slots.len() as u64)
     }
 
-    /// Get all claimed slots across all periods
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    ///
-    /// # Returns
-    /// Vector of all claimed Slots in the database
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// This method is used to calculate voting periods on-demand by finding
-    /// all slots that have been claimed, without needing a separate period database.
     pub fn get_all_claimed_slots(
         &self,
         rotxn: &sneed::RoTxn,
     ) -> Result<Vec<Slot>, Error> {
         let mut all_claimed_slots = Vec::new();
 
-        // Iterate through all periods
         let mut iter = self.period_slots.iter(rotxn)?;
         while let Some((_period, period_slots)) = iter.next()? {
-            // Collect all slots that have decisions (i.e., are claimed)
             for slot in &period_slots {
                 if slot.decision.is_some() {
                     all_claimed_slots.push(slot.clone());
@@ -1079,9 +1014,6 @@ impl Dbs {
         Ok(all_claimed_slots)
     }
 
-    /// Get all periods that have slots currently in voting state
-    /// Queries SlotStateHistory as the SINGLE SOURCE OF TRUTH
-    /// Bitcoin Hivemind: Slot state is authoritative, not calculated
     pub fn get_voting_periods(
         &self,
         rotxn: &sneed::RoTxn,
@@ -1092,21 +1024,18 @@ impl Dbs {
 
         let mut period_voting_counts: HashMap<u32, u64> = HashMap::new();
 
-        // Query all slot state histories and count voting slots by period
         let mut iter = self.slot_state_histories.iter(rotxn)?;
         while let Some((slot_id, history)) = iter.next()? {
-            // Check if slot is currently in Voting state
             if history.current_state() == SlotState::Voting {
                 let period = slot_id.period_index();
                 *period_voting_counts.entry(period).or_insert(0) += 1;
             }
         }
 
-        // Build result vec: (period, voting_count, total_slots)
         let mut voting_periods: Vec<(u32, u64, u64)> = period_voting_counts
             .into_iter()
             .map(|(period, count)| {
-                let total_slots = 500u64; // Standard period slot capacity
+                let total_slots = 500u64;
                 (period, count, total_slots)
             })
             .collect();
@@ -1187,9 +1116,6 @@ impl Dbs {
         Ok(())
     }
 
-    // === Slot State Management Methods (SINGLE SOURCE OF TRUTH) ===
-
-    /// Get slot state history for a specific slot
     pub fn get_slot_state_history(
         &self,
         rotxn: &RoTxn,
@@ -1198,7 +1124,6 @@ impl Dbs {
         Ok(self.slot_state_histories.try_get(rotxn, &slot_id)?)
     }
 
-    /// Get current state of a slot
     pub fn get_slot_current_state(
         &self,
         rotxn: &RoTxn,
@@ -1210,7 +1135,6 @@ impl Dbs {
             .unwrap_or(SlotState::Created))
     }
 
-    /// Transition slot to voting state
     pub fn transition_slot_to_voting(
         &self,
         rwtxn: &mut RwTxn,
@@ -1234,7 +1158,6 @@ impl Dbs {
         Ok(())
     }
 
-    /// Transition slot to resolved state with consensus outcome
     pub fn transition_slot_to_resolved(
         &self,
         rwtxn: &mut RwTxn,
@@ -1249,12 +1172,12 @@ impl Dbs {
             },
         )?;
 
-        history.transition_to_resolved(consensus_outcome, block_height as u32)?;
+        history
+            .transition_to_resolved(consensus_outcome, block_height as u32)?;
         self.slot_state_histories.put(rwtxn, &slot_id, &history)?;
         Ok(())
     }
 
-    /// Get all slots in a specific state
     pub fn get_slots_in_state(
         &self,
         rotxn: &RoTxn,
@@ -1272,7 +1195,6 @@ impl Dbs {
         Ok(slots_in_state)
     }
 
-    /// Check if a slot has reached consensus
     pub fn slot_has_consensus(
         &self,
         rotxn: &RoTxn,
@@ -1284,7 +1206,6 @@ impl Dbs {
             .unwrap_or(false))
     }
 
-    /// Rollback slot states to a specific block height
     pub fn rollback_slot_states_to_height(
         &self,
         rwtxn: &mut RwTxn,
@@ -1292,17 +1213,14 @@ impl Dbs {
     ) -> Result<(), Error> {
         let mut slots_to_update = Vec::new();
 
-        // Collect all slot IDs and histories to update in a separate scope
-        // This ensures the iterator is dropped before we start mutating
         {
             let mut iter = self.slot_state_histories.iter(rwtxn)?;
             while let Some((slot_id, mut history)) = iter.next()? {
                 history.rollback_to_height(height);
                 slots_to_update.push((slot_id, history));
             }
-        } // Iterator dropped here
+        }
 
-        // Now we can safely mutate the database
         for (slot_id, history) in slots_to_update {
             self.slot_state_histories.put(rwtxn, &slot_id, &history)?;
         }
@@ -1320,7 +1238,6 @@ impl SlotValidationInterface for Dbs {
         current_ts: u64,
         current_height: Option<u32>,
     ) -> Result<(), Error> {
-        // Delegate to the optimized validation method
         self.validate_slot_claim(
             rotxn,
             slot_id,
@@ -1331,8 +1248,6 @@ impl SlotValidationInterface for Dbs {
     }
 
     fn try_get_height(&self, _rotxn: &RoTxn) -> Result<Option<u32>, Error> {
-        // Slots database doesn't store height information
-        // This will be provided by the caller in most cases
         Ok(None)
     }
 }

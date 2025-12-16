@@ -21,7 +21,10 @@ use tokio_stream::{StreamMap, wrappers::WatchStream};
 
 use crate::{
     authorization::{self, Authorization, Signature, get_address},
-    state::markets::{DimensionSpec, MarketId, parse_dimensions},
+    state::markets::{
+        DimensionSpec, MarketId, generate_market_author_fee_address,
+        generate_market_treasury_address, parse_dimensions,
+    },
     types::{
         Address, AmountOverflowError, AmountUnderflowError, AssetId,
         AuthorizedTransaction, BitcoinOutputContent, EncryptionPubKey,
@@ -879,25 +882,54 @@ impl Wallet {
     }
 
     /// Buy shares in a prediction market using LMSR
+    ///
+    /// # Arguments
+    /// * `market_id` - The market to trade in
+    /// * `outcome_index` - The outcome to buy shares for
+    /// * `shares_amount` - Number of shares to buy
+    /// * `base_cost_sats` - LMSR base cost (goes to market treasury)
+    /// * `trading_fee_sats` - Trading fee (goes to market author)
+    /// * `tx_fee` - Transaction fee for the miner
     pub fn buy_shares(
         &self,
         market_id: crate::state::markets::MarketId,
         outcome_index: usize,
         shares_amount: f64,
-        max_cost: u64,
-        fee: bitcoin::Amount,
+        base_cost_sats: u64,
+        trading_fee_sats: u64,
+        tx_fee: bitcoin::Amount,
     ) -> Result<Transaction, Error> {
-        // Estimate maximum cost including slippage protection
-        let estimated_cost = bitcoin::Amount::from_sat(max_cost);
-        let total_cost =
-            fee.checked_add(estimated_cost).ok_or(AmountOverflowError)?;
+        let market_id_bytes = *market_id.as_bytes();
 
-        let (total_bitcoin, bitcoin_utxos) =
-            self.select_bitcoins(total_cost)?;
+        // Calculate total cost (base + trading fee + tx fee)
+        let total_market_cost = bitcoin::Amount::from_sat(base_cost_sats + trading_fee_sats);
+        let total_cost = tx_fee.checked_add(total_market_cost).ok_or(AmountOverflowError)?;
+
+        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(total_cost)?;
         let change = total_bitcoin - total_cost;
 
         let inputs = bitcoin_utxos.into_keys().collect();
         let mut outputs = Vec::new();
+
+        // Add explicit MarketTreasury output (base cost goes to market treasury)
+        let treasury_address = generate_market_treasury_address(&market_id);
+        outputs.push(Output::new(
+            treasury_address,
+            OutputContent::MarketTreasury {
+                market_id: market_id_bytes,
+                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(base_cost_sats)),
+            },
+        ));
+
+        // Add explicit MarketAuthorFee output (trading fee goes to market author)
+        let fee_address = generate_market_author_fee_address(&market_id);
+        outputs.push(Output::new(
+            fee_address,
+            OutputContent::MarketAuthorFee {
+                market_id: market_id_bytes,
+                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(trading_fee_sats)),
+            },
+        ));
 
         // Add change output if needed
         if change > bitcoin::Amount::ZERO {
@@ -910,8 +942,9 @@ impl Wallet {
         let mut tx = Transaction::new(inputs, outputs);
 
         // Set the transaction data
+        let max_cost = base_cost_sats + trading_fee_sats;
         tx.data = Some(TxData::BuyShares {
-            market_id: MarketId::new(*market_id.as_bytes()),
+            market_id: MarketId::new(market_id_bytes),
             outcome_index: outcome_index as u32,
             shares_to_buy: shares_amount,
             max_cost,

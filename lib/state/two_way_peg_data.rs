@@ -105,7 +105,7 @@ fn connect_withdrawal_bundle_submitted(
     state: &State,
     rwtxn: &mut RwTxn,
     block_height: u32,
-    event_block_hash: &bitcoin::BlockHash,
+    _event_block_hash: &bitcoin::BlockHash,
     m6id: M6id,
 ) -> Result<(), Error> {
     if let Some((bundle, bundle_block_height)) =

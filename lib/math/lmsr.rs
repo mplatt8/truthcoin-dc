@@ -104,8 +104,6 @@ impl Lmsr {
         Self { max_outcomes }
     }
 
-    /// Core LMSR cost function with numerical stability
-    /// C(q) = b * ln(Σ exp(q_i / b))
     pub fn cost_function(
         &self,
         beta: f64,
@@ -146,7 +144,6 @@ impl Lmsr {
         Ok(cost)
     }
 
-    /// Calculate prices: p_i = exp(q_i / b) / Σ exp(q_j / b)
     pub fn calculate_prices(
         &self,
         beta: f64,
@@ -179,7 +176,6 @@ impl Lmsr {
         Ok(prices)
     }
 
-    /// Calculate the cost of buying shares
     pub fn calculate_buy_cost(
         &self,
         state: &LmsrState,
@@ -234,7 +230,6 @@ impl Lmsr {
         })
     }
 
-    /// Calculate the payout from selling shares
     pub fn calculate_sell_payout(
         &self,
         state: &LmsrState,
@@ -286,7 +281,6 @@ impl Lmsr {
         })
     }
 
-    /// Calculate current market prices
     pub fn calculate_current_prices(
         &self,
         state: &LmsrState,
@@ -312,7 +306,6 @@ impl Lmsr {
         })
     }
 
-    /// Calculate required treasury funding
     pub fn calculate_required_treasury(
         &self,
         beta: f64,
@@ -402,13 +395,11 @@ impl Default for Lmsr {
     }
 }
 
-pub struct LmsrMultidim {
-    max_total_outcomes: usize,
-}
+pub struct LmsrMultidim;
 
 impl LmsrMultidim {
-    pub fn new(max_total_outcomes: usize) -> Self {
-        Self { max_total_outcomes }
+    pub fn new(_max_total_outcomes: usize) -> Self {
+        Self
     }
 
     pub fn cost_function_multidim(

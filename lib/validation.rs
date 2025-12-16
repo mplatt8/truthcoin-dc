@@ -2,9 +2,10 @@ use crate::state::Error;
 use crate::state::markets::MarketState::*;
 use crate::state::markets::{
     DFunction, DimensionSpec, MarketError, MarketState,
+    generate_market_author_fee_address, generate_market_treasury_address,
 };
 use crate::state::slots::{Decision, SlotId};
-use crate::types::{Address, FilledTransaction};
+use crate::types::{Address, FilledOutputContent, FilledTransaction};
 use sneed::RoTxn;
 use std::collections::HashSet;
 
@@ -410,6 +411,77 @@ impl MarketValidator {
             });
         }
 
+        // Calculate fee amount
+        let fee_amount = trade_cost * market.trading_fee();
+        let base_cost_sats = trade_cost.ceil() as u64;
+        let fee_sats = fee_amount.ceil() as u64;
+
+        // Validate explicit treasury and fee outputs exist with correct content types and amounts
+        let treasury_address = generate_market_treasury_address(&buy_data.market_id);
+        let fee_address = generate_market_author_fee_address(&buy_data.market_id);
+        let market_id_bytes = *buy_data.market_id.as_bytes();
+
+        let (treasury_output_amount, fee_output_amount) = tx
+            .filled_outputs()
+            .map(|outputs| {
+                let treasury_amt = outputs
+                    .iter()
+                    .filter_map(|o| {
+                        if o.address == treasury_address {
+                            match &o.content {
+                                FilledOutputContent::MarketTreasury { market_id, amount }
+                                    if *market_id == market_id_bytes =>
+                                {
+                                    Some(amount.0.to_sat())
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .sum::<u64>();
+
+                let fee_amt = outputs
+                    .iter()
+                    .filter_map(|o| {
+                        if o.address == fee_address {
+                            match &o.content {
+                                FilledOutputContent::MarketAuthorFee { market_id, amount }
+                                    if *market_id == market_id_bytes =>
+                                {
+                                    Some(amount.0.to_sat())
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .sum::<u64>();
+
+                (treasury_amt, fee_amt)
+            })
+            .unwrap_or((0, 0));
+
+        if treasury_output_amount < base_cost_sats {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "BuyShares tx missing treasury output: expected {} sats to {}, found {} sats",
+                    base_cost_sats, treasury_address, treasury_output_amount
+                ),
+            });
+        }
+
+        if fee_output_amount < fee_sats {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "BuyShares tx missing fee output: expected {} sats to {}, found {} sats",
+                    fee_sats, fee_address, fee_output_amount
+                ),
+            });
+        }
+
         // Validate trader authorization
         let _trader_address = Self::validate_market_maker_authorization(tx)?;
 
@@ -560,61 +632,6 @@ impl MarketValidator {
         Ok(())
     }
 
-    /// Validate a claim author fees transaction.
-    ///
-    /// # Validation Rules
-    /// 1. Transaction must contain ClaimAuthorFees data
-    /// 2. Market must exist
-    /// 3. Caller must be the market creator/author
-    /// 4. Market must have non-zero collected fees
-    ///
-    /// # Specification Reference
-    /// Bitcoin Hivemind whitepaper: "Authors (who bear the economic cost of
-    /// Market-Creation) are rewarded with a slice of transaction volume."
-    pub fn validate_claim_author_fees(
-        state: &crate::state::State,
-        rotxn: &RoTxn,
-        tx: &FilledTransaction,
-    ) -> Result<u64, Error> {
-        let claim_data =
-            tx.claim_author_fees()
-                .ok_or_else(|| Error::InvalidTransaction {
-                    reason: "Not a claim author fees transaction".to_string(),
-                })?;
-
-        // Validate market exists
-        let market = state
-            .markets()
-            .get_market(rotxn, &claim_data.market_id)?
-            .ok_or_else(|| Error::InvalidTransaction {
-                reason: format!(
-                    "Market {:?} does not exist",
-                    claim_data.market_id
-                ),
-            })?;
-
-        // Validate caller is the market creator
-        let caller_address = Self::validate_market_maker_authorization(tx)?;
-
-        if caller_address != market.creator_address {
-            return Err(Error::InvalidTransaction {
-                reason: format!(
-                    "Only market creator can claim fees. Expected {}, got {}",
-                    market.creator_address, caller_address
-                ),
-            });
-        }
-
-        // Validate there are fees to claim
-        let collected_fees = market.collected_fees();
-        if collected_fees == 0 {
-            return Err(Error::InvalidTransaction {
-                reason: "No fees available to claim".to_string(),
-            });
-        }
-
-        Ok(collected_fees)
-    }
 }
 
 /// D-function validation utilities for market constraints.
@@ -717,10 +734,10 @@ impl DFunctionValidator {
     /// * `Ok(false)` - Invalid categorical constraint (zero or multiple true)
     /// * `Err(MarketError)` - Evaluation error
     pub fn validate_categorical_constraint(
-        d_function: &DFunction,
+        _d_function: &DFunction,
         categorical_slots: &[usize],
         combo: &[usize],
-        decision_slots: &[SlotId],
+        _decision_slots: &[SlotId],
     ) -> Result<bool, MarketError> {
         let mut true_count = 0;
 
@@ -847,9 +864,9 @@ impl MarketStateValidator {
             (a, b) if a == b => true,
 
             // Valid forward transitions
-            (Trading, Ossified) => true,   // Direct transition with automatic payout
-            (Trading, Cancelled) => true,  // Only if no trades occurred (checked elsewhere)
-            (Trading, Invalid) => true,    // Governance action
+            (Trading, Ossified) => true, // Direct transition with automatic payout
+            (Trading, Cancelled) => true, // Only if no trades occurred (checked elsewhere)
+            (Trading, Invalid) => true,   // Governance action
             (Invalid, Ossified) => true,
 
             // All other transitions are invalid
@@ -1052,32 +1069,6 @@ impl VoteValidator {
             }
         }
         Ok(())
-    }
-
-    /// Get current timestamp and height for voting period validation.
-    ///
-    /// This method serves as the canonical source for time-based validation,
-    /// supporting caching to reduce database reads during batch processing.
-    ///
-    /// # Arguments
-    /// * `state` - Blockchain state
-    /// * `rotxn` - Read-only transaction
-    ///
-    /// # Returns
-    /// * `Ok((timestamp, height))` - Current timestamp and optional height
-    /// * `Err(Error)` - Timestamp not available
-    fn get_current_time_context(
-        state: &crate::state::State,
-        rotxn: &RoTxn,
-    ) -> Result<(u64, Option<u32>), Error> {
-        let current_ts =
-            state.try_get_mainchain_timestamp(rotxn)?.ok_or_else(|| {
-                Error::InvalidTransaction {
-                    reason: "No mainchain timestamp available".to_string(),
-                }
-            })?;
-        let current_height = state.try_get_height(rotxn)?;
-        Ok((current_ts, current_height))
     }
 
     /// Validate slot is in voting period.

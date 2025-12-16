@@ -113,7 +113,7 @@ All commands: `./target/debug/truthcoin_dc_app_cli --rpc-port 18332 <COMMAND>`
 ```
 status          Node status
 stop            Shutdown node
-mine            Mine sidechain block
+mine [--fee-sats N]         Mine sidechain block (default fee: 1000)
 openapi-schema  Show API schema
 ```
 
@@ -121,21 +121,45 @@ openapi-schema  Show API schema
 ```
 balance                     Get BTC balance
 get-new-address             Generate new address
-transfer <DEST> --value-sats N --fee-sats N
-withdraw <ADDR> --amount-sats N --fee-sats N --mainchain-fee-sats N
-create-deposit <ADDR> --value-sats N --fee-sats N
+get-wallet-addresses        Get all wallet addresses
+transfer <DEST> --value-sats N [--fee-sats N]
+withdraw <ADDR> --amount-sats N [--fee-sats N] [--mainchain-fee-sats N]
+create-deposit <ADDR> --value-sats N [--fee-sats N]
+format-deposit-address <ADDR>   Format deposit address
 my-utxos                    List owned UTXOs
+my-unconfirmed-utxos        List unconfirmed owned UTXOs
+get-wallet-utxos            Get wallet UTXOs
+list-utxos                  List all UTXOs
 generate-mnemonic           Generate seed phrase
 set-seed-from-mnemonic "<PHRASE>"
+sidechain-wealth            Get total sidechain wealth
 ```
 
 ### Blockchain
 ```
 get-block-count             Current height
 get-block <HASH>            Get block by hash
+get-best-mainchain-block-hash   Get best mainchain block hash
+get-best-sidechain-block-hash   Get best sidechain block hash
+get-bmm-inclusions <HASH>   Get mainchain BMM inclusions
 get-transaction <TXID>      Get transaction
+get-transaction-info <TXID> Get transaction info
+pending-withdrawal-bundle   Get pending withdrawal bundle
+latest-failed-withdrawal-bundle-height
+remove-from-mempool <TXID>  Remove transaction from mempool
 list-peers                  Connected peers
 connect-peer <ADDR>         Connect to peer
+```
+
+### Cryptography
+```
+get-new-encryption-key      Get new encryption key
+get-new-verifying-key       Get new verifying key
+encrypt-msg --encryption-pubkey KEY --msg "MSG"
+decrypt-msg --encryption-pubkey KEY --msg "MSG" [--utf8]
+sign-arbitrary-msg --verifying-key KEY --msg "MSG"
+sign-arbitrary-msg-as-addr --address ADDR --msg "MSG"
+verify-signature --signature SIG --verifying-key KEY --dst DST --msg "MSG"
 ```
 
 ### slot_* (Decision Slots)
@@ -144,34 +168,37 @@ slot-status                 Slot system status
 slot-list [--period N] [--status STATUS]
                             List slots (status: available, claimed, voting, ossified)
 slot-get <SLOT_ID>          Get slot details
-slot-claim --period-index N --slot-index N --is-standard BOOL --is-scaled BOOL --question "<Q>" --fee-sats N
+slot-claim --period-index N --slot-index N --is-standard BOOL --is-scaled BOOL \
+           --question "<Q>" [--min N] [--max N] [--fee-sats N]
 ```
 
 ### market_* (Prediction Markets)
 ```
 market-list                 List all markets
 market-get <MARKET_ID>      Get market details
-market-buy --market-id ID --outcome-index N --shares-amount N --max-cost N --fee-sats N
+market-buy --market-id ID --outcome-index N --shares-amount N --max-cost N [--fee-sats N]
 market-positions [--address ADDR] [--market-id ID]
-market-create --title "T" --description "D" --dimensions "SPEC" [--beta N] --fee-sats N
+market-create --title "T" --description "D" --dimensions "SPEC" \
+              [--beta N] [--trading-fee N] [--tags "t1,t2"] [--fee-sats N]
 calculate-share-cost --market-id ID --outcome-index N --shares-amount N
-calculate-initial-liquidity --beta N [--num-outcomes N]
+calculate-initial-liquidity --beta N [--market-type TYPE] [--num-outcomes N] \
+                            [--decision-slots "s1,s2"] [--has-residual BOOL] [--dimensions "SPEC"]
 ```
 
 ### vote_* (Voting System)
 ```
-vote-register [--reputation-bond-sats N] --fee-sats N
+vote-register [--reputation-bond-sats N] [--fee-sats N]
 vote-voter <ADDRESS>        Get voter info
 vote-voters                 List all voters
-vote-submit --decision-id ID --vote-value N --fee-sats N
-vote-submit --votes "id1:val1,id2:val2" --fee-sats N   # Batch voting
+vote-submit --decision-id ID --vote-value N [--fee-sats N]
+vote-submit --votes "id1:val1,id2:val2" [--fee-sats N]   # Batch voting
 vote-list [--voter ADDR] [--decision-id ID] [--period-id N]
 vote-period [--period-id N]   # Omit for current period
 ```
 
 ### votecoin_*
 ```
-votecoin-transfer <DEST> --amount N --fee-sats N
+votecoin-transfer <DEST> --amount N [--fee-sats N]
 votecoin-balance <ADDRESS>
 ```
 

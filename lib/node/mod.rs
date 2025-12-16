@@ -149,18 +149,15 @@ where
         >>::Future: Send,
     {
         let env_path = datadir.join("data.mdb");
-        // let _ = std::fs::remove_dir_all(&env_path);
         std::fs::create_dir_all(&env_path)?;
         let env = {
             let mut env_open_opts = heed::EnvOpenOptions::new();
-            env_open_opts
-                .map_size(1024 * 1024 * 1024) // 1GB
-                .max_dbs(
-                    State::NUM_DBS
-                        + Archive::NUM_DBS
-                        + MemPool::NUM_DBS
-                        + Net::NUM_DBS,
-                );
+            env_open_opts.map_size(1024 * 1024 * 1024).max_dbs(
+                State::NUM_DBS
+                    + Archive::NUM_DBS
+                    + MemPool::NUM_DBS
+                    + Net::NUM_DBS,
+            );
             unsafe { Env::open(&env_open_opts, &env_path) }?
         };
         let state = State::new(&env)?;
@@ -206,8 +203,6 @@ where
         })
     }
 
-    /// Borrow the CUSF mainchain client, and execute the provided future.
-    /// The CUSF mainchain client will be locked while the future is running.
     pub async fn with_cusf_mainchain<F, Output>(&self, f: F) -> Output
     where
         F: for<'cusf_mainchain> FnOnce(
@@ -231,7 +226,6 @@ where
         Ok(self.state.try_get_tip(&rotxn)?)
     }
 
-    /// List all Votecoin network data
     pub fn votecoin_network_data(
         &self,
     ) -> Result<
@@ -269,7 +263,6 @@ where
         Ok(self.archive.get_height(&rotxn, block_hash)?)
     }
 
-    /// Get blocks in which a tx was included, and tx index within those blocks
     pub fn get_tx_inclusions(
         &self,
         txid: Txid,
@@ -278,10 +271,6 @@ where
         Ok(self.archive.get_tx_inclusions(&rotxn, txid)?)
     }
 
-    /// Returns true if the second specified block is a descendant of the first
-    /// specified block
-    /// Returns an error if either of the specified block headers do not exist
-    /// in the archive.
     pub fn is_descendant(
         &self,
         ancestor: BlockHash,
@@ -291,8 +280,6 @@ where
         Ok(self.archive.is_descendant(&rotxn, ancestor, descendant)?)
     }
 
-    /** Resolve Votecoin network data at the specified block height.
-     * Returns an error if it does not exist. */
     pub fn get_votecoin_data_at_block_height(
         &self,
         votecoin_id: &crate::state::votecoin::VotecoinId,
@@ -312,7 +299,6 @@ where
             })?)
     }
 
-    /// resolve current Votecoin network data, if it exists
     pub fn try_get_current_votecoin_data(
         &self,
         votecoin_id: &crate::state::votecoin::VotecoinId,
@@ -326,7 +312,6 @@ where
             .map_err(state::Error::from)?)
     }
 
-    /// Resolve current Votecoin network data. Returns an error if it does not exist.
     pub fn get_current_votecoin_data(
         &self,
         votecoin_id: &crate::state::votecoin::VotecoinId,
@@ -354,8 +339,6 @@ where
             self.state.validate_transaction(&rwtxn, &transaction)?;
             self.mempool.put(&mut rwtxn, &transaction)?;
 
-            // Update mempool shares for BuyShares transactions to ensure immediate LMSR price updates
-            // as required by Bitcoin Hivemind whitepaper section 4.2 on market mechanism
             if let Some(data) = transaction.transaction.data.as_ref() {
                 if let crate::types::TxData::BuyShares {
                     market_id,
@@ -379,11 +362,6 @@ where
         Ok(())
     }
 
-    /// Market transactions are processed only during block construction/connection.
-    /// This method is kept for potential future use but currently does nothing.
-    ///
-
-    /// Get mempool-adjusted shares for a market (for real-time price updates)
     pub fn get_mempool_shares(
         &self,
         market_id: &crate::state::markets::MarketId,
@@ -394,8 +372,6 @@ where
             .map_err(|e| Error::State(Box::new(e)))
     }
 
-    /// Update mempool shares for a BuyShares transaction to ensure immediate LMSR price updates
-    /// Following Bitcoin Hivemind whitepaper section 4.2 on logarithmic market scoring rule
     fn update_mempool_buy(
         &self,
         rwtxn: &mut RwTxn,
@@ -406,9 +382,6 @@ where
         use crate::math::lmsr::LmsrService;
         use crate::state;
 
-        // market_id is already MarketId type
-
-        // Get current market state
         let market = self
             .state
             .markets()
@@ -419,12 +392,10 @@ where
                 }))
             })?;
 
-        // Only update mempool shares for trading markets
         if market.state() != crate::state::markets::MarketState::Trading {
-            return Ok(()); // Skip mempool updates for non-trading markets
+            return Ok(());
         }
 
-        // Validate outcome index
         if outcome_index as usize >= market.shares().len() {
             return Err(Error::State(Box::new(state::Error::InvalidSlotId {
                 reason: format!(
@@ -444,11 +415,9 @@ where
             market.shares().clone()
         };
 
-        // Calculate new share quantities after the purchase
         let mut new_shares = current_shares.clone();
         new_shares[outcome_index as usize] += shares_to_buy;
 
-        // Validate the new shares using centralized LMSR service
         LmsrService::validate_lmsr_parameters(market.b(), &new_shares)
             .map_err(|e| {
                 Error::State(Box::new(state::Error::InvalidSlotId {
@@ -459,7 +428,6 @@ where
                 }))
             })?;
 
-        // Store updated mempool shares
         self.state
             .put_mempool_shares(rwtxn, &market_id, &new_shares)
             .map_err(|e| Error::State(Box::new(e)))?;
@@ -569,8 +537,6 @@ where
         Ok(self.archive.get_header(&rotxn, block_hash)?)
     }
 
-    /// Get the block hash at the specified height in the current chain,
-    /// if it exists
     pub fn try_get_block_hash(
         &self,
         height: u32,
@@ -644,7 +610,6 @@ where
         Ok(transactions)
     }
 
-    /// Get total sidechain wealth in Bitcoin
     pub fn get_sidechain_wealth(&self) -> Result<bitcoin::Amount, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self.state.sidechain_wealth(&rotxn)?)
@@ -683,8 +648,7 @@ where
                 continue;
             }
 
-            // Attempt to fill the transaction - if UTXOs are missing, remove from mempool
-            let txid = transaction.transaction.txid(); // Get txid before moving transaction
+            let txid = transaction.transaction.txid();
             let filled_transaction = match self
                 .state
                 .fill_authorized_transaction(&rwtxn, transaction)
@@ -729,7 +693,6 @@ where
         Ok((returned_transactions, fee))
     }
 
-    /// get a transaction from the archive or mempool, if it exists
     pub fn try_get_transaction(
         &self,
         txid: Txid,
@@ -755,10 +718,6 @@ where
         }
     }
 
-    /// get a filled transaction from the archive/state or mempool,
-    /// and the tx index, if the transaction exists
-    /// and can be filled with the current state.
-    /// a tx index of `None` indicates that the tx is in the mempool.
     pub fn try_get_filled_transaction(
         &self,
         txid: Txid,
@@ -836,10 +795,6 @@ where
         self.net.get_active_peers()
     }
 
-    /// Attempt to submit a block.
-    /// Returns `Ok(true)` if the block was accepted successfully as the new tip.
-    /// Returns `Ok(false)` if the block could not be submitted for some reason,
-    /// or was rejected as the new tip.
     pub async fn submit_block(
         &self,
         main_block_hash: bitcoin::BlockHash,
@@ -851,7 +806,6 @@ where
             return Err(Error::NoCusfMainchainWalletClient);
         };
         let block_hash = header.hash();
-        // Store the header, if ancestors exist
         if let Some(parent) = header.prev_side_hash
             && self.try_get_header(parent)?.is_none()
         {
@@ -860,7 +814,6 @@ where
             );
             return Ok(false);
         }
-        // Request mainchain header/infos if they do not exist
         let mainchain_task::Response::AncestorInfos(_, res): mainchain_task::Response = self
             .mainchain_task
             .request_oneshot(mainchain_task::Request::AncestorInfos(
@@ -872,7 +825,6 @@ where
         if !res.map_err(Error::MainchainAncestors)? {
             return Ok(false);
         };
-        // Write header
         tracing::trace!("Storing header: {block_hash}");
         {
             let mut rwtxn = self.env.write_txn()?;
@@ -880,7 +832,6 @@ where
             rwtxn.commit().map_err(RwTxnError::from)?;
         }
         tracing::trace!("Stored header: {block_hash}");
-        // Check BMM
         {
             let rotxn = self.env.read_txn()?;
             if self.archive.get_bmm_result(
@@ -895,7 +846,6 @@ where
                 return Ok(false);
             }
         }
-        // Check that ancestor bodies exist, and store body
         {
             let rotxn = self.env.read_txn()?;
             let tip = self.state.try_get_tip(&rotxn)?;
@@ -924,7 +874,6 @@ where
                 rwtxn.commit().map_err(RwTxnError::from)?;
             }
         }
-        // Submit new tip
         let new_tip = Tip {
             block_hash,
             main_block_hash,
@@ -962,24 +911,20 @@ where
         Ok(true)
     }
 
-    /// Get a notification whenever the tip changes
     pub fn watch_state(&self) -> impl Stream<Item = ()> {
         self.state.watch()
     }
 
-    /// Get all available slots by quarter
     pub fn get_all_slot_quarters(&self) -> Result<Vec<(u32, u64)>, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self.state.get_all_slot_quarters(&rotxn)?)
     }
 
-    /// Get slots for a specific quarter
     pub fn get_slots_for_quarter(&self, quarter: u32) -> Result<u64, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self.state.get_slots_for_quarter(&rotxn, quarter)?)
     }
 
-    /// Get a specific slot by its ID
     pub fn get_slot(
         &self,
         slot_id: crate::state::slots::SlotId,
@@ -988,7 +933,6 @@ where
         Ok(self.state.slots().get_slot(&rotxn, slot_id)?)
     }
 
-    /// Get all available (unclaimed) slot IDs in a specific period
     pub fn get_available_slots_in_period(
         &self,
         period_id: crate::state::voting::types::VotingPeriodId,
@@ -999,7 +943,6 @@ where
             .get_available_slots_in_period(&rotxn, period_id.as_u32())?)
     }
 
-    /// Get all claimed slots in a specific period
     pub fn get_claimed_slots_in_period(
         &self,
         period_id: crate::state::voting::types::VotingPeriodId,
@@ -1011,7 +954,6 @@ where
             .get_claimed_slots_in_period(&rotxn, period_id.as_u32())?)
     }
 
-    /// Check if a slot is in voting period
     pub fn is_slot_in_voting(
         &self,
         slot_id: crate::state::slots::SlotId,
@@ -1020,7 +962,6 @@ where
         Ok(self.state.is_slot_in_voting(&rotxn, slot_id)?)
     }
 
-    /// Get ossified slots (slots whose voting period has ended)
     pub fn get_ossified_slots(
         &self,
     ) -> Result<Vec<crate::state::slots::Slot>, Error> {
@@ -1028,14 +969,11 @@ where
         Ok(self.state.get_ossified_slots(&rotxn)?)
     }
 
-    /// Get periods that are currently in voting phase
     pub fn get_voting_periods(&self) -> Result<Vec<(u32, u64, u64)>, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self.state.get_voting_periods(&rotxn)?)
     }
 
-    /// Get a summary of period states (active and voting periods only)
-    /// Returns (active_periods, voting_periods)
     pub fn get_period_summary(
         &self,
     ) -> Result<(Vec<(u32, u64)>, Vec<(u32, u64)>), Error> {
@@ -1043,7 +981,6 @@ where
         Ok(self.state.get_period_summary(&rotxn)?)
     }
 
-    /// Get the count of claimed slots in a specific period
     pub fn get_claimed_slot_count_in_period(
         &self,
         period_id: crate::state::voting::types::VotingPeriodId,
@@ -1054,46 +991,38 @@ where
             .get_claimed_slot_count_in_period(&rotxn, period_id.as_u32())?)
     }
 
-    /// Check if the slots system is in testing mode
     pub fn is_slots_testing_mode(&self) -> bool {
         self.state.slots().is_testing_mode()
     }
 
-    /// Get testing mode configuration (blocks per period)
     pub fn get_slots_testing_config(&self) -> u32 {
         self.state.slots().get_testing_blocks_per_period()
     }
 
-    /// Get slot configuration (public accessor for RPC layer)
     pub fn get_slot_config(&self) -> &crate::state::slots::SlotConfig {
         self.state.slots().get_config()
     }
 
-    /// Get slots database reference (public accessor for RPC layer)
     pub fn get_slots_db(&self) -> &crate::state::slots::Dbs {
         self.state.slots()
     }
 
-    /// Convert timestamp to quarter index
     pub fn timestamp_to_quarter(
         timestamp: u64,
     ) -> Result<u32, crate::state::Error> {
         crate::state::slots::Dbs::timestamp_to_quarter(timestamp)
     }
 
-    /// Convert block height to testing period
     pub fn block_height_to_testing_period(&self, block_height: u32) -> u32 {
         self.state
             .slots()
             .block_height_to_testing_period(block_height)
     }
 
-    /// Convert quarter index to human readable string
     pub fn quarter_to_string(&self, quarter: u32) -> String {
         self.state.slots().quarter_to_string(quarter)
     }
 
-    /// Get all markets from the database
     pub fn get_all_markets(&self) -> Result<Vec<crate::state::Market>, Error> {
         let rotxn = self.env.read_txn()?;
         Ok(self.state.markets().get_all_markets(&rotxn)?)
@@ -1115,7 +1044,6 @@ where
         Ok(result)
     }
 
-    /// Get markets by state (Trading, Voting, Resolved, etc.)
     pub fn get_markets_by_state(
         &self,
         state: crate::state::MarketState,
@@ -1124,7 +1052,6 @@ where
         Ok(self.state.markets().get_markets_by_state(&rotxn, state)?)
     }
 
-    /// Get a specific market by its ID
     pub fn get_market_by_id(
         &self,
         market_id: &crate::state::MarketId,
@@ -1149,8 +1076,6 @@ where
         }
     }
 
-    /// Get multiple markets by their IDs in batch operation
-    /// Optimizes database access for share position calculations
     pub fn get_markets_batch(
         &self,
         market_ids: &[crate::state::MarketId],
@@ -1162,7 +1087,6 @@ where
         Ok(self.state.markets().get_markets_batch(&rotxn, market_ids)?)
     }
 
-    /// Get market decisions for a specific market (for detailed outcome descriptions)
     pub fn get_market_decisions(
         &self,
         market: &crate::state::Market,
@@ -1187,8 +1111,6 @@ where
         Ok(decisions)
     }
 
-    /// Get all share positions for a user address
-    /// Returns tuples of (MarketId, outcome_index, shares_held)
     pub fn get_user_share_positions(
         &self,
         address: &crate::types::Address,
@@ -1200,8 +1122,6 @@ where
             .get_user_share_positions(&rotxn, address)?)
     }
 
-    /// Get share positions for a specific market and user
-    /// Returns tuples of (outcome_index, shares_held)
     pub fn get_market_user_positions(
         &self,
         address: &crate::types::Address,
@@ -1214,51 +1134,38 @@ where
             .get_market_user_positions(&rotxn, address, market_id)?)
     }
 
-    /// Get all share accounts from the database (for debugging)
-    /// Returns Vec of (Address, Vec<(MarketId, outcome_index, shares)>)
     pub fn get_all_share_accounts(
         &self,
-    ) -> Result<Vec<(crate::types::Address, Vec<(crate::state::MarketId, u32, f64)>)>, Error> {
+    ) -> Result<
+        Vec<(
+            crate::types::Address,
+            Vec<(crate::state::MarketId, u32, f64)>,
+        )>,
+        Error,
+    > {
         let rotxn = self.env.read_txn()?;
         Ok(self.state.markets().get_all_share_accounts(&rotxn)?)
     }
 
-    // Voting RPC Accessor Methods
+    pub fn get_market_treasury_sats(
+        &self,
+        market_id: &crate::state::MarketId,
+    ) -> Result<u64, Error> {
+        let rotxn = self.env.read_txn()?;
+        Ok(self
+            .state
+            .markets()
+            .get_market_treasury_sats(&rotxn, &self.state, market_id)?)
+    }
 
-    /// Create read transaction for RPC queries
-    ///
-    /// # Returns
-    /// Read-only transaction for database access
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Provides safe read-only access to voting state for RPC endpoints
-    pub fn read_txn(&self) -> Result<sneed::RoTxn, Error> {
+    pub fn read_txn(&self) -> Result<sneed::RoTxn<'_>, Error> {
         self.env.read_txn().map_err(Into::into)
     }
 
-    /// Access voting system for RPC queries
-    ///
-    /// # Returns
-    /// Reference to voting system for querying voting state
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Exposes voting system interface for vote submission and consensus queries
     pub fn voting_state(&self) -> &crate::state::voting::VotingSystem {
         self.state.voting()
     }
 
-    /// Get Votecoin balance for address
-    ///
-    /// # Arguments
-    /// * `rotxn` - Read-only transaction
-    /// * `address` - Address to query balance for
-    ///
-    /// # Returns
-    /// Votecoin balance (u32)
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Votecoin balance represents voting power in the consensus mechanism
-    /// per whitepaper section 5 on economic incentives
     pub fn get_votecoin_balance_for(
         &self,
         rotxn: &sneed::RoTxn,
@@ -1269,7 +1176,6 @@ where
             .map_err(Into::into)
     }
 
-    /// Get current tip block height from the archive
     pub fn get_tip_height(&self) -> Result<u32, Error> {
         self.try_get_tip_height()?.ok_or_else(|| {
             Error::State(Box::new(state::Error::InvalidTransaction {
@@ -1278,10 +1184,7 @@ where
         })
     }
 
-    /// Get the last block timestamp
     pub fn get_last_block_timestamp(&self) -> Result<u64, Error> {
-        // For now, use the current system time as a placeholder
-        // This should be replaced with the actual block timestamp when available
         use std::time::{SystemTime, UNIX_EPOCH};
         let timestamp =
             SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| {
@@ -1292,22 +1195,6 @@ where
         Ok(timestamp.as_secs())
     }
 
-    /// Resolve voting period decisions with consensus
-    ///
-    /// This method performs consensus calculation for a voting period:
-    /// 1. Snapshots Votecoin proportions for all voters (cached for performance)
-    /// 2. Returns consensus outcomes if already calculated
-    ///
-    /// # PROTOCOL ONLY - READ-ONLY OPERATION
-    /// This function is READ-ONLY and will NOT trigger consensus calculation.
-    /// Consensus and redistribution MUST be calculated by the protocol during
-    /// block connection, NEVER via RPC calls.
-    ///
-    /// Returns Error::ConsensusNotYetCalculated if consensus hasn't been
-    /// calculated by the protocol yet.
-    ///
-    /// # Bitcoin Hivemind Compliance
-    /// Periods are calculated on-demand from slots, not stored in database.
     pub fn resolve_voting_period(
         &self,
         period_id: crate::state::voting::types::VotingPeriodId,
@@ -1316,12 +1203,9 @@ where
         let current_timestamp = self.get_last_block_timestamp()?;
         let current_height = self.get_tip_height()?;
 
-        // Get slot configuration and database references
         let config = self.state.slots().get_config();
         let slots_db = self.state.slots();
 
-        // PROTOCOL ONLY: This is now a read-only query
-        // Consensus must be calculated during block connection
         let outcomes = self.state.voting().resolve_period_decisions(
             &mut rwtxn,
             period_id,
@@ -1338,7 +1222,6 @@ where
         Ok(outcomes)
     }
 
-    /// Get consensus outcomes for a voting period
     pub fn get_consensus_outcomes(
         &self,
         period_id: crate::state::voting::types::VotingPeriodId,
@@ -1355,22 +1238,17 @@ where
     }
 }
 
-/// Convert timestamp to quarter index (utility function)
 pub fn timestamp_to_quarter(
     timestamp: u64,
 ) -> Result<u32, crate::state::Error> {
     crate::state::slots::Dbs::timestamp_to_quarter(timestamp)
 }
 
-/// Convert quarter index to human readable string (utility function)
-/// Note: Uses production config for standalone utility calls
 pub fn quarter_to_string(quarter: u32) -> String {
     let config = crate::state::slots::SlotConfig::production();
     crate::state::slots::quarter_to_string(quarter, &config)
 }
 
-/// Convert block height to testing period (for testing mode)
-/// Note: Uses testing config with 1 block per period
 pub fn block_height_to_testing_period(block_height: u32) -> u32 {
     let config = crate::state::slots::SlotConfig::testing(1);
     block_height / config.testing_blocks_per_period

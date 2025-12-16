@@ -1,5 +1,3 @@
-//! Task to manage peers and their responses
-
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
@@ -944,8 +942,6 @@ impl NetTask {
             tracing::trace!(?mailbox_item, "received new mailbox item");
             match mailbox_item {
                 MailboxItem::AcceptConnection(res) => match res {
-                    // We received a connection new incoming network connection, but no peer
-                    // was added
                     Ok(None) => {
                         continue;
                     }
@@ -953,7 +949,6 @@ impl NetTask {
                         tracing::trace!(%addr, "accepted new incoming connection");
                     }
                     Err(fatal_err) => {
-                        // explicitly type error
                         let fatal_err: <net::error::AcceptConnection as fatality::Split>::Fatal =
                             fatal_err;
                         let fatal_err = anyhow::Error::from(fatal_err);
@@ -1023,13 +1018,12 @@ impl NetTask {
                         )
                     });
 
-                    // Always send response, even on error
                     if let Some(resp_tx) = resp_tx {
                         let reorg_applied = match &reorg_result {
                             Ok(applied) => *applied,
                             Err(e) => {
                                 tracing::error!("Reorg failed: {:?}", e);
-                                false // Indicate reorg was not applied
+                                false
                             }
                         };
                         let () = resp_tx
@@ -1037,14 +1031,12 @@ impl NetTask {
                             .map_err(|_| Error::SendReorgResultOneshot)?;
                     }
 
-                    // Now propagate the error if there was one
                     let _ = reorg_result?;
                 }
                 MailboxItem::PeerInfo(None) => {
                     return Err(Error::PeerInfoRxClosed);
                 }
                 MailboxItem::PeerInfo(Some((addr, None))) => {
-                    // peer connection is closed, remove it
                     tracing::warn!(%addr, "Connection to peer closed");
                     let () = self.ctxt.net.remove_active_peer(addr);
                     continue;
@@ -1059,8 +1051,6 @@ impl NetTask {
                         ) => {
                             const RECONNECT_DELAY: Duration =
                                 Duration::from_secs(10);
-                            // Attempt to reconnect if a valid message was
-                            // received successfully
                             let Some(received_msg_successfully) =
                                 self.ctxt.net.try_with_active_peer_connection(
                                     addr,
@@ -1118,7 +1108,6 @@ impl NetTask {
                                 .map_err(EnvError::from)?;
                             self.ctxt.mempool.put(&mut rwtxn, &new_tx)?;
                             rwtxn.commit().map_err(RwTxnError::from)?;
-                            // broadcast
                             let () = self
                                 .ctxt
                                 .net
@@ -1165,17 +1154,9 @@ impl NetTask {
     }
 }
 
-/// Handle to the net task.
-/// Task is aborted on drop.
 #[derive(Clone)]
 pub(super) struct NetTaskHandle {
     task: Arc<JoinHandle<()>>,
-    /// Push a tip that is ready to reorg to, with the address of the peer
-    /// connection that caused the request, if it originated from a peer.
-    /// If the request originates from this node, then the socket address is
-    /// None.
-    /// An optional oneshot sender can be used receive the result of attempting
-    /// to reorg to the new tip, on the corresponding oneshot receiver.
     new_tip_ready_tx: UnboundedSender<NewTipReadyMessage>,
 }
 
@@ -1229,10 +1210,6 @@ impl NetTaskHandle {
         }
     }
 
-    /// Push a tip that is ready to reorg to, and await successful application.
-    /// A result of Ok(true) indicates that the tip was applied and reorged
-    /// to successfully.
-    /// A result of Ok(false) indicates that the tip was not reorged to.
     pub async fn new_tip_ready_confirm(
         &self,
         new_tip: Tip,
@@ -1240,13 +1217,11 @@ impl NetTaskHandle {
         tracing::debug!(?new_tip, "sending new tip ready confirm");
         let (oneshot_tx, oneshot_rx) = oneshot::channel();
 
-        // Check if the receiver is still alive before sending
         if self.new_tip_ready_tx.is_closed() {
             tracing::error!(
                 "Network task receiver is closed, cannot send new tip ready"
             );
-            // Return a suitable error when receiver is closed
-            return Ok(false); // Indicate tip was not applied due to closed receiver
+            return Ok(false);
         }
 
         let () = self
@@ -1258,10 +1233,7 @@ impl NetTaskHandle {
 }
 
 impl Drop for NetTaskHandle {
-    // If only one reference exists (ie. within self), abort the net task.
     fn drop(&mut self) {
-        // use `Arc::get_mut` since `Arc::into_inner` requires ownership of the
-        // Arc, and cloning would increase the reference count
         if let Some(task) = Arc::get_mut(&mut self.task) {
             tracing::debug!("dropping net task handle, aborting task");
             task.abort()

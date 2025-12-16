@@ -11,6 +11,36 @@ cd ../bip300301_enforcer && cargo build --debug
 cd ../truthcoin-dc && cargo build --bin truthcoin_dc_app
 ```
 
+## Integration Tests
+
+Run the automated integration test suite:
+
+```bash
+TRUTHCOIN_INTEGRATION_TEST_ENV=integration_tests/example.env cargo run --example integration_tests
+```
+
+The test suite requires compiled binaries at specific paths. Configure these in `integration_tests/example.env`:
+
+```bash
+BIP300301_ENFORCER='../bip300301_enforcer/target/debug/bip300301_enforcer'
+BITCOIND='../bitcoin/build/src/bitcoind'
+BITCOIN_CLI='../bitcoin/build/src/bitcoin-cli'
+ELECTRS='../electrs/target/release/electrs'
+TRUTHCOIN_APP='target/debug/truthcoin_dc_app'
+```
+
+Adjust paths as needed for your local setup. All binaries must be compiled before running tests.
+
+To run a specific test:
+```bash
+TRUTHCOIN_INTEGRATION_TEST_ENV=integration_tests/example.env cargo run --example integration_tests -- --exact <test_name> 
+
+roundtrip.rs is a full coverage test of the node
+
+```
+
+---
+
 ## Quick Start
 
 ### 1. Create Data Directory

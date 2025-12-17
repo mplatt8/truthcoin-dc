@@ -7,8 +7,8 @@ Build these components before starting:
 ```bash
 cd ../bitcoin && make -j$(nproc)
 cd ../electrs && cargo build --release
-cd ../bip300301_enforcer && cargo build --debug
-cd ../truthcoin-dc && cargo build --bin truthcoin_dc_app
+cd ../bip300301_enforcer && git submodule update --init --recursive && cargo build --debug
+cd ../truthcoin-dc && git submodule update --init && cargo build --bin truthcoin_dc_app
 ```
 
 ## Integration Tests

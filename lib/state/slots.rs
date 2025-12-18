@@ -257,7 +257,6 @@ pub struct SlotStateHistory {
     pub current_state: SlotState,
     pub state_changed_at_height: u32,
     pub voting_period: Option<u32>,
-    pub consensus_outcome: Option<u16>,
     pub state_history: Vec<(SlotState, u32)>,
 }
 
@@ -267,7 +266,6 @@ impl SlotStateHistory {
             current_state: SlotState::Created,
             state_changed_at_height: height,
             voting_period: None,
-            consensus_outcome: None,
             state_history: Vec::new(),
         };
         history.state_history.push((SlotState::Created, height));
@@ -343,18 +341,12 @@ impl SlotStateHistory {
 
         self.current_state = SlotState::Resolved;
         self.state_changed_at_height = height;
-        self.consensus_outcome =
-            Some((consensus_outcome * 10000.0).round() as u16);
         self.state_history.push((SlotState::Resolved, height));
         Ok(())
     }
 
     pub fn get_voting_period(&self) -> Option<u32> {
         self.voting_period
-    }
-
-    pub fn get_consensus_outcome(&self) -> Option<f64> {
-        self.consensus_outcome.map(|v| v as f64 / 10000.0)
     }
 
     pub fn can_accept_votes(&self) -> bool {
@@ -514,15 +506,30 @@ fn get_current_period(
 pub struct Dbs {
     period_slots:
         DatabaseUnique<SerdeBincode<u32>, SerdeBincode<BTreeSet<Slot>>>,
-    claimed_slot_ids:
-        DatabaseUnique<SerdeBincode<u32>, SerdeBincode<BTreeSet<SlotId>>>,
     slot_state_histories:
         DatabaseUnique<SerdeBincode<SlotId>, SerdeBincode<SlotStateHistory>>,
     config: SlotConfig,
 }
 
 impl Dbs {
-    pub const NUM_DBS: u32 = 3;
+    pub const NUM_DBS: u32 = 2;
+
+    /// Derive claimed slot IDs from period_slots (a slot is claimed if decision.is_some())
+    fn get_claimed_slot_ids_for_period(
+        &self,
+        rotxn: &RoTxn,
+        period_index: u32,
+    ) -> Result<BTreeSet<SlotId>, Error> {
+        let period_slots = self
+            .period_slots
+            .try_get(rotxn, &period_index)?
+            .unwrap_or_default();
+        Ok(period_slots
+            .iter()
+            .filter(|slot| slot.decision.is_some())
+            .map(|slot| slot.slot_id)
+            .collect())
+    }
 
     pub fn new(env: &Env, rwtxn: &mut RwTxn<'_>) -> Result<Self, Error> {
         Self::new_with_config(env, rwtxn, SlotConfig::default())
@@ -535,11 +542,6 @@ impl Dbs {
     ) -> Result<Self, Error> {
         Ok(Self {
             period_slots: DatabaseUnique::create(env, rwtxn, "period_slots")?,
-            claimed_slot_ids: DatabaseUnique::create(
-                env,
-                rwtxn,
-                "claimed_slot_ids",
-            )?,
             slot_state_histories: DatabaseUnique::create(
                 env,
                 rwtxn,
@@ -629,9 +631,6 @@ impl Dbs {
             if self.period_slots.try_get(rwtxn, &period)?.is_none() {
                 let empty_period: BTreeSet<Slot> = BTreeSet::new();
                 self.period_slots.put(rwtxn, &period, &empty_period)?;
-
-                let empty_claimed: BTreeSet<SlotId> = BTreeSet::new();
-                self.claimed_slot_ids.put(rwtxn, &period, &empty_claimed)?;
             }
         }
 
@@ -837,10 +836,7 @@ impl Dbs {
             }
         }
 
-        let claimed_slots = self
-            .claimed_slot_ids
-            .try_get(rotxn, &period_index)?
-            .unwrap_or_default();
+        let claimed_slots = self.get_claimed_slot_ids_for_period(rotxn, period_index)?;
 
         if claimed_slots.contains(&slot_id) {
             return Err(Error::SlotAlreadyClaimed { slot_id });
@@ -878,14 +874,6 @@ impl Dbs {
         };
         period_slots.insert(new_slot);
         self.period_slots.put(rwtxn, &period_index, &period_slots)?;
-
-        let mut claimed_slots = self
-            .claimed_slot_ids
-            .try_get(rwtxn, &period_index)?
-            .unwrap_or_default();
-        claimed_slots.insert(slot_id);
-        self.claimed_slot_ids
-            .put(rwtxn, &period_index, &claimed_slots)?;
 
         let block_height = current_height.unwrap_or(0) as u64;
         let mut slot_history =
@@ -943,10 +931,7 @@ impl Dbs {
 
         let mut available_slots = Vec::with_capacity(max_slot_index as usize);
 
-        let claimed_slots = self
-            .claimed_slot_ids
-            .try_get(rotxn, &period_index)?
-            .unwrap_or_default();
+        let claimed_slots = self.get_claimed_slot_ids_for_period(rotxn, period_index)?;
 
         for slot_index in 0..max_slot_index {
             let slot_id = SlotId::new(period_index, slot_index as u32)?;
@@ -984,11 +969,7 @@ impl Dbs {
         rotxn: &sneed::RoTxn,
         period_index: u32,
     ) -> Result<u64, Error> {
-        let claimed_slots = self
-            .claimed_slot_ids
-            .try_get(rotxn, &period_index)?
-            .unwrap_or_default();
-
+        let claimed_slots = self.get_claimed_slot_ids_for_period(rotxn, period_index)?;
         Ok(claimed_slots.len() as u64)
     }
 
@@ -1079,28 +1060,11 @@ impl Dbs {
         if let Some(slot_to_remove) = target_slot {
             period_slots.remove(&slot_to_remove);
 
-            // Also remove from claimed_slot_ids
-            let mut claimed_slots = self
-                .claimed_slot_ids
-                .try_get(rwtxn, &period_index)?
-                .unwrap_or_default();
-            claimed_slots.remove(&slot_id);
-
-            // Update both databases
+            // Update period_slots database
             if period_slots.is_empty() {
                 self.period_slots.delete(rwtxn, &period_index)?;
             } else {
                 self.period_slots.put(rwtxn, &period_index, &period_slots)?;
-            }
-
-            if claimed_slots.is_empty() {
-                self.claimed_slot_ids.delete(rwtxn, &period_index)?;
-            } else {
-                self.claimed_slot_ids.put(
-                    rwtxn,
-                    &period_index,
-                    &claimed_slots,
-                )?;
             }
         } else {
             tracing::debug!(
@@ -1208,7 +1172,7 @@ impl Dbs {
         height: u64,
     ) -> Result<(), Error> {
         let mut slots_to_update = Vec::new();
-        // Track slots that need to be removed from claimed_slot_ids and period_slots
+        // Track slots that need to be removed from period_slots
         // because they rolled back to Created state (before being claimed)
         let mut slots_to_unclaim: Vec<SlotId> = Vec::new();
 
@@ -1232,23 +1196,10 @@ impl Dbs {
             self.slot_state_histories.put(rwtxn, &slot_id, &history)?;
         }
 
-        // Remove unclaimed slots from period_slots and claimed_slot_ids
+        // Remove unclaimed slots from period_slots
         for slot_id in slots_to_unclaim {
             let period_index = slot_id.period_index();
 
-            // Remove from claimed_slot_ids
-            if let Some(mut claimed_slots) =
-                self.claimed_slot_ids.try_get(rwtxn, &period_index)?
-            {
-                claimed_slots.remove(&slot_id);
-                if claimed_slots.is_empty() {
-                    self.claimed_slot_ids.delete(rwtxn, &period_index)?;
-                } else {
-                    self.claimed_slot_ids.put(rwtxn, &period_index, &claimed_slots)?;
-                }
-            }
-
-            // Remove from period_slots
             if let Some(mut period_slots) =
                 self.period_slots.try_get(rwtxn, &period_index)?
             {

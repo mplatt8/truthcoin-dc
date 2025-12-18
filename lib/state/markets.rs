@@ -334,9 +334,8 @@ impl utoipa::ToSchema for MarketId {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ShareAccount {
-    pub owner_address: Address,
     pub positions: HashMap<(MarketId, u32), f64>,
     pub nonce: u64,
     pub trade_nonce: u64,
@@ -344,14 +343,8 @@ pub struct ShareAccount {
 }
 
 impl ShareAccount {
-    pub fn new(owner_address: Address) -> Self {
-        Self {
-            owner_address,
-            positions: HashMap::new(),
-            nonce: 0,
-            trade_nonce: 0,
-            last_updated_height: 0,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn get_position(
@@ -1915,7 +1908,7 @@ impl MarketsDatabase {
                 continue;
             }
 
-            let mut share_account = ShareAccount::new(address);
+            let mut share_account = ShareAccount::new();
 
             for ((market_id, outcome_index), shares) in positions.iter() {
                 share_account.add_shares(
@@ -2418,12 +2411,10 @@ impl MarketsDatabase {
                     break;
                 }
 
-                if let Some(history) =
-                    slots_db.get_slot_state_history(txn, *slot_id)?
-                {
-                    if let Some(outcome) = history.get_consensus_outcome() {
-                        slot_outcomes.insert(*slot_id, outcome);
-                    }
+                // Get consensus outcome from the voting database (canonical source)
+                let voting_period_id = crate::state::voting::types::VotingPeriodId::new(slot_id.voting_period());
+                if let Some(outcome) = state.voting().databases().get_consensus_outcome(txn, voting_period_id, *slot_id)? {
+                    slot_outcomes.insert(*slot_id, outcome);
                 }
 
                 // Get decision for scaled handling
@@ -2582,7 +2573,7 @@ impl MarketsDatabase {
 
         let mut account = match self.share_accounts.get(rwtxn, &mempool_addr) {
             Ok(acc) => acc,
-            Err(_) => ShareAccount::new(mempool_addr.clone()),
+            Err(_) => ShareAccount::new(),
         };
 
         account.positions.retain(|(mid, _), _| mid != market_id);
@@ -2861,7 +2852,7 @@ impl MarketsDatabase {
         let mut account = self
             .share_accounts
             .try_get(txn, address)?
-            .unwrap_or_else(|| ShareAccount::new(*address));
+            .unwrap_or_else(ShareAccount::new);
 
         account.add_shares(market_id, outcome_index, shares, height);
 

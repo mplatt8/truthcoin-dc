@@ -2,23 +2,62 @@
 
 ## Prerequisites
 
-### Clone with Submodules
+### Required Dependencies
 
-This project uses a git submodule for protobuf definitions. Initialize with:
+This project requires the following external components. You can either download pre-built binaries or build from source.
 
+#### Option A: Download Pre-built Binaries (Recommended)
+
+Download pre-built binaries from [releases.drivechain.info](https://releases.drivechain.info):
+  * `bitcoin-patched` (bitcoind and bitcoin-cli)
+  * `bip300301_enforcer`
+
+Then build electrs and truthcoin from source:
 ```bash
+# Electrs (Blockstream fork with HTTP/REST API)
+git clone https://github.com/blockstream/electrs.git
+cd electrs && cargo build --release && cd ..
+
+# Truthcoin
+cd truthcoin-dc
 git submodule update --init --recursive
+cargo build --bin truthcoin_dc_app
+```
+> Note: The standard romanz/electrs does NOT work. You must use the Blockstream fork which supports the HTTP/REST API.
+
+#### Option B: Build from Source
+
+Clone and build each dependency
+
+**Bitcoin (BIP300/301 patched):**
+```bash
+git clone https://github.com/LayerTwo-Labs/bitcoin-patched.git
+cd ../bitcoin
+./autogen.sh
+./configure
+make -j$(nproc)
 ```
 
-### Build Components
-
-Build these components before starting:
-
+**Electrs (Blockstream fork with HTTP/REST API):**
 ```bash
-cd ../bitcoin && make -j$(nproc)
-cd ../electrs && cargo build --release
-cd ../bip300301_enforcer && git submodule update --init --recursive && cargo build --debug
-cd ../truthcoin-dc && git submodule update --init --recursive && cargo build --bin truthcoin_dc_app
+git clone https://github.com/blockstream/electrs.git
+cd ../electrs
+cargo build --release
+```
+> Note: The standard romanz/electrs does NOT work. You must use the Blockstream fork which supports the HTTP/REST API.
+
+**BIP300301 Enforcer:**
+```bash
+git clone https://github.com/LayerTwo-Labs/bip300301_enforcer.git
+cd ../bip300301_enforcer
+git submodule update --init --recursive
+cargo build
+```
+
+**Truthcoin (this project):**
+```bash
+git submodule update --init --recursive
+cargo build --bin truthcoin_dc_app
 ```
 
 ## Integration Tests

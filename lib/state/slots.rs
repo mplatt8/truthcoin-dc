@@ -423,8 +423,6 @@ impl SlotStateHistory {
 pub struct Slot {
     pub slot_id: SlotId,
     pub decision: Option<Decision>,
-    #[serde(default)]
-    pub state_history: Option<SlotStateHistory>,
 }
 
 const FUTURE_PERIODS: u32 = 20;
@@ -877,7 +875,6 @@ impl Dbs {
         let new_slot = Slot {
             slot_id,
             decision: Some(decision),
-            state_history: None,
         };
         period_slots.insert(new_slot);
         self.period_slots.put(rwtxn, &period_index, &period_slots)?;
@@ -913,7 +910,6 @@ impl Dbs {
             let search_slot = Slot {
                 slot_id,
                 decision: None,
-                state_history: None,
             };
 
             if let Some(found_slot) = period_slots.get(&search_slot) {
@@ -1212,17 +1208,57 @@ impl Dbs {
         height: u64,
     ) -> Result<(), Error> {
         let mut slots_to_update = Vec::new();
+        // Track slots that need to be removed from claimed_slot_ids and period_slots
+        // because they rolled back to Created state (before being claimed)
+        let mut slots_to_unclaim: Vec<SlotId> = Vec::new();
 
         {
             let mut iter = self.slot_state_histories.iter(rwtxn)?;
             while let Some((slot_id, mut history)) = iter.next()? {
+                let was_claimed = history.current_state() != SlotState::Created;
                 history.rollback_to_height(height);
+                let is_now_created = history.current_state() == SlotState::Created;
+
+                // If slot was claimed but rolled back to Created, track it for removal
+                if was_claimed && is_now_created {
+                    slots_to_unclaim.push(slot_id);
+                }
                 slots_to_update.push((slot_id, history));
             }
         }
 
+        // Update slot state histories
         for (slot_id, history) in slots_to_update {
             self.slot_state_histories.put(rwtxn, &slot_id, &history)?;
+        }
+
+        // Remove unclaimed slots from period_slots and claimed_slot_ids
+        for slot_id in slots_to_unclaim {
+            let period_index = slot_id.period_index();
+
+            // Remove from claimed_slot_ids
+            if let Some(mut claimed_slots) =
+                self.claimed_slot_ids.try_get(rwtxn, &period_index)?
+            {
+                claimed_slots.remove(&slot_id);
+                if claimed_slots.is_empty() {
+                    self.claimed_slot_ids.delete(rwtxn, &period_index)?;
+                } else {
+                    self.claimed_slot_ids.put(rwtxn, &period_index, &claimed_slots)?;
+                }
+            }
+
+            // Remove from period_slots
+            if let Some(mut period_slots) =
+                self.period_slots.try_get(rwtxn, &period_index)?
+            {
+                period_slots.retain(|s| s.slot_id != slot_id);
+                if period_slots.is_empty() {
+                    self.period_slots.delete(rwtxn, &period_index)?;
+                } else {
+                    self.period_slots.put(rwtxn, &period_index, &period_slots)?;
+                }
+            }
         }
 
         Ok(())

@@ -1009,7 +1009,7 @@ impl State {
         rotxn: &RoTxn,
         header: &Header,
         body: &Body,
-    ) -> Result<bitcoin::Amount, Error> {
+    ) -> Result<(bitcoin::Amount, Vec<FilledTransaction>), Error> {
         block::validate(self, rotxn, header, body)
     }
 
@@ -1019,8 +1019,9 @@ impl State {
         header: &Header,
         body: &Body,
         mainchain_timestamp: u64,
+        filled_txs: Vec<FilledTransaction>,
     ) -> Result<(), Error> {
-        block::connect(self, rwtxn, header, body, mainchain_timestamp)
+        block::connect(self, rwtxn, header, body, mainchain_timestamp, filled_txs)
     }
 
     pub fn disconnect_tip(

@@ -7621,6 +7621,7 @@ dependencies = [
  "chrono",
  "clap",
  "criterion",
+ "dashmap",
  "ed25519-dalek",
  "educe",
  "fallible-iterator",

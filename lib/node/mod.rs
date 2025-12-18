@@ -634,20 +634,8 @@ where
                     .delete(&mut rwtxn, transaction.transaction.txid())?;
                 continue;
             }
-            if self
-                .state
-                .validate_transaction(&rwtxn, &transaction)
-                .is_err()
-            {
-                tracing::debug!(
-                    "Removing invalid transaction {} from mempool during block construction",
-                    transaction.transaction.txid()
-                );
-                self.mempool
-                    .delete(&mut rwtxn, transaction.transaction.txid())?;
-                continue;
-            }
-
+            // Transactions are validated before entering mempool in submit_transaction().
+            // We only need to check if UTXOs are still available (done by fill below).
             let txid = transaction.transaction.txid();
             let filled_transaction = match self
                 .state
@@ -829,13 +817,10 @@ where
         {
             let mut rwtxn = self.env.write_txn()?;
             let () = self.archive.put_header(&mut rwtxn, header)?;
-            rwtxn.commit().map_err(RwTxnError::from)?;
-        }
-        tracing::trace!("Stored header: {block_hash}");
-        {
-            let rotxn = self.env.read_txn()?;
+            // Check BMM in same transaction before committing
+            // This prevents TOCTOU: other threads won't see the header until BMM is verified
             if self.archive.get_bmm_result(
-                &rotxn,
+                &rwtxn,
                 block_hash,
                 main_block_hash,
             )? == BmmResult::Failed
@@ -843,9 +828,12 @@ where
                 tracing::error!(%block_hash,
                     "Rejecting block {block_hash} due to failing BMM verification",
                 );
+                // Don't commit - transaction will be dropped and header discarded
                 return Ok(false);
             }
+            rwtxn.commit().map_err(RwTxnError::from)?;
         }
+        tracing::trace!("Stored header: {block_hash}");
         {
             let rotxn = self.env.read_txn()?;
             let tip = self.state.try_get_tip(&rotxn)?;

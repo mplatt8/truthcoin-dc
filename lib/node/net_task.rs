@@ -6,6 +6,8 @@ use std::{
     time::Duration,
 };
 
+use dashmap::DashMap;
+
 use fallible_iterator::{FallibleIterator, IteratorExt};
 use futures::{
     StreamExt,
@@ -136,23 +138,19 @@ fn connect_tip_(
     two_way_peg_data: &mainchain::TwoWayPegData,
 ) -> Result<(), Error> {
     let block_hash = header.hash();
-    let _fees: bitcoin::Amount = state.validate_block(rwtxn, header, body)?;
+    let (_fees, filled_txs) = state.validate_block(rwtxn, header, body)?;
 
     // Get mainchain timestamp for slot minting
     let mainchain_timestamp = archive
         .get_main_header_info(rwtxn, &header.prev_main_hash)?
         .timestamp;
 
+    state.connect_block(rwtxn, header, body, mainchain_timestamp, filled_txs)?;
     if tracing::enabled!(tracing::Level::DEBUG) {
         let merkle_root = body.compute_merkle_root();
         let height = state.try_get_height(rwtxn)?;
-        let () =
-            state.connect_block(rwtxn, header, body, mainchain_timestamp)?;
         tracing::debug!(?height, %merkle_root, %block_hash,
                             "connected body")
-    } else {
-        let () =
-            state.connect_block(rwtxn, header, body, mainchain_timestamp)?;
     }
     let () = state.connect_two_way_peg_data(rwtxn, two_way_peg_data)?;
     let () = archive.put_header(rwtxn, header)?;
@@ -418,10 +416,8 @@ fn reorg_to_tip(
         {
             continue;
         }
-        rwtxn.commit().map_err(RwTxnError::from)?;
-        tracing::info!("synced to tip: {}", new_tip.block_hash);
-        rwtxn = env.write_txn().map_err(EnvError::from)?;
     }
+    // Single atomic commit for entire reorg
     let tip = state.try_get_tip(&rwtxn)?;
     assert_eq!(tip, Some(new_tip.block_hash));
     rwtxn.commit().map_err(RwTxnError::from)?;
@@ -502,7 +498,7 @@ impl NetTask {
         // Attempt to switch to a descendant tip once a body has been
         // stored, if all other ancestor bodies are available.
         // Each descendant tip maps to the peers that sent that tip.
-        descendant_tips: &mut HashMap<
+        descendant_tips: &DashMap<
             crate::types::BlockHash,
             HashMap<Tip, HashSet<SocketAddr>>,
         >,
@@ -552,6 +548,7 @@ impl NetTask {
                         descendant_tips
                             .entry(*earliest_missing_body)
                             .or_default()
+                            .value_mut()
                             .entry(descendant_tip)
                             .or_default()
                             .insert(addr);
@@ -620,7 +617,7 @@ impl NetTask {
                             .unbounded_send((block_tip, Some(addr), None))
                             .map_err(Error::SendNewTipReady)?;
                     }
-                    let Some(block_descendant_tips) =
+                    let Some((_, block_descendant_tips)) =
                         descendant_tips.remove(&block_hash)
                     else {
                         return Ok(());
@@ -648,6 +645,7 @@ impl NetTask {
                                 descendant_tips
                                     .entry(*earliest_missing_body)
                                     .or_default()
+                                    .value_mut()
                                     .entry(descendant_tip)
                                     .or_default()
                                     .extend(sources.iter().cloned());
@@ -928,10 +926,10 @@ impl NetTask {
         // Attempt to switch to a descendant tip once a body has been
         // stored, if all other ancestor bodies are available.
         // Each descendant tip maps to the peers that sent that tip.
-        let mut descendant_tips = HashMap::<
+        let descendant_tips: DashMap<
             crate::types::BlockHash,
             HashMap<Tip, HashSet<SocketAddr>>,
-        >::new();
+        > = DashMap::new();
         // Map associating mainchain task requests with the peer(s) that
         // caused the request, and the request peer state ID
         let mut mainchain_task_request_sources = HashMap::<
@@ -1122,7 +1120,7 @@ impl NetTask {
                             );
                             let () = Self::handle_response(
                                 &self.ctxt,
-                                &mut descendant_tips,
+                                &descendant_tips,
                                 &self.new_tip_ready_tx,
                                 addr,
                                 resp,

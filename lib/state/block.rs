@@ -531,7 +531,7 @@ pub fn validate(
     rotxn: &RoTxn,
     header: &Header,
     body: &Body,
-) -> Result<bitcoin::Amount, Error> {
+) -> Result<(bitcoin::Amount, Vec<FilledTransaction>), Error> {
     let tip_hash = state.try_get_tip(rotxn)?;
     if header.prev_side_hash != tip_hash {
         let err = error::InvalidHeader::PrevSideHash {
@@ -594,7 +594,7 @@ pub fn validate(
     if Authorization::verify_body(body).is_err() {
         return Err(Error::AuthorizationError);
     }
-    Ok(total_fees)
+    Ok((total_fees, filled_txs))
 }
 
 pub fn connect(
@@ -603,6 +603,7 @@ pub fn connect(
     header: &Header,
     body: &Body,
     mainchain_timestamp: u64,
+    filled_txs: Vec<FilledTransaction>,
 ) -> Result<(), Error> {
     let height = state.try_get_height(rwtxn)?.map_or(0, |height| height + 1);
     let tip_hash = state.try_get_tip(rwtxn)?;
@@ -771,13 +772,9 @@ pub fn connect(
         )?;
     }
     let mut state_update = StateUpdate::new();
-    let mut filled_transactions = Vec::new();
 
-    for transaction in &body.transactions {
-        let filled_tx = state.fill_transaction(rwtxn, transaction)?;
-        filled_transactions.push(filled_tx.clone());
-
-        match &transaction.data {
+    for filled_tx in &filled_txs {
+        match &filled_tx.transaction.data {
             Some(TxData::BuyShares { .. }) => {
                 apply_market_trade(
                     state,
@@ -841,7 +838,7 @@ pub fn connect(
     state_update.validate_all_changes(state, rwtxn)?;
 
     // First create UTXOs from transaction outputs (including MarketTreasury/MarketAuthorFee)
-    for filled_tx in &filled_transactions {
+    for filled_tx in &filled_txs {
         apply_utxo_changes(state, rwtxn, filled_tx)?;
     }
 

@@ -849,8 +849,7 @@ impl RpcServer for RpcServerImpl {
 
     async fn getblockcount(&self) -> RpcResult<u32> {
         let height = self.node().try_get_tip_height().map_err(custom_err)?;
-        let height = height.unwrap_or(0);
-        Ok(height + 1)
+        Ok(height.map_or(0, |h| h + 1))
     }
 
     async fn latest_failed_withdrawal_bundle_height(

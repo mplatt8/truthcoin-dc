@@ -22,7 +22,7 @@ use types::{
 #[derive(Clone)]
 pub struct VotingSystem {
     databases: VotingDatabases,
-    consensus_lock: std::sync::Arc<std::sync::Mutex<()>>,
+    consensus_lock: std::sync::Arc<parking_lot::Mutex<()>>,
 }
 
 impl VotingSystem {
@@ -32,7 +32,7 @@ impl VotingSystem {
         let databases = VotingDatabases::new(env, rwtxn)?;
         Ok(Self {
             databases,
-            consensus_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+            consensus_lock: std::sync::Arc::new(parking_lot::Mutex::new(())),
         })
     }
 
@@ -85,9 +85,7 @@ impl VotingSystem {
             ReputationVector, SparseVoteMatrix, calculate_consensus,
         };
 
-        let _consensus_guard = self.consensus_lock.lock().map_err(|_| {
-            Error::DatabaseError("Failed to acquire consensus lock".to_string())
-        })?;
+        let _consensus_guard = self.consensus_lock.lock();
 
         tracing::debug!(
             "calculate_and_store_consensus: Starting for period {} (lock acquired)",

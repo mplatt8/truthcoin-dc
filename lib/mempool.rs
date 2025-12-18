@@ -99,7 +99,7 @@ impl MemPool {
         Iter: IntoIterator<Item = &'a OutPoint>,
     {
         stxos.into_iter().try_for_each(|stxo| {
-            let _ = self.spent_utxos.delete(rwtxn, stxo)?;
+            self.spent_utxos.delete(rwtxn, stxo)?;
             Ok(())
         })
     }
@@ -151,7 +151,7 @@ impl MemPool {
         if !associated_txs.is_empty() {
             self.address_to_txs.put(rwtxn, address, &associated_txs)?;
         } else {
-            let _ = self.address_to_txs.delete(rwtxn, address)?;
+            self.address_to_txs.delete(rwtxn, address)?;
         }
         Ok(())
     }

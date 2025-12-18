@@ -2,6 +2,16 @@
 
 ## Prerequisites
 
+### Clone with Submodules
+
+This project uses a git submodule for protobuf definitions. Initialize with:
+
+```bash
+git submodule update --init --recursive
+```
+
+### Build Components
+
 Build these components before starting:
 
 ```bash

@@ -4,7 +4,10 @@ use std::collections::{HashMap, HashSet};
 use sneed::{RoTxn, RwTxn};
 
 use crate::{
-    math::lmsr::{LmsrError, LmsrService},
+    math::{
+        lmsr::{LmsrError, LmsrService},
+        satoshi::{self, Rounding},
+    },
     state::{Error, State, UtxoManager, error, markets::MarketId},
     types::{
         Address, AmountOverflowError, Authorization, Body, FilledOutput,
@@ -74,7 +77,7 @@ impl StateUpdate {
         let mut created_market_ids = std::collections::HashSet::new();
         for creation in &self.market_creations {
             if !created_market_ids.insert(creation.market.id.clone()) {
-                return Err(Error::InvalidSlotId {
+                return Err(Error::InvalidTransaction {
                     reason: format!(
                         "Duplicate market creation for ID: {:?}",
                         creation.market.id
@@ -85,7 +88,7 @@ impl StateUpdate {
 
         for update in &self.market_updates {
             if created_market_ids.contains(&update.market_id) {
-                return Err(Error::InvalidSlotId {
+                return Err(Error::InvalidTransaction {
                     reason: format!(
                         "Market {:?} cannot be both created and updated in same block",
                         update.market_id
@@ -100,7 +103,7 @@ impl StateUpdate {
             let _total_delta: f64 = outcome_changes.values().sum();
             for &delta in outcome_changes.values() {
                 if !delta.is_finite() {
-                    return Err(Error::InvalidSlotId {
+                    return Err(Error::InvalidTransaction {
                         reason: format!(
                             "Invalid share delta for address {:?} market {:?}: {}",
                             address, market_id, delta
@@ -124,7 +127,7 @@ impl StateUpdate {
             // Validate beta if provided (share deltas don't need LMSR validation here)
             if let Some(beta) = update.new_beta {
                 if beta <= 0.0 {
-                    return Err(Error::InvalidSlotId {
+                    return Err(Error::InvalidTransaction {
                         reason: "Beta must be positive".to_string(),
                     });
                 }
@@ -135,7 +138,7 @@ impl StateUpdate {
                 .get_market(rotxn, &update.market_id)?
                 .is_none()
             {
-                return Err(Error::InvalidSlotId {
+                return Err(Error::InvalidTransaction {
                     reason: format!(
                         "Market {:?} does not exist",
                         update.market_id
@@ -150,7 +153,7 @@ impl StateUpdate {
                 .get_market(rotxn, &creation.market.id)?
                 .is_some()
             {
-                return Err(Error::InvalidSlotId {
+                return Err(Error::InvalidTransaction {
                     reason: format!(
                         "Market {:?} already exists",
                         creation.market.id
@@ -194,7 +197,7 @@ impl StateUpdate {
             state
                 .markets()
                 .add_market(rwtxn, &creation.market)
-                .map_err(|_| Error::InvalidSlotId {
+                .map_err(|_| Error::InvalidTransaction {
                     reason: "Failed to store market in database".to_string(),
                 })?;
         }
@@ -225,39 +228,30 @@ impl StateUpdate {
             let mut market = state
                 .markets()
                 .get_market(rwtxn, &market_id)?
-                .ok_or_else(|| Error::InvalidSlotId {
+                .ok_or_else(|| Error::InvalidTransaction {
                     reason: format!("Market {:?} not found", market_id),
                 })?;
 
             let mut new_shares = market.shares().clone();
-            let mut last_txid: Option<[u8; 32]> = None;
 
             // Apply all deltas for this market
-            for (outcome_index, delta, volume_sats, _fee_sats, txid) in &deltas {
+            for (outcome_index, delta, volume_sats, _fee_sats, _txid) in &deltas
+            {
                 new_shares[*outcome_index] += delta;
                 if let Some(vol) = volume_sats {
                     market
                         .update_trading_volume(*outcome_index, *vol)
-                        .map_err(|e| Error::InvalidSlotId {
+                        .map_err(|e| Error::InvalidTransaction {
                             reason: format!("Failed to update volume: {:?}", e),
                         })?;
                 }
-                last_txid = *txid;
             }
 
-            let _new_state_hash = market
-                .create_new_state_version(
-                    last_txid,
-                    height as u64,
-                    None,
-                    None,
-                    None,
-                    Some(new_shares),
-                    None,
-                )
-                .map_err(|e| Error::InvalidSlotId {
+            market
+                .update_state(height as u64, None, None, Some(new_shares), None)
+                .map_err(|e| Error::InvalidTransaction {
                     reason: format!(
-                        "Failed to create new market state: {:?}",
+                        "Failed to update market state: {:?}",
                         e
                     ),
                 })?;
@@ -386,12 +380,14 @@ impl StateUpdate {
         height: u32,
     ) -> Result<(), Error> {
         use crate::state::markets::{
-            generate_market_author_fee_address, generate_market_treasury_address,
+            generate_market_author_fee_address,
+            generate_market_treasury_address,
         };
         use crate::types::{BitcoinOutputContent, FilledOutput, OutPoint};
 
         // Get markets that have pending UTXOs to consolidate (O(m) where m = active markets)
-        let markets_to_consolidate = state.markets().get_markets_with_pending_utxos(rwtxn)?;
+        let markets_to_consolidate =
+            state.markets().get_markets_with_pending_utxos(rwtxn)?;
 
         if markets_to_consolidate.is_empty() {
             return Ok(());
@@ -405,15 +401,21 @@ impl StateUpdate {
             let mut treasury_utxos_to_consume = Vec::new();
 
             // Get existing consolidated treasury UTXO (if any)
-            if let Some(existing_outpoint) = state.markets().get_market_utxo(rwtxn, &market_id)? {
-                if let Some(utxo) = state.utxos.try_get(rwtxn, &existing_outpoint)? {
+            if let Some(existing_outpoint) =
+                state.markets().get_market_utxo(rwtxn, &market_id)?
+            {
+                if let Some(utxo) =
+                    state.utxos.try_get(rwtxn, &existing_outpoint)?
+                {
                     treasury_total += utxo.get_bitcoin_value().to_sat();
                     treasury_utxos_to_consume.push(existing_outpoint);
                 }
             }
 
             // Get pending treasury UTXOs from transactions
-            let pending_treasury = state.markets().get_pending_treasury_utxos(rwtxn, &market_id)?;
+            let pending_treasury = state
+                .markets()
+                .get_pending_treasury_utxos(rwtxn, &market_id)?;
             for outpoint in pending_treasury {
                 if let Some(utxo) = state.utxos.try_get(rwtxn, &outpoint)? {
                     treasury_total += utxo.get_bitcoin_value().to_sat();
@@ -426,15 +428,21 @@ impl StateUpdate {
             let mut fee_utxos_to_consume = Vec::new();
 
             // Get existing consolidated fee UTXO (if any)
-            if let Some(existing_outpoint) = state.markets().get_author_fee_utxo(rwtxn, &market_id)? {
-                if let Some(utxo) = state.utxos.try_get(rwtxn, &existing_outpoint)? {
+            if let Some(existing_outpoint) =
+                state.markets().get_author_fee_utxo(rwtxn, &market_id)?
+            {
+                if let Some(utxo) =
+                    state.utxos.try_get(rwtxn, &existing_outpoint)?
+                {
                     fee_total += utxo.get_bitcoin_value().to_sat();
                     fee_utxos_to_consume.push(existing_outpoint);
                 }
             }
 
             // Get pending fee UTXOs from transactions
-            let pending_fees = state.markets().get_pending_author_fee_utxos(rwtxn, &market_id)?;
+            let pending_fees = state
+                .markets()
+                .get_pending_author_fee_utxos(rwtxn, &market_id)?;
             for outpoint in pending_fees {
                 if let Some(utxo) = state.utxos.try_get(rwtxn, &outpoint)? {
                     fee_total += utxo.get_bitcoin_value().to_sat();
@@ -449,7 +457,8 @@ impl StateUpdate {
                 }
                 state.markets().clear_market_utxo(rwtxn, &market_id)?;
 
-                let treasury_address = generate_market_treasury_address(&market_id);
+                let treasury_address =
+                    generate_market_treasury_address(&market_id);
                 let new_outpoint = OutPoint::Market {
                     market_id: market_id_bytes,
                     block_height: height,
@@ -458,11 +467,21 @@ impl StateUpdate {
                     treasury_address,
                     FilledOutputContent::MarketTreasury {
                         market_id: market_id_bytes,
-                        amount: BitcoinOutputContent(bitcoin::Amount::from_sat(treasury_total)),
+                        amount: BitcoinOutputContent(
+                            bitcoin::Amount::from_sat(treasury_total),
+                        ),
                     },
                 );
-                state.insert_utxo_with_address_index(rwtxn, &new_outpoint, &new_output)?;
-                state.markets().set_market_utxo(rwtxn, &market_id, &new_outpoint)?;
+                state.insert_utxo_with_address_index(
+                    rwtxn,
+                    &new_outpoint,
+                    &new_output,
+                )?;
+                state.markets().set_market_utxo(
+                    rwtxn,
+                    &market_id,
+                    &new_outpoint,
+                )?;
             }
 
             // Consolidate fee UTXOs into a single OutPoint::MarketAuthorFee
@@ -472,7 +491,8 @@ impl StateUpdate {
                 }
                 state.markets().clear_author_fee_utxo(rwtxn, &market_id)?;
 
-                let fee_address = generate_market_author_fee_address(&market_id);
+                let fee_address =
+                    generate_market_author_fee_address(&market_id);
                 let new_outpoint = OutPoint::MarketAuthorFee {
                     market_id: market_id_bytes,
                     block_height: height,
@@ -481,16 +501,30 @@ impl StateUpdate {
                     fee_address,
                     FilledOutputContent::MarketAuthorFee {
                         market_id: market_id_bytes,
-                        amount: BitcoinOutputContent(bitcoin::Amount::from_sat(fee_total)),
+                        amount: BitcoinOutputContent(
+                            bitcoin::Amount::from_sat(fee_total),
+                        ),
                     },
                 );
-                state.insert_utxo_with_address_index(rwtxn, &new_outpoint, &new_output)?;
-                state.markets().set_author_fee_utxo(rwtxn, &market_id, &new_outpoint)?;
+                state.insert_utxo_with_address_index(
+                    rwtxn,
+                    &new_outpoint,
+                    &new_output,
+                )?;
+                state.markets().set_author_fee_utxo(
+                    rwtxn,
+                    &market_id,
+                    &new_outpoint,
+                )?;
             }
 
             // Clear pending UTXOs after consolidation - data is now in consolidated UTXO
-            state.markets().clear_pending_treasury_utxos(rwtxn, &market_id)?;
-            state.markets().clear_pending_author_fee_utxos(rwtxn, &market_id)?;
+            state
+                .markets()
+                .clear_pending_treasury_utxos(rwtxn, &market_id)?;
+            state
+                .markets()
+                .clear_pending_author_fee_utxos(rwtxn, &market_id)?;
         }
 
         Ok(())
@@ -526,12 +560,14 @@ fn query_update_cost(
     LmsrService::calculate_update_cost(current_shares, new_shares, beta)
 }
 
+use crate::types::MerkleRoot;
+
 pub fn validate(
     state: &State,
     rotxn: &RoTxn,
     header: &Header,
     body: &Body,
-) -> Result<(bitcoin::Amount, Vec<FilledTransaction>), Error> {
+) -> Result<(bitcoin::Amount, Vec<FilledTransaction>, MerkleRoot), Error> {
     let tip_hash = state.try_get_tip(rotxn)?;
     if header.prev_side_hash != tip_hash {
         let err = error::InvalidHeader::PrevSideHash {
@@ -594,7 +630,7 @@ pub fn validate(
     if Authorization::verify_body(body).is_err() {
         return Err(Error::AuthorizationError);
     }
-    Ok((total_fees, filled_txs))
+    Ok((total_fees, filled_txs, merkle_root))
 }
 
 pub fn connect(
@@ -604,6 +640,7 @@ pub fn connect(
     body: &Body,
     mainchain_timestamp: u64,
     filled_txs: Vec<FilledTransaction>,
+    pre_computed_merkle_root: MerkleRoot,
 ) -> Result<(), Error> {
     let height = state.try_get_height(rwtxn)?.map_or(0, |height| height + 1);
     let tip_hash = state.try_get_tip(rwtxn)?;
@@ -614,10 +651,10 @@ pub fn connect(
         };
         return Err(Error::InvalidHeader(err));
     }
-    let merkle_root = body.compute_merkle_root();
-    if merkle_root != header.merkle_root {
+    // Use pre-computed merkle root from validate() to avoid duplicate computation
+    if pre_computed_merkle_root != header.merkle_root {
         let err = Error::InvalidBody {
-            expected: merkle_root,
+            expected: pre_computed_merkle_root,
             computed: header.merkle_root,
         };
         return Err(err);
@@ -923,7 +960,6 @@ pub fn disconnect_tip(
         )?;
         tx.inputs.iter().rev().try_for_each(|outpoint| {
             if let Some(spent_output) = state.stxos.try_get(rwtxn, outpoint)? {
-                state.remove_stxo_caches(rwtxn, outpoint, &spent_output)?;
                 state.stxos.delete(rwtxn, outpoint)?;
                 state.insert_utxo_with_address_index(
                     rwtxn,
@@ -987,7 +1023,7 @@ fn apply_claim_decision_slot(
     use crate::state::slots::{Decision, SlotId};
 
     let claim = filled_tx.claim_decision_slot().ok_or_else(|| {
-        Error::InvalidSlotId {
+        Error::InvalidTransaction {
             reason: "Not a decision slot claim transaction".to_string(),
         }
     })?;
@@ -997,7 +1033,7 @@ fn apply_claim_decision_slot(
     let market_maker_address_bytes = filled_tx
         .spent_utxos
         .first()
-        .ok_or_else(|| Error::InvalidSlotId {
+        .ok_or_else(|| Error::InvalidTransaction {
             reason: "No spent UTXOs found".to_string(),
         })?
         .address
@@ -1042,7 +1078,7 @@ fn revert_claim_decision_slot(
     use crate::state::slots::SlotId;
 
     let claim = filled_tx.claim_decision_slot().ok_or_else(|| {
-        Error::InvalidSlotId {
+        Error::InvalidTransaction {
             reason: "Not a decision slot claim transaction".to_string(),
         }
     })?;
@@ -1061,7 +1097,7 @@ fn extract_creator_address(
         .spent_utxos
         .first()
         .map(|utxo| utxo.address)
-        .ok_or_else(|| Error::InvalidSlotId {
+        .ok_or_else(|| Error::InvalidTransaction {
             reason: "No spent UTXOs found".to_string(),
         })
 }
@@ -1091,18 +1127,182 @@ fn configure_market_builder(
 }
 
 fn revert_create_market(
-    _state: &State,
-    _rwtxn: &mut RwTxn,
-    _filled_tx: &FilledTransaction,
+    state: &State,
+    rwtxn: &mut RwTxn,
+    filled_tx: &FilledTransaction,
 ) -> Result<(), Error> {
+    use crate::state::{MarketBuilder, slots::SlotId};
+    use std::collections::HashMap;
+
+    let market_data =
+        filled_tx
+            .create_market()
+            .ok_or_else(|| Error::InvalidTransaction {
+                reason: "Not a market creation transaction".to_string(),
+            })?;
+
+    let creator_address = extract_creator_address(filled_tx)?;
+
+    let mut slot_ids = Vec::new();
+    let mut decisions = HashMap::new();
+
+    for slot_hex in &market_data.decision_slots {
+        let slot_bytes =
+            hex::decode(slot_hex).map_err(|_| Error::InvalidTransaction {
+                reason: format!("Invalid slot ID hex: {}", slot_hex),
+            })?;
+
+        let slot_id_array: [u8; 3] =
+            slot_bytes.try_into().map_err(|_| Error::InvalidTransaction {
+                reason: "Invalid slot ID length".to_string(),
+            })?;
+        let slot_id = SlotId::from_bytes(slot_id_array)?;
+
+        let slot = state.slots.get_slot(rwtxn, slot_id)?.ok_or_else(|| {
+            Error::InvalidSlotId {
+                reason: format!("Slot {} does not exist", slot_hex),
+            }
+        })?;
+
+        let decision = slot.decision.ok_or_else(|| Error::InvalidSlotId {
+            reason: format!("Slot {} has no decision", slot_hex),
+        })?;
+
+        slot_ids.push(slot_id);
+        decisions.insert(slot_id, decision);
+    }
+
+    let mut builder =
+        MarketBuilder::new(market_data.title.clone(), creator_address);
+    builder = configure_market_builder(
+        builder,
+        &market_data.description,
+        &market_data.tags,
+        market_data.b,
+        market_data.trading_fee,
+    );
+
+    let builder = match market_data.market_type.as_str() {
+        "independent" => builder.add_decisions(slot_ids),
+        "categorical" => builder.set_categorical(
+            slot_ids,
+            market_data.has_residual.unwrap_or(false),
+        ),
+        _ => {
+            return Err(Error::InvalidTransaction {
+                reason: format!(
+                    "Invalid market type: {}",
+                    market_data.market_type
+                ),
+            });
+        }
+    };
+
+    // Reconstruct the market to get its ID (height doesn't affect ID)
+    let market = builder.build(0, None, &decisions).map_err(|e| {
+        Error::InvalidTransaction {
+            reason: format!("Market reconstruction failed: {}", e),
+        }
+    })?;
+
+    let market_id = market.id.clone();
+
+    // Delete the market UTXO if it exists
+    if let Some(outpoint) =
+        state.markets().get_market_utxo(rwtxn, &market_id)?
+    {
+        state.delete_utxo_with_address_index(rwtxn, &outpoint)?;
+    }
+
+    // Delete the market and all its index entries
+    state.markets().delete_market(rwtxn, &market_id)?;
+
     Ok(())
 }
 
 fn revert_create_market_dimensional(
-    _state: &State,
-    _rwtxn: &mut RwTxn,
-    _filled_tx: &FilledTransaction,
+    state: &State,
+    rwtxn: &mut RwTxn,
+    filled_tx: &FilledTransaction,
 ) -> Result<(), Error> {
+    use crate::state::{
+        MarketBuilder,
+        markets::{DimensionSpec, parse_dimensions},
+    };
+    use std::collections::HashMap;
+
+    let market_data =
+        filled_tx.create_market_dimensional().ok_or_else(|| {
+            Error::InvalidTransaction {
+                reason: "Not a dimensional market creation transaction"
+                    .to_string(),
+            }
+        })?;
+
+    let creator_address = extract_creator_address(filled_tx)?;
+
+    let dimension_specs: Vec<DimensionSpec> =
+        parse_dimensions(&market_data.dimensions).map_err(|e| {
+            Error::InvalidTransaction {
+                reason: format!("Failed to parse dimensions: {}", e),
+            }
+        })?;
+
+    let mut decisions = HashMap::new();
+
+    // Extract slot IDs from dimension specs
+    for spec in &dimension_specs {
+        match spec {
+            DimensionSpec::Single(slot_id) => {
+                if let Some(slot) = state.slots.get_slot(rwtxn, *slot_id)? {
+                    if let Some(decision) = slot.decision {
+                        decisions.insert(*slot_id, decision);
+                    }
+                }
+            }
+            DimensionSpec::Categorical(slot_ids) => {
+                for &slot_id in slot_ids {
+                    if let Some(slot) = state.slots.get_slot(rwtxn, slot_id)? {
+                        if let Some(decision) = slot.decision {
+                            decisions.insert(slot_id, decision);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut builder =
+        MarketBuilder::new(market_data.title.clone(), creator_address);
+    builder = configure_market_builder(
+        builder,
+        &market_data.description,
+        &market_data.tags,
+        market_data.b,
+        market_data.trading_fee,
+    );
+
+    let builder = builder.with_dimensions(dimension_specs);
+
+    // Reconstruct the market to get its ID (height doesn't affect ID)
+    let market = builder.build(0, None, &decisions).map_err(|e| {
+        Error::InvalidTransaction {
+            reason: format!("Market reconstruction failed: {}", e),
+        }
+    })?;
+
+    let market_id = market.id.clone();
+
+    // Delete the market UTXO if it exists
+    if let Some(outpoint) =
+        state.markets().get_market_utxo(rwtxn, &market_id)?
+    {
+        state.delete_utxo_with_address_index(rwtxn, &outpoint)?;
+    }
+
+    // Delete the market and all its index entries
+    state.markets().delete_market(rwtxn, &market_id)?;
+
     Ok(())
 }
 
@@ -1112,14 +1312,14 @@ fn revert_buy_shares(
     filled_tx: &FilledTransaction,
 ) -> Result<(), Error> {
     let buy_data =
-        filled_tx.buy_shares().ok_or_else(|| Error::InvalidSlotId {
+        filled_tx.buy_shares().ok_or_else(|| Error::InvalidTransaction {
             reason: "Not a buy shares transaction".to_string(),
         })?;
 
     let trader_address = filled_tx
         .spent_utxos
         .first()
-        .ok_or_else(|| Error::InvalidSlotId {
+        .ok_or_else(|| Error::InvalidTransaction {
             reason: "Buy shares transaction must have inputs".to_string(),
         })?
         .address;
@@ -1160,7 +1360,6 @@ fn apply_utxo_changes(
         };
         state.delete_utxo_with_address_index(rwtxn, input)?;
         state.stxos.put(rwtxn, input, &spent_output)?;
-        state.update_stxo_caches(rwtxn, input, &spent_output)?;
     }
 
     let Some(filled_outputs) = filled_tx.filled_outputs() else {
@@ -1184,11 +1383,15 @@ fn apply_utxo_changes(
         match &filled_output.content {
             FilledOutputContent::MarketTreasury { market_id, .. } => {
                 let market_id = MarketId::new(*market_id);
-                state.markets().add_pending_treasury_utxo(rwtxn, &market_id, &outpoint)?;
+                state
+                    .markets()
+                    .add_pending_treasury_utxo(rwtxn, &market_id, &outpoint)?;
             }
             FilledOutputContent::MarketAuthorFee { market_id, .. } => {
                 let market_id = MarketId::new(*market_id);
-                state.markets().add_pending_author_fee_utxo(rwtxn, &market_id, &outpoint)?;
+                state.markets().add_pending_author_fee_utxo(
+                    rwtxn, &market_id, &outpoint,
+                )?;
             }
             _ => {}
         }
@@ -1205,20 +1408,20 @@ fn apply_market_trade(
     _height: u32,
 ) -> Result<(), Error> {
     let buy_data =
-        filled_tx.buy_shares().ok_or_else(|| Error::InvalidSlotId {
+        filled_tx.buy_shares().ok_or_else(|| Error::InvalidTransaction {
             reason: "Not a buy shares transaction".to_string(),
         })?;
 
     let market = state
         .markets()
         .get_market(rwtxn, &buy_data.market_id)?
-        .ok_or_else(|| Error::InvalidSlotId {
+        .ok_or_else(|| Error::InvalidTransaction {
             reason: format!("Market {:?} does not exist", buy_data.market_id),
         })?;
 
     let market_state = market.state();
     if !market_state.allows_trading() {
-        return Err(Error::InvalidSlotId {
+        return Err(Error::InvalidTransaction {
             reason: format!(
                 "Cannot trade: market is in {:?} state",
                 market_state
@@ -1235,7 +1438,7 @@ fn apply_market_trade(
 
     let base_cost =
         query_update_cost(&market.shares(), &new_shares, market.b()).map_err(
-            |e| Error::InvalidSlotId {
+            |e| Error::InvalidTransaction {
                 reason: format!("Failed to calculate trade cost: {:?}", e),
             },
         )?;
@@ -1245,7 +1448,7 @@ fn apply_market_trade(
     let total_cost = base_cost + fee_amount;
 
     if total_cost > buy_data.max_cost as f64 {
-        return Err(Error::InvalidSlotId {
+        return Err(Error::InvalidTransaction {
             reason: format!(
                 "Trade cost {} (base: {}, fee: {}) exceeds max cost {}",
                 total_cost, base_cost, fee_amount, buy_data.max_cost
@@ -1257,14 +1460,23 @@ fn apply_market_trade(
         .spent_utxos
         .first()
         .map(|utxo| utxo.address)
-        .ok_or_else(|| Error::InvalidSlotId {
+        .ok_or_else(|| Error::InvalidTransaction {
             reason: "No spent UTXOs found for trade".to_string(),
         })?;
 
-    let volume_sats = total_cost.ceil() as u64;
-    let fee_sats = fee_amount.ceil() as i64;
+    let volume_sats = satoshi::to_sats(total_cost, Rounding::Up)
+        .map_err(|e| Error::InvalidTransaction {
+            reason: format!("Volume conversion failed: {}", e),
+        })?;
+    let fee_sats = satoshi::to_sats_signed(fee_amount, Rounding::Up)
+        .map_err(|e| Error::InvalidTransaction {
+            reason: format!("Fee conversion failed: {}", e),
+        })?;
     // Note: base_cost_sats is used for validation of explicit tx outputs
-    let _base_cost_sats = base_cost.ceil() as i64;
+    let _base_cost_sats = satoshi::to_sats_signed(base_cost, Rounding::Up)
+        .map_err(|e| Error::InvalidTransaction {
+            reason: format!("Base cost conversion failed: {}", e),
+        })?;
 
     state_update.add_market_update(MarketStateUpdate {
         market_id: buy_data.market_id.clone(),
@@ -1308,7 +1520,7 @@ fn apply_market_creation(
     let market_data =
         filled_tx
             .create_market()
-            .ok_or_else(|| Error::InvalidSlotId {
+            .ok_or_else(|| Error::InvalidTransaction {
                 reason: "Not a market creation transaction".to_string(),
             })?;
 
@@ -1319,7 +1531,7 @@ fn apply_market_creation(
 
     for slot_hex in &market_data.decision_slots {
         let slot_bytes =
-            hex::decode(slot_hex).map_err(|_| Error::InvalidSlotId {
+            hex::decode(slot_hex).map_err(|_| Error::InvalidTransaction {
                 reason: format!("Invalid slot ID hex: {}", slot_hex),
             })?;
 
@@ -1357,7 +1569,7 @@ fn apply_market_creation(
             market_data.has_residual.unwrap_or(false),
         ),
         _ => {
-            return Err(Error::InvalidSlotId {
+            return Err(Error::InvalidTransaction {
                 reason: format!(
                     "Invalid market type: {}",
                     market_data.market_type
@@ -1369,13 +1581,17 @@ fn apply_market_creation(
     let market =
         builder
             .build(height as u64, None, &decisions)
-            .map_err(|e| Error::InvalidSlotId {
+            .map_err(|e| Error::InvalidTransaction {
                 reason: format!("Market creation failed: {}", e),
             })?;
 
     // Calculate initial treasury from beta: b * ln(num_outcomes)
     let num_outcomes = market.get_outcome_count() as f64;
-    let initial_treasury_sats = (market.b() * num_outcomes.ln()).ceil() as u64;
+    let treasury_calc = market.b() * num_outcomes.ln();
+    let initial_treasury_sats = satoshi::to_sats(treasury_calc, Rounding::Up)
+        .map_err(|e| Error::InvalidTransaction {
+            reason: format!("Treasury calculation failed: {}", e),
+        })?;
 
     // Create the initial MarketTreasury UTXO if there's initial liquidity
     // The funds come from the transaction inputs (included in total_cost by wallet)
@@ -1395,12 +1611,16 @@ fn apply_market_creation(
             treasury_address,
             FilledOutputContent::MarketTreasury {
                 market_id: market_id_bytes,
-                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(initial_treasury_sats)),
+                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(
+                    initial_treasury_sats,
+                )),
             },
         );
 
         state.insert_utxo_with_address_index(rwtxn, &outpoint, &output)?;
-        state.markets().set_market_utxo(rwtxn, &market_id, &outpoint)?;
+        state
+            .markets()
+            .set_market_utxo(rwtxn, &market_id, &outpoint)?;
 
         tracing::debug!(
             "Created initial MarketTreasury UTXO for market {:?} with {} sats",
@@ -1409,7 +1629,9 @@ fn apply_market_creation(
         );
     }
 
-    state_update.add_market_creation(MarketCreation { market: market.clone() });
+    state_update.add_market_creation(MarketCreation {
+        market: market.clone(),
+    });
 
     Ok(())
 }
@@ -1428,7 +1650,7 @@ fn apply_dimensional_market(
 
     let market_data =
         filled_tx.create_market_dimensional().ok_or_else(|| {
-            Error::InvalidSlotId {
+            Error::InvalidTransaction {
                 reason: "Not a dimensional market creation transaction"
                     .to_string(),
             }
@@ -1438,7 +1660,7 @@ fn apply_dimensional_market(
 
     let dimension_specs =
         parse_dimensions(&market_data.dimensions).map_err(|_| {
-            Error::InvalidSlotId {
+            Error::InvalidTransaction {
                 reason: "Failed to parse dimension specification".to_string(),
             }
         })?;
@@ -1482,13 +1704,17 @@ fn apply_dimensional_market(
     let market =
         builder
             .build(height as u64, None, &decisions)
-            .map_err(|e| Error::InvalidSlotId {
+            .map_err(|e| Error::InvalidTransaction {
                 reason: format!("Dimensional market creation failed: {}", e),
             })?;
 
     // Calculate initial treasury from beta: b * ln(num_outcomes)
     let num_outcomes = market.get_outcome_count() as f64;
-    let initial_treasury_sats = (market.b() * num_outcomes.ln()).ceil() as u64;
+    let treasury_calc = market.b() * num_outcomes.ln();
+    let initial_treasury_sats = satoshi::to_sats(treasury_calc, Rounding::Up)
+        .map_err(|e| Error::InvalidTransaction {
+            reason: format!("Treasury calculation failed: {}", e),
+        })?;
 
     // Create the initial MarketTreasury UTXO if there's initial liquidity
     if initial_treasury_sats > 0 {
@@ -1507,12 +1733,16 @@ fn apply_dimensional_market(
             treasury_address,
             FilledOutputContent::MarketTreasury {
                 market_id: market_id_bytes,
-                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(initial_treasury_sats)),
+                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(
+                    initial_treasury_sats,
+                )),
             },
         );
 
         state.insert_utxo_with_address_index(rwtxn, &outpoint, &output)?;
-        state.markets().set_market_utxo(rwtxn, &market_id, &outpoint)?;
+        state
+            .markets()
+            .set_market_utxo(rwtxn, &market_id, &outpoint)?;
 
         tracing::debug!(
             "Created initial MarketTreasury UTXO for dimensional market {:?} with {} sats",
@@ -1521,7 +1751,9 @@ fn apply_dimensional_market(
         );
     }
 
-    state_update.add_market_creation(MarketCreation { market: market.clone() });
+    state_update.add_market_creation(MarketCreation {
+        market: market.clone(),
+    });
 
     Ok(())
 }
@@ -1773,4 +2005,3 @@ fn revert_submit_vote_batch(
 
     Ok(())
 }
-

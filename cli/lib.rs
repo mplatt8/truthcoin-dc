@@ -823,7 +823,10 @@ where
                 _ => SlotState::Available,
             });
             let filter = if period.is_some() || slot_status.is_some() {
-                Some(SlotFilter { period, status: slot_status })
+                Some(SlotFilter {
+                    period,
+                    status: slot_status,
+                })
             } else {
                 None
             };
@@ -845,7 +848,16 @@ where
             fee_sats,
         } => {
             let txid = rpc_client
-                .slot_claim(period_index, slot_index, is_standard, is_scaled, question, min, max, fee_sats)
+                .slot_claim(
+                    period_index,
+                    slot_index,
+                    is_standard,
+                    is_scaled,
+                    question,
+                    min,
+                    max,
+                    fee_sats,
+                )
                 .await?;
             format!("Slot claimed: {}", txid)
         }
@@ -1069,7 +1081,10 @@ where
             fee_sats,
         } => {
             use truthcoin_dc_app_rpc_api::RegisterVoterRequest;
-            let request = RegisterVoterRequest { reputation_bond_sats, fee_sats };
+            let request = RegisterVoterRequest {
+                reputation_bond_sats,
+                fee_sats,
+            };
             let txid = rpc_client.vote_register(request).await?;
             format!("Voter registered: {}", txid)
         }
@@ -1090,21 +1105,31 @@ where
             use truthcoin_dc_app_rpc_api::VoteBatchItem;
             let vote_items = if let Some(batch) = votes {
                 // Parse batch format: "id1:val1,id2:val2"
-                batch.split(',')
+                batch
+                    .split(',')
                     .filter_map(|pair| {
                         let parts: Vec<&str> = pair.trim().split(':').collect();
                         if parts.len() == 2 {
                             let val: f64 = parts[1].parse().ok()?;
-                            Some(VoteBatchItem { decision_id: parts[0].to_string(), vote_value: val })
+                            Some(VoteBatchItem {
+                                decision_id: parts[0].to_string(),
+                                vote_value: val,
+                            })
                         } else {
                             None
                         }
                     })
                     .collect()
             } else if let (Some(id), Some(val)) = (decision_id, vote_value) {
-                vec![VoteBatchItem { decision_id: id, vote_value: val }]
+                vec![VoteBatchItem {
+                    decision_id: id,
+                    vote_value: val,
+                }]
             } else {
-                return Ok("Error: provide --decision-id and --vote-value, or --votes".to_string());
+                return Ok(
+                    "Error: provide --decision-id and --vote-value, or --votes"
+                        .to_string(),
+                );
             };
             let txid = rpc_client.vote_submit(vote_items, fee_sats).await?;
             format!("Vote submitted: {}", txid)
@@ -1115,7 +1140,11 @@ where
             period_id,
         } => {
             use truthcoin_dc_app_rpc_api::VoteFilter;
-            let filter = VoteFilter { voter, decision_id, period_id };
+            let filter = VoteFilter {
+                voter,
+                decision_id,
+                period_id,
+            };
             let votes = rpc_client.vote_list(filter).await?;
             json_response(&votes)?
         }
@@ -1130,7 +1159,9 @@ where
             amount,
             fee_sats,
         } => {
-            let txid = rpc_client.votecoin_transfer(dest, amount, fee_sats, None).await?;
+            let txid = rpc_client
+                .votecoin_transfer(dest, amount, fee_sats, None)
+                .await?;
             format!("Votecoin transferred: {}", txid)
         }
         Command::VotecoinBalance { address } => {

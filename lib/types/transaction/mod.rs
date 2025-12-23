@@ -91,11 +91,22 @@ impl std::fmt::Display for OutPoint {
             Self::Deposit(bitcoin::OutPoint { txid, vout }) => {
                 write!(f, "deposit {txid} {vout}")
             }
-            Self::Market { market_id, block_height } => {
+            Self::Market {
+                market_id,
+                block_height,
+            } => {
                 write!(f, "market {} {}", hex::encode(market_id), block_height)
             }
-            Self::MarketAuthorFee { market_id, block_height } => {
-                write!(f, "market_author_fee {} {}", hex::encode(market_id), block_height)
+            Self::MarketAuthorFee {
+                market_id,
+                block_height,
+            } => {
+                write!(
+                    f,
+                    "market_author_fee {} {}",
+                    hex::encode(market_id),
+                    block_height
+                )
             }
         }
     }
@@ -791,7 +802,10 @@ impl FilledTransaction {
                         }
 
                         output_bitcoin_max_value = new_max.unwrap();
-                        FilledOutputContent::MarketTreasury { market_id, amount }
+                        FilledOutputContent::MarketTreasury {
+                            market_id,
+                            amount,
+                        }
                     }
                     OutputContent::MarketAuthorFee { market_id, amount } => {
                         let new_max =
@@ -801,7 +815,10 @@ impl FilledTransaction {
                         }
 
                         output_bitcoin_max_value = new_max.unwrap();
-                        FilledOutputContent::MarketAuthorFee { market_id, amount }
+                        FilledOutputContent::MarketAuthorFee {
+                            market_id,
+                            amount,
+                        }
                     }
                 };
                 Some(FilledOutput {

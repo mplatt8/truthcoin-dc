@@ -23,7 +23,6 @@ pub struct TxCreator {
 }
 
 impl TxCreator {
-
     fn set_tx_data(
         &self,
         _app: &App,

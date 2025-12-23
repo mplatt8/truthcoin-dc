@@ -396,7 +396,7 @@ async fn roundtrip_task(
         (
             voter_addr_0,
             0,
-            "Decision 1: Will Bitcoin reach $100k in 2025?",
+            "Will Bitcoin reach $100k in 2025?",
         ),
         (
             voter_addr_1,
@@ -406,9 +406,13 @@ async fn roundtrip_task(
         (
             voter_addr_2,
             2,
-            "Decision 3: Will there be 1M BTC addresses by 2026?",
+            "Will there be 1M BTC addresses by 2026?",
         ),
-        (voter_addr_3, 3, "Will BIP 444 activate"),
+        (
+            voter_addr_3,
+            3, 
+            "Will BIP 444 activate"
+        ),
     ];
 
     for (i, (_voter_addr, slot_index, question)) in

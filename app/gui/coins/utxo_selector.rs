@@ -207,12 +207,14 @@ pub fn show_utxo(
         OutPoint::Coinbase { merkle_root, vout } => {
             ("coinbase", format!("{merkle_root}"), *vout)
         }
-        OutPoint::Market { market_id, block_height } => {
-            ("market", hex::encode(market_id), *block_height)
-        }
-        OutPoint::MarketAuthorFee { market_id, block_height } => {
-            ("author_fee", hex::encode(market_id), *block_height)
-        }
+        OutPoint::Market {
+            market_id,
+            block_height,
+        } => ("market", hex::encode(market_id), *block_height),
+        OutPoint::MarketAuthorFee {
+            market_id,
+            block_height,
+        } => ("author_fee", hex::encode(market_id), *block_height),
     };
     let hash = &hash[0..8];
     ui.monospace_selectable_singleline(false, kind.to_string());
@@ -263,12 +265,14 @@ pub fn show_unconfirmed_utxo(
         OutPoint::Coinbase { merkle_root, vout } => {
             ("coinbase", format!("{merkle_root}"), *vout)
         }
-        OutPoint::Market { market_id, block_height } => {
-            ("market", hex::encode(market_id), *block_height)
-        }
-        OutPoint::MarketAuthorFee { market_id, block_height } => {
-            ("author_fee", hex::encode(market_id), *block_height)
-        }
+        OutPoint::Market {
+            market_id,
+            block_height,
+        } => ("market", hex::encode(market_id), *block_height),
+        OutPoint::MarketAuthorFee {
+            market_id,
+            block_height,
+        } => ("author_fee", hex::encode(market_id), *block_height),
     };
     let hash = &hash[0..8];
     ui.monospace_selectable_singleline(false, kind.to_string());

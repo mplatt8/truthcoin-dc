@@ -1,3 +1,4 @@
+use borsh::BorshSerialize;
 use crate::state::Error;
 use crate::types::{BITCOIN_GENESIS_TIMESTAMP, SECONDS_PER_QUARTER};
 use crate::validation::SlotValidationInterface;
@@ -18,6 +19,7 @@ use std::collections::BTreeSet;
     Ord,
     Deserialize,
     Serialize,
+    BorshSerialize,
 )]
 pub struct SlotId([u8; 3]);
 

@@ -1,3 +1,4 @@
+use borsh::BorshSerialize;
 use fallible_iterator::FallibleIterator;
 use heed::types::SerdeBincode;
 use ndarray::{Array, Ix1};
@@ -85,7 +86,16 @@ impl MarketState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Hash,
+    BorshSerialize,
+)]
 pub enum DFunction {
     Decision(usize),
     Equals(Box<DFunction>, usize),
@@ -1106,23 +1116,30 @@ impl Market {
     }
 
     fn calculate_id(&self) -> MarketId {
-        let market_string = format!(
-            "{}{}{}{}{}{}{}{}{}",
-            self.title,
-            self.description,
-            self.creator_address,
-            self.decision_slots.len(),
-            self.decision_slots
-                .iter()
-                .map(|s| format!("{:?}", s))
-                .collect::<Vec<_>>()
-                .join(","),
-            format!("{:?}", self.d_functions),
-            format!("{:?}", self.state_combos),
-            self.created_at_height,
-            self.expires_at_height.unwrap_or(0)
-        );
-        let hash_bytes = hashes::hash(&market_string);
+        #[derive(BorshSerialize)]
+        struct MarketIdInput<'a> {
+            title: &'a str,
+            description: &'a str,
+            creator_address: &'a Address,
+            decision_slots: &'a [SlotId],
+            d_functions: &'a [DFunction],
+            state_combos: &'a [Vec<usize>],
+            created_at_height: u64,
+            expires_at_height: Option<u64>,
+        }
+
+        let input = MarketIdInput {
+            title: &self.title,
+            description: &self.description,
+            creator_address: &self.creator_address,
+            decision_slots: &self.decision_slots,
+            d_functions: &self.d_functions,
+            state_combos: &self.state_combos,
+            created_at_height: self.created_at_height,
+            expires_at_height: self.expires_at_height,
+        };
+
+        let hash_bytes = hashes::hash(&input);
         let mut id_bytes = [0u8; 6];
         id_bytes.copy_from_slice(&hash_bytes[0..6]);
         MarketId(id_bytes)

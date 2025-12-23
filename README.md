@@ -60,38 +60,38 @@ rm -rf /tmp/regtest-data && mkdir -p /tmp/regtest-data/{bitcoin,electrs,enforcer
 **Bitcoin Core:**
 ```bash
 ../bitcoin-patched/build/src/bitcoind -acceptnonstdtxn -chain=regtest -datadir=/tmp/regtest-data/bitcoin \
-  -bind=127.0.0.1:18444 -rpcuser=regtest_user -rpcpassword=regtest_pass -rpcport=18443 \
-  -rest -server -zmqpubsequence=tcp://127.0.0.1:28332 -listenonion=0 -txindex
+-bind=127.0.0.1:18444 -rpcuser=regtest_user -rpcpassword=regtest_pass -rpcport=18443 \
+-rest -server -zmqpubsequence=tcp://127.0.0.1:28332 -listenonion=0 -txindex
 ```
 
 **Electrs:**
 ```bash
 ../electrs/target/release/electrs -vv --db-dir=/tmp/regtest-data/electrs \
-  --daemon-dir=/tmp/regtest-data/bitcoin --daemon-rpc-addr=127.0.0.1:18443 \
-  --electrum-rpc-addr=127.0.0.1:50001 --http-addr=127.0.0.1:3000 \
-  --monitoring-addr=127.0.0.1:4224 --network=regtest --cookie=regtest_user:regtest_pass --jsonrpc-import
+--daemon-dir=/tmp/regtest-data/bitcoin --daemon-rpc-addr=127.0.0.1:18443 \
+--electrum-rpc-addr=127.0.0.1:50001 --http-addr=127.0.0.1:3000 \
+--monitoring-addr=127.0.0.1:4224 --network=regtest --cookie=regtest_user:regtest_pass --jsonrpc-import
 ```
 
 **BIP300301 Enforcer:**
 ```bash
 ../bip300301_enforcer/target/debug/bip300301_enforcer --data-dir=/tmp/regtest-data/enforcer \
-  --node-rpc-addr=127.0.0.1:18443 --node-rpc-user=regtest_user --node-rpc-pass=regtest_pass \
-  --enable-wallet --log-level=trace --serve-grpc-addr=127.0.0.1:50051 \
-  --serve-json-rpc-addr=127.0.0.1:18080 --serve-rpc-addr=127.0.0.1:18081 \
-  --wallet-auto-create --wallet-electrum-host=127.0.0.1 --wallet-electrum-port=50001 \
-  --wallet-esplora-url=http://127.0.0.1:3000 --wallet-skip-periodic-sync --enable-mempool
+--node-rpc-addr=127.0.0.1:18443 --node-rpc-user=regtest_user --node-rpc-pass=regtest_pass \
+--enable-wallet --log-level=trace --serve-grpc-addr=127.0.0.1:50051 \
+--serve-json-rpc-addr=127.0.0.1:18080 --serve-rpc-addr=127.0.0.1:18081 \
+--wallet-auto-create --wallet-electrum-host=127.0.0.1 --wallet-electrum-port=50001 \
+--wallet-esplora-url=http://127.0.0.1:3000 --wallet-skip-periodic-sync --enable-mempool
 ```
 
 **Truthcoin App (Headless for CLI use):**
 ```bash
 ./target/debug/truthcoin_dc_app --headless --datadir=/tmp/regtest-data/truthcoin --network=regtest \
-  --mainchain-grpc-port=50051 --net-addr=127.0.0.1:18445 --rpc-port=18332 --zmq-addr=127.0.0.1:28333
+--mainchain-grpc-port=50051 --net-addr=127.0.0.1:18445 --rpc-port=18332 --zmq-addr=127.0.0.1:28333
 ```
 
 **Truthcoin App (GUI):**
 ```bash
 ./target/debug/truthcoin_dc_app --datadir=/tmp/regtest-data/truthcoin --network=regtest \
-  --mainchain-grpc-port=50051 --net-addr=127.0.0.1:18445 --rpc-port=18332 --zmq-addr=127.0.0.1:28333
+--mainchain-grpc-port=50051 --net-addr=127.0.0.1:18445 --rpc-port=18332 --zmq-addr=127.0.0.1:28333
 ```
 
 ### 3. Activate Sidechain
@@ -152,8 +152,8 @@ Markets require decision slots. Slots must be claimed and confirmed before they 
 
 ```bash
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 slot-claim \
-  --period-index 0 --slot-index 0 --is-standard true --is-scaled false \
-  --question "Will BTC hit $100K?" --fee-sats 1000
+--period-index 0 --slot-index 0 --is-standard true --is-scaled false \
+--question "Will BTC hit $100K?" --fee-sats 1000
 ```
 
 ### 2. Mine Blocks to Confirm
@@ -174,8 +174,8 @@ Use the returned slot ID in your market's `--dimensions` parameter.
 
 ```bash
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 market-create \
-  --title "Will BTC hit $100K?" --description "Binary prediction market" \
-  --dimensions "[SLOT_ID_HERE]" --beta 7.0 --fee-sats 1000
+--title "Will BTC hit $100K?" --description "Binary prediction market" \
+--dimensions "[SLOT_ID_HERE]" --beta 7.0 --fee-sats 1000
 ```
 
 ---
@@ -287,7 +287,7 @@ The `--dimensions` parameter uses bracket notation to define market structures:
 ```bash
 # Single decision: Will X happen?
 market-create --title "Will BTC hit $100K?" --description "..." \
-  --dimensions "[abc123]" --beta 7.0 --fee-sats 1000
+--dimensions "[abc123]" --beta 7.0 --fee-sats 1000
 # Outcomes: Yes, No (2 outcomes)
 ```
 
@@ -295,7 +295,7 @@ market-create --title "Will BTC hit $100K?" --description "..." \
 ```bash
 # Independent decisions that can all be true/false independently
 market-create --title "2024 Predictions" --description "..." \
-  --dimensions "[abc123,def456]" --beta 7.0 --fee-sats 1000
+--dimensions "[abc123,def456]" --beta 7.0 --fee-sats 1000
 # Outcomes: 4 combinations (Yes-Yes, Yes-No, No-Yes, No-No)
 ```
 
@@ -303,7 +303,7 @@ market-create --title "2024 Predictions" --description "..." \
 ```bash
 # One of N outcomes (double brackets)
 market-create --title "Who wins election?" --description "..." \
-  --dimensions "[[abc123,def456,ghi789]]" --beta 7.0 --fee-sats 1000
+--dimensions "[[abc123,def456,ghi789]]" --beta 7.0 --fee-sats 1000
 # Outcomes: Candidate A wins, Candidate B wins, Candidate C wins (mutually exclusive)
 ```
 
@@ -311,7 +311,7 @@ market-create --title "Who wins election?" --description "..." \
 ```bash
 # Combine independent and categorical
 market-create --title "Sports + Weather" --description "..." \
-  --dimensions "[abc123,[def456,ghi789]]" --beta 7.0 --fee-sats 1000
+--dimensions "[abc123,[def456,ghi789]]" --beta 7.0 --fee-sats 1000
 # Outcomes: 2 × 2 = 4 (independent binary × categorical)
 ```
 
@@ -320,28 +320,28 @@ market-create --title "Sports + Weather" --description "..." \
 **Election Market (Categorical):**
 ```bash
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 market-create \
-  --title "2024 Presidential Election" \
-  --description "Who will win the 2024 US Presidential Election?" \
-  --dimensions "[[slot_dem,slot_rep,slot_other]]" \
-  --beta 10.0 --fee-sats 1000
+--title "2024 Presidential Election" \
+--description "Who will win the 2024 US Presidential Election?" \
+--dimensions "[[slot_dem,slot_rep,slot_other]]" \
+--beta 10.0 --fee-sats 1000
 ```
 
 **Sports Parlay (Multiple Independent):**
 ```bash
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 market-create \
-  --title "Weekend Games Parlay" \
-  --description "Outcomes for multiple independent games" \
-  --dimensions "[game1_slot,game2_slot,game3_slot]" \
-  --beta 5.0 --fee-sats 1000
+--title "Weekend Games Parlay" \
+--description "Outcomes for multiple independent games" \
+--dimensions "[game1_slot,game2_slot,game3_slot]" \
+--beta 5.0 --fee-sats 1000
 ```
 
 **Simple Yes/No:**
 ```bash
 ./target/debug/truthcoin_dc_app_cli --rpc-port 18332 market-create \
-  --title "Will it rain tomorrow?" \
-  --description "Binary prediction on tomorrow's weather" \
-  --dimensions "[weather_slot]" \
-  --beta 7.0 --fee-sats 1000
+--title "Will it rain tomorrow?" \
+--description "Binary prediction on tomorrow's weather" \
+--dimensions "[weather_slot]" \
+--beta 7.0 --fee-sats 1000
 ```
 
 ---

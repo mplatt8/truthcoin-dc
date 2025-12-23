@@ -6,11 +6,36 @@
 
 This project requires the following external components.
 
+#### macOS: Install Xcode Command Line Tools
+
+Required for compiling code on macOS. This must be installed first.
+
+```bash
+xcode-select --install
+```
+
+Follow the prompts to complete installation.
+
+#### macOS: Install Homebrew
+
+Homebrew is a package manager for macOS used to install dependencies.
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+After installation, follow the instructions in the terminal to add Homebrew to your PATH.
+
+Verify installation:
+```bash
+brew --version
+```
+
 #### Install Git
 
 Git is required to clone repositories.
 
-**macOS:**
+**macOS (with Homebrew):**
 ```bash
 brew install git
 ```
@@ -140,9 +165,6 @@ cargo build
 
 Run the automated integration test suite:
 
-```bash
-TRUTHCOIN_INTEGRATION_TEST_ENV=integration_tests/example.env cargo run --example integration_tests
-```
 
 The test suite requires compiled binaries at specific paths. Configure these in `integration_tests/example.env`:
 
@@ -152,6 +174,10 @@ BITCOIND='../bitcoin-patched/bitcoind'
 BITCOIN_CLI='../bitcoin-pathced/bitcoin-cli'
 ELECTRS='../electrs/target/release/electrs'
 TRUTHCOIN_APP='target/debug/truthcoin_dc_app'
+```
+
+```bash
+TRUTHCOIN_INTEGRATION_TEST_ENV=integration_tests/example.env cargo run --example integration_tests
 ```
 
 Adjust paths as needed for your local setup. All binaries must be compiled and executable before running tests.

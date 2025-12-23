@@ -995,12 +995,6 @@ where
         self.state.slots()
     }
 
-    pub fn timestamp_to_quarter(
-        timestamp: u64,
-    ) -> Result<u32, crate::state::Error> {
-        crate::state::slots::Dbs::timestamp_to_quarter(timestamp)
-    }
-
     pub fn block_height_to_testing_period(&self, block_height: u32) -> u32 {
         self.state
             .slots()
@@ -1140,10 +1134,11 @@ where
         market_id: &crate::state::MarketId,
     ) -> Result<u64, Error> {
         let rotxn = self.env.read_txn()?;
-        Ok(self
-            .state
-            .markets()
-            .get_market_treasury_sats(&rotxn, &self.state, market_id)?)
+        Ok(self.state.markets().get_market_treasury_sats(
+            &rotxn,
+            &self.state,
+            market_id,
+        )?)
     }
 
     pub fn read_txn(&self) -> Result<sneed::RoTxn<'_>, Error> {
@@ -1226,18 +1221,7 @@ where
     }
 }
 
-pub fn timestamp_to_quarter(
-    timestamp: u64,
-) -> Result<u32, crate::state::Error> {
-    crate::state::slots::Dbs::timestamp_to_quarter(timestamp)
-}
-
 pub fn quarter_to_string(quarter: u32) -> String {
     let config = crate::state::slots::SlotConfig::production();
     crate::state::slots::quarter_to_string(quarter, &config)
-}
-
-pub fn block_height_to_testing_period(block_height: u32) -> u32 {
-    let config = crate::state::slots::SlotConfig::testing(1);
-    block_height / config.testing_blocks_per_period
 }

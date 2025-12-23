@@ -16,8 +16,10 @@ use tower_http::{
 };
 use truthcoin_dc::{
     authorization::{self, Dst, Signature},
+    math::satoshi::{self, Rounding},
     net::Peer,
     node::Node,
+    state::{period_to_name, timestamp_to_period},
     types::{
         Address, Authorization, Block, BlockHash, EncryptionPubKey,
         FilledOutputContent, PointedOutput, Transaction, Txid, VerifyingKey,
@@ -72,41 +74,8 @@ impl RpcServerImpl {
         &self.app.node
     }
 
-    #[inline]
-    fn block_height_to_testing_period(
-        block_height: u32,
-        testing_blocks_per_period: u32,
-    ) -> u32 {
-        if testing_blocks_per_period == 0 {
-            0
-        } else {
-            (block_height / testing_blocks_per_period) + 1
-        }
-    }
-
-    #[inline]
-    fn timestamp_to_period(timestamp: u64) -> u32 {
-        const BITCOIN_GENESIS_TIMESTAMP: u64 = 1231006505;
-        const SECONDS_PER_QUARTER: u64 = 3 * 30 * 24 * 60 * 60;
-
-        if timestamp < BITCOIN_GENESIS_TIMESTAMP {
-            return 0;
-        }
-        let elapsed_seconds = timestamp - BITCOIN_GENESIS_TIMESTAMP;
-        (elapsed_seconds / SECONDS_PER_QUARTER) as u32
-    }
-
-    #[inline]
-    fn period_to_name(period: u32) -> String {
-        if period == 0 {
-            return "Genesis".to_string();
-        }
-
-        let year = 2009 + (period - 1) / 4;
-        let quarter = ((period - 1) % 4) + 1;
-
-        format!("Q{} Y{}", quarter, year)
-    }
+    // block_height_to_testing_period, timestamp_to_period, and period_to_name
+    // now use centralized implementations from truthcoin_dc
 
     async fn slots_status(
         &self,
@@ -129,17 +98,12 @@ impl RpcServerImpl {
                 .try_get_tip_height()
                 .map_err(custom_err)?
                 .unwrap_or(0);
-            let testing_blocks_per_period =
-                self.node().get_slots_testing_config();
-            Self::block_height_to_testing_period(
-                tip_height,
-                testing_blocks_per_period,
-            )
+            self.node().block_height_to_testing_period(tip_height)
         } else {
-            Self::timestamp_to_period(current_timestamp)
+            timestamp_to_period(current_timestamp)
         };
 
-        let current_period_name = Self::period_to_name(current_period);
+        let current_period_name = period_to_name(current_period);
 
         Ok(truthcoin_dc_app_rpc_api::SlotStatus {
             is_testing_mode,
@@ -246,7 +210,8 @@ impl RpcServerImpl {
             .map(|(market, computed_state)| {
                 let market_id_hex = hex::encode(market.id.as_bytes());
 
-                let volume_btc = (market.total_volume_sats as f64) / 100_000_000.0;
+                let volume_btc =
+                    (market.total_volume_sats as f64) / 100_000_000.0;
                 truthcoin_dc_app_rpc_api::MarketSummary {
                     market_id: market_id_hex,
                     title: market.title.clone(),
@@ -1176,7 +1141,9 @@ impl RpcServer for RpcServerImpl {
         };
 
         let initial_liquidity_f64 = beta * (num_outcomes as f64).ln();
-        let initial_liquidity_sats = initial_liquidity_f64.ceil() as u64;
+        let initial_liquidity_sats =
+            satoshi::to_sats(initial_liquidity_f64, Rounding::Up)
+                .map_err(|e| custom_err_msg(format!("Liquidity calculation failed: {}", e)))?;
 
         Ok(truthcoin_dc_app_rpc_api::InitialLiquidityCalculation {
             beta,
@@ -1301,10 +1268,9 @@ impl RpcServer for RpcServerImpl {
                 .try_get_tip_height()
                 .map_err(custom_err)?
                 .unwrap_or(0);
-            let blocks_per_period = self.node().get_slots_testing_config();
-            Self::block_height_to_testing_period(tip_height, blocks_per_period)
+            self.node().block_height_to_testing_period(tip_height)
         } else {
-            Self::timestamp_to_period(current_timestamp)
+            timestamp_to_period(current_timestamp)
         };
 
         // Get periods to check
@@ -1485,12 +1451,13 @@ impl RpcServer for RpcServerImpl {
         // Calculate base cost and trading fee separately for explicit outputs
         let mut new_shares = market.shares().clone();
         new_shares[request.outcome_index] += request.shares_amount;
-        let trade_cost = market
-            .query_update_cost(new_shares)
-            .map_err(custom_err)?;
+        let trade_cost =
+            market.query_update_cost(new_shares).map_err(custom_err)?;
         let fee_amount = trade_cost * market.trading_fee();
-        let base_cost_sats = trade_cost.ceil() as u64;
-        let trading_fee_sats = fee_amount.ceil() as u64;
+        let base_cost_sats = satoshi::to_sats(trade_cost, Rounding::Up)
+            .map_err(|e| custom_err_msg(format!("Cost calculation failed: {}", e)))?;
+        let trading_fee_sats = satoshi::to_sats(fee_amount, Rounding::Up)
+            .map_err(|e| custom_err_msg(format!("Fee calculation failed: {}", e)))?;
         let cost_sats = base_cost_sats + trading_fee_sats;
 
         // Calculate new price after trade
@@ -1977,21 +1944,18 @@ impl RpcServer for RpcServerImpl {
                 .map_err(custom_err)?;
 
             let mut reputation_updates = std::collections::HashMap::new();
-            let (first_loading, explained_variance, certainty) = if let Some(
-                ref ps,
-            ) =
-                period_stats
-            {
-                if let Some(ref rep_changes) = ps.reputation_changes {
-                    for (voter_id, (old_rep, new_rep)) in rep_changes {
-                        if let Some(reputation) = self
-                            .node()
-                            .voting_state()
-                            .databases()
-                            .get_voter_reputation(&rotxn, *voter_id)
-                            .map_err(custom_err)?
-                        {
-                            let rep_update =
+            let (first_loading, explained_variance, certainty) =
+                if let Some(ref ps) = period_stats {
+                    if let Some(ref rep_changes) = ps.reputation_changes {
+                        for (voter_id, (old_rep, new_rep)) in rep_changes {
+                            if let Some(reputation) = self
+                                .node()
+                                .voting_state()
+                                .databases()
+                                .get_voter_reputation(&rotxn, *voter_id)
+                                .map_err(custom_err)?
+                            {
+                                let rep_update =
                                 truthcoin_dc_app_rpc_api::ReputationUpdate {
                                     old_reputation: *old_rep,
                                     new_reputation: *new_rep,
@@ -1999,19 +1963,19 @@ impl RpcServer for RpcServerImpl {
                                         .votecoin_proportion,
                                     compliance_score: 0.0,
                                 };
-                            reputation_updates
-                                .insert(voter_id.to_string(), rep_update);
+                                reputation_updates
+                                    .insert(voter_id.to_string(), rep_update);
+                            }
                         }
                     }
-                }
-                (
-                    ps.first_loading.clone().unwrap_or_default(),
-                    ps.explained_variance.unwrap_or(0.0),
-                    ps.certainty.unwrap_or(0.0),
-                )
-            } else {
-                (Vec::new(), 0.0, 0.0)
-            };
+                    (
+                        ps.first_loading.clone().unwrap_or_default(),
+                        ps.explained_variance.unwrap_or(0.0),
+                        ps.certainty.unwrap_or(0.0),
+                    )
+                } else {
+                    (Vec::new(), 0.0, 0.0)
+                };
 
             Some(ConsensusResults {
                 outcomes,

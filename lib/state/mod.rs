@@ -11,9 +11,10 @@ use crate::{
     types::{
         Address, AmountOverflowError, Authorized, AuthorizedTransaction,
         BlockHash, Body, FilledOutput, FilledTransaction, GetAddress as _,
-        GetBitcoinValue as _, Header, InPoint, M6id, OutPoint, SpentOutput,
-        Transaction, VERSION, Verify as _, Version, WithdrawalBundle,
-        WithdrawalBundleStatus, proto::mainchain::TwoWayPegData,
+        GetBitcoinValue as _, Header, InPoint, M6id, MerkleRoot, OutPoint,
+        SpentOutput, Transaction, VERSION, Verify as _, Version,
+        WithdrawalBundle, WithdrawalBundleStatus,
+        proto::mainchain::TwoWayPegData,
     },
     util::Watchable,
     validation::{MarketValidator, SlotValidationInterface, SlotValidator},
@@ -66,6 +67,7 @@ pub use markets::{
     MarketsDatabase, ShareAccount,
 };
 use rollback::{HeightStamped, RollBack};
+pub use slots::{period_to_name, timestamp_to_period};
 pub use voting::VotingSystem;
 
 pub const WITHDRAWAL_BUNDLE_FAILURE_GAP: u32 = 4;
@@ -122,11 +124,7 @@ pub struct State {
         SerdeBincode<u32>,
         SerdeBincode<(bitcoin::BlockHash, u32)>,
     >,
-    cached_deposit_utxo_value: DatabaseUnique<UnitKey, SerdeBincode<u64>>,
-    cached_deposit_stxo_value: DatabaseUnique<UnitKey, SerdeBincode<u64>>,
-    cached_withdrawal_stxo_value: DatabaseUnique<UnitKey, SerdeBincode<u64>>,
     votecoin_balances: DatabaseUnique<SerdeBincode<Address>, SerdeBincode<u32>>,
-    cached_votecoin_supply: DatabaseUnique<UnitKey, SerdeBincode<u32>>,
     _version: DatabaseUnique<UnitKey, SerdeBincode<Version>>,
 }
 
@@ -158,7 +156,7 @@ impl State {
         + slots::Dbs::NUM_DBS
         + MarketsDatabase::NUM_DBS
         + VotingSystem::NUM_DBS
-        + 19;
+        + 15;
 
     pub fn new(env: &sneed::Env) -> Result<Self, Error> {
         let mut rwtxn = env.write_txn()?;
@@ -193,41 +191,11 @@ impl State {
             &mut rwtxn,
             "withdrawal_bundle_event_blocks",
         )?;
-        let cached_deposit_utxo_value = DatabaseUnique::create(
-            env,
-            &mut rwtxn,
-            "cached_deposit_utxo_value",
-        )?;
-        let cached_deposit_stxo_value = DatabaseUnique::create(
-            env,
-            &mut rwtxn,
-            "cached_deposit_stxo_value",
-        )?;
-        let cached_withdrawal_stxo_value = DatabaseUnique::create(
-            env,
-            &mut rwtxn,
-            "cached_withdrawal_stxo_value",
-        )?;
         let votecoin_balances =
             DatabaseUnique::create(env, &mut rwtxn, "votecoin_balances")?;
-        let cached_votecoin_supply =
-            DatabaseUnique::create(env, &mut rwtxn, "cached_votecoin_supply")?;
         let version = DatabaseUnique::create(env, &mut rwtxn, "state_version")?;
         if version.try_get(&rwtxn, &())?.is_none() {
             version.put(&mut rwtxn, &(), &*VERSION)?;
-        }
-
-        if cached_deposit_utxo_value.try_get(&rwtxn, &())?.is_none() {
-            cached_deposit_utxo_value.put(&mut rwtxn, &(), &0u64)?;
-        }
-        if cached_deposit_stxo_value.try_get(&rwtxn, &())?.is_none() {
-            cached_deposit_stxo_value.put(&mut rwtxn, &(), &0u64)?;
-        }
-        if cached_withdrawal_stxo_value.try_get(&rwtxn, &())?.is_none() {
-            cached_withdrawal_stxo_value.put(&mut rwtxn, &(), &0u64)?;
-        }
-        if cached_votecoin_supply.try_get(&rwtxn, &())?.is_none() {
-            cached_votecoin_supply.put(&mut rwtxn, &(), &0u32)?;
         }
         rwtxn.commit()?;
         Ok(Self {
@@ -246,11 +214,7 @@ impl State {
             withdrawal_bundles,
             withdrawal_bundle_event_blocks,
             deposit_blocks,
-            cached_deposit_utxo_value,
-            cached_deposit_stxo_value,
-            cached_withdrawal_stxo_value,
             votecoin_balances,
-            cached_votecoin_supply,
             _version: version,
         })
     }
@@ -334,6 +298,10 @@ impl State {
         rotxn: &RoTxn,
         addresses: &HashSet<Address>,
     ) -> Result<HashMap<OutPoint, FilledOutput>, Error> {
+        // NOTE: This implementation scans all UTXOs and filters by address.
+        // For optimal performance, sneed would need to expose heed's range() method
+        // to allow per-address range queries on the (Address, OutPoint) composite key.
+        // This is O(total_utxos) instead of O(matching_utxos).
         let mut result = HashMap::with_capacity(addresses.len() * 4);
 
         let mut iter = self.utxos_by_address.iter(rotxn)?;
@@ -366,16 +334,7 @@ impl UtxoManager for State {
             &(),
         )?;
 
-        if matches!(outpoint, OutPoint::Deposit(_)) {
-            let current_value = self
-                .cached_deposit_utxo_value
-                .try_get(rwtxn, &())?
-                .unwrap_or(0);
-            let bitcoin_value = filled_output.get_bitcoin_value().to_sat();
-            let new_value = current_value.saturating_add(bitcoin_value);
-            self.cached_deposit_utxo_value.put(rwtxn, &(), &new_value)?;
-        }
-
+        // Update votecoin balances index (not a cache - this is a denormalized index for O(1) lookups)
         if let crate::types::FilledOutputContent::Votecoin(amount) =
             &filled_output.content
         {
@@ -389,13 +348,6 @@ impl UtxoManager for State {
                 &filled_output.address,
                 &new_balance,
             )?;
-
-            let current_supply = self
-                .cached_votecoin_supply
-                .try_get(rwtxn, &())?
-                .unwrap_or(0);
-            let new_supply = current_supply.saturating_add(*amount);
-            self.cached_votecoin_supply.put(rwtxn, &(), &new_supply)?;
         }
 
         Ok(())
@@ -413,16 +365,7 @@ impl UtxoManager for State {
                 return Ok(false);
             };
 
-        if matches!(outpoint, OutPoint::Deposit(_)) {
-            let current_value = self
-                .cached_deposit_utxo_value
-                .try_get(rwtxn, &())?
-                .unwrap_or(0);
-            let bitcoin_value = filled_output.get_bitcoin_value().to_sat();
-            let new_value = current_value.saturating_sub(bitcoin_value);
-            self.cached_deposit_utxo_value.put(rwtxn, &(), &new_value)?;
-        }
-
+        // Update votecoin balances index (not a cache - this is a denormalized index for O(1) lookups)
         if let crate::types::FilledOutputContent::Votecoin(amount) =
             &filled_output.content
         {
@@ -436,13 +379,6 @@ impl UtxoManager for State {
                 &filled_output.address,
                 &new_balance,
             )?;
-
-            let current_supply = self
-                .cached_votecoin_supply
-                .try_get(rwtxn, &())?
-                .unwrap_or(0);
-            let new_supply = current_supply.saturating_sub(*amount);
-            self.cached_votecoin_supply.put(rwtxn, &(), &new_supply)?;
         }
 
         self.utxos_by_address
@@ -451,25 +387,13 @@ impl UtxoManager for State {
         let deleted = self.utxos.delete(rwtxn, outpoint)?;
 
         if !deleted {
+            // Restore address index
             self.utxos_by_address.put(
                 rwtxn,
                 &(filled_output.address, *outpoint),
                 &(),
             )?;
-            if matches!(outpoint, OutPoint::Deposit(_)) {
-                let current_value = self
-                    .cached_deposit_utxo_value
-                    .try_get(rwtxn, &())?
-                    .unwrap_or(0);
-                let bitcoin_value = filled_output.get_bitcoin_value().to_sat();
-                let restored_value =
-                    current_value.saturating_add(bitcoin_value);
-                self.cached_deposit_utxo_value.put(
-                    rwtxn,
-                    &(),
-                    &restored_value,
-                )?;
-            }
+            // Restore votecoin balance
             if let crate::types::FilledOutputContent::Votecoin(amount) =
                 &filled_output.content
             {
@@ -482,17 +406,6 @@ impl UtxoManager for State {
                     rwtxn,
                     &filled_output.address,
                     &restored_balance,
-                )?;
-
-                let current_supply = self
-                    .cached_votecoin_supply
-                    .try_get(rwtxn, &())?
-                    .unwrap_or(0);
-                let restored_supply = current_supply.saturating_add(*amount);
-                self.cached_votecoin_supply.put(
-                    rwtxn,
-                    &(),
-                    &restored_supply,
                 )?;
             }
             return Ok(false);
@@ -507,14 +420,7 @@ impl UtxoManager for State {
     ) -> Result<(), Error> {
         self.utxos.clear(rwtxn)?;
         self.utxos_by_address.clear(rwtxn)?;
-
-        self.cached_deposit_utxo_value.put(rwtxn, &(), &0u64)?;
-        self.cached_deposit_stxo_value.put(rwtxn, &(), &0u64)?;
-        self.cached_withdrawal_stxo_value.put(rwtxn, &(), &0u64)?;
-
         self.votecoin_balances.clear(rwtxn)?;
-        self.cached_votecoin_supply.put(rwtxn, &(), &0u32)?;
-
         Ok(())
     }
 
@@ -609,66 +515,6 @@ impl UtxoManager for State {
 }
 
 impl State {
-    pub fn update_stxo_caches(
-        &self,
-        rwtxn: &mut RwTxn,
-        outpoint: &OutPoint,
-        spent_output: &SpentOutput,
-    ) -> Result<(), Error> {
-        let bitcoin_value = spent_output.output.get_bitcoin_value().to_sat();
-
-        if matches!(outpoint, OutPoint::Deposit(_)) {
-            let current_value = self
-                .cached_deposit_stxo_value
-                .try_get(rwtxn, &())?
-                .unwrap_or(0);
-            let new_value = current_value.saturating_add(bitcoin_value);
-            self.cached_deposit_stxo_value.put(rwtxn, &(), &new_value)?;
-        }
-
-        if matches!(spent_output.inpoint, InPoint::Withdrawal { .. }) {
-            let current_value = self
-                .cached_withdrawal_stxo_value
-                .try_get(rwtxn, &())?
-                .unwrap_or(0);
-            let new_value = current_value.saturating_add(bitcoin_value);
-            self.cached_withdrawal_stxo_value
-                .put(rwtxn, &(), &new_value)?;
-        }
-
-        Ok(())
-    }
-
-    pub fn remove_stxo_caches(
-        &self,
-        rwtxn: &mut RwTxn,
-        outpoint: &OutPoint,
-        spent_output: &SpentOutput,
-    ) -> Result<(), Error> {
-        let bitcoin_value = spent_output.output.get_bitcoin_value().to_sat();
-
-        if matches!(outpoint, OutPoint::Deposit(_)) {
-            let current_value = self
-                .cached_deposit_stxo_value
-                .try_get(rwtxn, &())?
-                .unwrap_or(0);
-            let new_value = current_value.saturating_sub(bitcoin_value);
-            self.cached_deposit_stxo_value.put(rwtxn, &(), &new_value)?;
-        }
-
-        if matches!(spent_output.inpoint, InPoint::Withdrawal { .. }) {
-            let current_value = self
-                .cached_withdrawal_stxo_value
-                .try_get(rwtxn, &())?
-                .unwrap_or(0);
-            let new_value = current_value.saturating_sub(bitcoin_value);
-            self.cached_withdrawal_stxo_value
-                .put(rwtxn, &(), &new_value)?;
-        }
-
-        Ok(())
-    }
-
     pub fn get_mempool_shares(
         &self,
         rotxn: &RoTxn,
@@ -972,22 +818,75 @@ impl State {
         Ok(block_hash)
     }
 
+    /// Compute the total value of all deposit UTXOs (on-demand, no cache).
+    pub fn compute_deposit_utxo_value(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<u64, Error> {
+        let mut total = 0u64;
+        let mut iter = self.utxos.iter(rotxn)?;
+        while let Some((outpoint, filled_output)) = iter.next()? {
+            if matches!(outpoint, OutPoint::Deposit(_)) {
+                total = total
+                    .saturating_add(filled_output.get_bitcoin_value().to_sat());
+            }
+        }
+        Ok(total)
+    }
+
+    /// Compute the total value of all spent deposit outputs (on-demand, no cache).
+    pub fn compute_deposit_stxo_value(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<u64, Error> {
+        let mut total = 0u64;
+        let mut iter = self.stxos.iter(rotxn)?;
+        while let Some((outpoint, spent_output)) = iter.next()? {
+            if matches!(outpoint, OutPoint::Deposit(_)) {
+                total = total.saturating_add(
+                    spent_output.output.get_bitcoin_value().to_sat(),
+                );
+            }
+        }
+        Ok(total)
+    }
+
+    /// Compute the total value of all withdrawal spent outputs (on-demand, no cache).
+    pub fn compute_withdrawal_stxo_value(
+        &self,
+        rotxn: &RoTxn,
+    ) -> Result<u64, Error> {
+        let mut total = 0u64;
+        let mut iter = self.stxos.iter(rotxn)?;
+        while let Some((_outpoint, spent_output)) = iter.next()? {
+            if matches!(spent_output.inpoint, InPoint::Withdrawal { .. }) {
+                total = total.saturating_add(
+                    spent_output.output.get_bitcoin_value().to_sat(),
+                );
+            }
+        }
+        Ok(total)
+    }
+
+    /// Compute the total votecoin supply (on-demand, no cache).
+    pub fn compute_votecoin_supply(&self, rotxn: &RoTxn) -> Result<u32, Error> {
+        let mut total = 0u32;
+        let mut iter = self.votecoin_balances.iter(rotxn)?;
+        while let Some((_address, balance)) = iter.next()? {
+            total = total.saturating_add(balance);
+        }
+        Ok(total)
+    }
+
     pub fn sidechain_wealth(
         &self,
         rotxn: &RoTxn,
     ) -> Result<bitcoin::Amount, Error> {
-        let deposit_utxo_value = self
-            .cached_deposit_utxo_value
-            .try_get(rotxn, &())?
-            .unwrap_or(0);
-        let deposit_stxo_value = self
-            .cached_deposit_stxo_value
-            .try_get(rotxn, &())?
-            .unwrap_or(0);
-        let withdrawal_stxo_value = self
-            .cached_withdrawal_stxo_value
-            .try_get(rotxn, &())?
-            .unwrap_or(0);
+        // Compute values on-demand from source data (no caches)
+        let deposit_utxo_value = self.compute_deposit_utxo_value(rotxn)?;
+        let deposit_stxo_value = self.compute_deposit_stxo_value(rotxn)?;
+        let withdrawal_stxo_value =
+            self.compute_withdrawal_stxo_value(rotxn)?;
 
         let total_deposit_utxo_value =
             bitcoin::Amount::from_sat(deposit_utxo_value);
@@ -1009,7 +908,8 @@ impl State {
         rotxn: &RoTxn,
         header: &Header,
         body: &Body,
-    ) -> Result<(bitcoin::Amount, Vec<FilledTransaction>), Error> {
+    ) -> Result<(bitcoin::Amount, Vec<FilledTransaction>, MerkleRoot), Error>
+    {
         block::validate(self, rotxn, header, body)
     }
 
@@ -1020,8 +920,17 @@ impl State {
         body: &Body,
         mainchain_timestamp: u64,
         filled_txs: Vec<FilledTransaction>,
+        merkle_root: MerkleRoot,
     ) -> Result<(), Error> {
-        block::connect(self, rwtxn, header, body, mainchain_timestamp, filled_txs)
+        block::connect(
+            self,
+            rwtxn,
+            header,
+            body,
+            mainchain_timestamp,
+            filled_txs,
+            merkle_root,
+        )
     }
 
     pub fn disconnect_tip(
@@ -1160,10 +1069,7 @@ impl State {
         &self,
         rotxn: &RoTxn,
     ) -> Result<u32, Error> {
-        Ok(self
-            .cached_votecoin_supply
-            .try_get(rotxn, &())?
-            .unwrap_or(0))
+        self.compute_votecoin_supply(rotxn)
     }
 
     pub fn get_votecoin_proportion(

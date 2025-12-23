@@ -1,63 +1,139 @@
-# Hivemind Regtest Setup
+# Truthcoin Regtest Setup
 
 ## Prerequisites
 
 ### Required Dependencies
 
-This project requires the following external components. You can either download pre-built binaries or build from source.
+This project requires the following external components.
 
-#### Option A: Download Pre-built Binaries (Recommended)
+#### Install Git
 
-Download pre-built binaries from [releases.drivechain.info](https://releases.drivechain.info):
-  * `bitcoin-patched` (bitcoind and bitcoin-cli)
-  * `bip300301_enforcer`
+Git is required to clone repositories.
 
-Then build electrs and truthcoin from source:
+**macOS:**
+```bash
+brew install git
+```
+
+**Linux (Debian/Ubuntu):**
+```bash
+sudo apt install git
+```
+
+**Windows:**
+
+Download and install from [git-scm.com](https://git-scm.com/download/win)
+
+Verify installation:
+```bash
+git --version
+```
+
+#### Install grpcurl
+
+Open a new terminal session
+
+grpcurl is required for interacting with the BIP300301 enforcer gRPC service.
+
+**macOS (Homebrew):**
+```bash
+brew install grpcurl
+```
+
+**Linux (Download binary):**
+```bash
+# Download latest release (adjust version as needed)
+curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz | tar -xz
+sudo mv grpcurl /usr/local/bin/
+```
+
+**Windows (Chocolatey):**
+```powershell
+choco install grpcurl
+```
+
+**Windows (Manual):**
+1. Download `grpcurl_X.X.X_windows_x86_64.zip` from [GitHub releases](https://github.com/fullstorydev/grpcurl/releases)
+2. Extract the zip file
+3. Add the folder containing `grpcurl.exe` to your PATH
+
+Verify installation:
+```bash
+grpcurl --version
+```
+
+#### Install Rust, Cargo, and Rustup
+
+Rust and Cargo are required to build truthcoin and electrs from source.
+
+**macOS / Linux:**
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+**Windows:**
+
+Download and run the installer from [rustup.rs](https://rustup.rs)
+
+**Install nightly toolchain (required):**
+```bash
+rustup install nightly
+rustup default nightly
+```
+
+Verify installation:
+```bash
+rustc --version
+cargo --version
+```
+
+#### Download Pre-built Binaries
+
+Create a new directory for the binaries
+
+```bash
+mkdir truthcoin-binaries
+cd truthcoin-binaries
+```
+
+Download pre-built binaries for your specific OS from [releases.drivechain.info](https://releases.drivechain.info) into new parent directory (truthcoin-binaries):
+  *  `L1-bitcoin-patched-latest-x86_64-[OS].zip`
+  *  `bip300301-enforcer-latest-x86_64-[OS].zip`
+
+Rename the folders:
+
+```bash
+mv ~/[DOWNLOAD-LOCATION]/L1-bitcoin-patched-latest-x86_64-[OS] ./bitcoin-patched
+mv ~/[DOWNLOAD-LOCATION]/bip300301-enforcer-latest-x86_64-[OS] ./bip300301_enforcer
+```
+
+Rename the enforcer binary inside the folder:
+
+```bash
+mv ./bip300301_enforcer/bip300301-enforcer-latest-x86_64-[OS] ./bip300301_enforcer/bip300301_enforcer
+```
+
+Make the downloaded binaries executable
+```bash 
+chmod +x ./bip300301_enforcer/bip300301_enforcer
+chmod +x ./bitcoin-patched/bitcoind
+chmod +x ./bitcoin-patched/bitcoin-cli
+```
+
+Then build electrs and truthcoin from source (assuming your current working directory is truthcoin-binaries):
 ```bash
 # Electrs (Blockstream fork with HTTP/REST API)
 git clone https://github.com/blockstream/electrs.git
-cd electrs && cargo build --release && cd ..
+cd electrs 
+cargo build --release
+cd ..
 
 # Truthcoin
+git clone https://github.com/mplatt8/truthcoin-dc.git
 cd truthcoin-dc
 git submodule update --init --recursive
-cargo build --bin truthcoin_dc_app
-```
-> Note: The standard romanz/electrs does NOT work. You must use the Blockstream fork which supports the HTTP/REST API.
-
-#### Option B: Build from Source
-
-Clone and build each dependency
-
-**Bitcoin (BIP300/301 patched):**
-```bash
-git clone https://github.com/LayerTwo-Labs/bitcoin-patched.git
-cd ../bitcoin
-./autogen.sh
-./configure
-make -j$(nproc)
-```
-
-**Electrs (Blockstream fork with HTTP/REST API):**
-```bash
-git clone https://github.com/blockstream/electrs.git
-cd ../electrs
-cargo build --release
-```
-> Note: The standard romanz/electrs does NOT work. You must use the Blockstream fork which supports the HTTP/REST API.
-
-**BIP300301 Enforcer:**
-```bash
-git clone https://github.com/LayerTwo-Labs/bip300301_enforcer.git
-cd ../bip300301_enforcer
-git submodule update --init --recursive
 cargo build
-```
-
-**Truthcoin (this project):**
-```bash
-git submodule update --init --recursive
-cargo build --bin truthcoin_dc_app
 ```
 
 ## Integration Tests
@@ -71,14 +147,14 @@ TRUTHCOIN_INTEGRATION_TEST_ENV=integration_tests/example.env cargo run --example
 The test suite requires compiled binaries at specific paths. Configure these in `integration_tests/example.env`:
 
 ```bash
-BIP300301_ENFORCER='../bip300301_enforcer/target/debug/bip300301_enforcer'
-BITCOIND='../bitcoin/build/src/bitcoind'
-BITCOIN_CLI='../bitcoin/build/src/bitcoin-cli'
+BIP300301_ENFORCER='../bip300301_enforcer/bip300301_enforcer'
+BITCOIND='../bitcoin-patched/bitcoind'
+BITCOIN_CLI='../bitcoin-pathced/bitcoin-cli'
 ELECTRS='../electrs/target/release/electrs'
 TRUTHCOIN_APP='target/debug/truthcoin_dc_app'
 ```
 
-Adjust paths as needed for your local setup. All binaries must be compiled before running tests.
+Adjust paths as needed for your local setup. All binaries must be compiled and executable before running tests.
 
 To run a specific test:
 ```bash
@@ -97,11 +173,11 @@ roundtrip.rs is a full coverage test of the node
 rm -rf /tmp/regtest-data && mkdir -p /tmp/regtest-data/{bitcoin,electrs,enforcer,truthcoin}
 ```
 
-### 2. Start All Four Binaries (each in separate terminal)
+### 2. Start All Four Binaries In This Order(each in separate terminal)
 
 **Bitcoin Core:**
 ```bash
-../bitcoin/build/src/bitcoind -acceptnonstdtxn -chain=regtest -datadir=/tmp/regtest-data/bitcoin \
+../bitcoin-patched/build/src/bitcoind -acceptnonstdtxn -chain=regtest -datadir=/tmp/regtest-data/bitcoin \
   -bind=127.0.0.1:18444 -rpcuser=regtest_user -rpcpassword=regtest_pass -rpcport=18443 \
   -rest -server -zmqpubsequence=tcp://127.0.0.1:28332 -listenonion=0 -txindex
 ```

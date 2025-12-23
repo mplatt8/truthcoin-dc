@@ -138,16 +138,24 @@ fn connect_tip_(
     two_way_peg_data: &mainchain::TwoWayPegData,
 ) -> Result<(), Error> {
     let block_hash = header.hash();
-    let (_fees, filled_txs) = state.validate_block(rwtxn, header, body)?;
+    // validate_block now returns merkle_root to avoid duplicate computation in connect_block
+    let (_fees, filled_txs, merkle_root) =
+        state.validate_block(rwtxn, header, body)?;
 
     // Get mainchain timestamp for slot minting
     let mainchain_timestamp = archive
         .get_main_header_info(rwtxn, &header.prev_main_hash)?
         .timestamp;
 
-    state.connect_block(rwtxn, header, body, mainchain_timestamp, filled_txs)?;
+    state.connect_block(
+        rwtxn,
+        header,
+        body,
+        mainchain_timestamp,
+        filled_txs,
+        merkle_root,
+    )?;
     if tracing::enabled!(tracing::Level::DEBUG) {
-        let merkle_root = body.compute_merkle_root();
         let height = state.try_get_height(rwtxn)?;
         tracing::debug!(?height, %merkle_root, %block_hash,
                             "connected body")

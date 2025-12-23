@@ -1,10 +1,13 @@
+use crate::types::SECONDS_PER_QUARTER;
+
 pub const BITCOIN_HIVEMIND_NEUTRAL_VALUE: f64 = 0.5;
 pub const CONSENSUS_CATCH_TOLERANCE: f64 = 0.2;
 pub const SVD_NUMERICAL_TOLERANCE: f64 = 1e-10;
 pub const REPUTATION_SMOOTHING_ALPHA: f64 = 0.3;
 pub const REPUTATION_MIN: f64 = 0.0;
 pub const REPUTATION_MAX: f64 = 1.0;
-pub const PRODUCTION_PERIOD_DURATION_SECONDS: u64 = 3 * 30 * 24 * 60 * 60;
+/// Production period duration - re-exported from types for voting module use
+pub const PRODUCTION_PERIOD_DURATION_SECONDS: u64 = SECONDS_PER_QUARTER;
 pub const VOTECOIN_STALENESS_BLOCKS: u64 = 10;
 pub const CONSENSUS_PRECISION_DECIMALS: u32 = 8;
 pub const REPUTATION_PRECISION_DECIMALS: u32 = 10;

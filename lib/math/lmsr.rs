@@ -3,6 +3,8 @@ use ndarray::{Array, Array1, ArrayView1, IxDyn};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use super::satoshi::{self, Rounding};
+
 const SATOSHI_PRECISION: f64 = 100_000_000.0;
 const LMSR_PRECISION: f64 = 1e-8;
 const MAX_BETA: f64 = 1e12;
@@ -333,7 +335,8 @@ impl Lmsr {
             return Err(LmsrError::InvalidCostCalculation);
         }
 
-        Ok(max_cost.round() as u64)
+        satoshi::to_sats(max_cost, Rounding::Up)
+            .map_err(|_| LmsrError::InvalidCostCalculation)
     }
 
     pub fn validate_state(&self, state: &LmsrState) -> Result<(), LmsrError> {
@@ -380,7 +383,8 @@ impl Lmsr {
             return Err(LmsrError::InvalidCostCalculation);
         }
 
-        Ok(satoshis.round() as i64)
+        satoshi::to_sats_signed(satoshis, Rounding::Up)
+            .map_err(|_| LmsrError::InvalidCostCalculation)
     }
 
     fn calculate_fee(&self, cost_satoshis: u64, fee_rate: f64) -> u64 {

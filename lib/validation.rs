@@ -1,3 +1,4 @@
+use crate::math::satoshi::{self, Rounding};
 use crate::state::Error;
 use crate::state::markets::MarketState::*;
 use crate::state::markets::{
@@ -413,12 +414,20 @@ impl MarketValidator {
 
         // Calculate fee amount
         let fee_amount = trade_cost * market.trading_fee();
-        let base_cost_sats = trade_cost.ceil() as u64;
-        let fee_sats = fee_amount.ceil() as u64;
+        let base_cost_sats = satoshi::to_sats(trade_cost, Rounding::Up)
+            .map_err(|e| Error::InvalidTransaction {
+                reason: format!("Base cost conversion failed: {}", e),
+            })?;
+        let fee_sats = satoshi::to_sats(fee_amount, Rounding::Up)
+            .map_err(|e| Error::InvalidTransaction {
+                reason: format!("Fee conversion failed: {}", e),
+            })?;
 
         // Validate explicit treasury and fee outputs exist with correct content types and amounts
-        let treasury_address = generate_market_treasury_address(&buy_data.market_id);
-        let fee_address = generate_market_author_fee_address(&buy_data.market_id);
+        let treasury_address =
+            generate_market_treasury_address(&buy_data.market_id);
+        let fee_address =
+            generate_market_author_fee_address(&buy_data.market_id);
         let market_id_bytes = *buy_data.market_id.as_bytes();
 
         let (treasury_output_amount, fee_output_amount) = tx
@@ -429,9 +438,10 @@ impl MarketValidator {
                     .filter_map(|o| {
                         if o.address == treasury_address {
                             match &o.content {
-                                FilledOutputContent::MarketTreasury { market_id, amount }
-                                    if *market_id == market_id_bytes =>
-                                {
+                                FilledOutputContent::MarketTreasury {
+                                    market_id,
+                                    amount,
+                                } if *market_id == market_id_bytes => {
                                     Some(amount.0.to_sat())
                                 }
                                 _ => None,
@@ -447,9 +457,10 @@ impl MarketValidator {
                     .filter_map(|o| {
                         if o.address == fee_address {
                             match &o.content {
-                                FilledOutputContent::MarketAuthorFee { market_id, amount }
-                                    if *market_id == market_id_bytes =>
-                                {
+                                FilledOutputContent::MarketAuthorFee {
+                                    market_id,
+                                    amount,
+                                } if *market_id == market_id_bytes => {
                                     Some(amount.0.to_sat())
                                 }
                                 _ => None,
@@ -631,7 +642,6 @@ impl MarketValidator {
 
         Ok(())
     }
-
 }
 
 /// D-function validation utilities for market constraints.
@@ -1187,7 +1197,7 @@ impl VoteValidator {
         let decision = Self::validate_decision_slot(state, rotxn, decision_id)?;
 
         // BITCOIN HIVEMIND PRINCIPLE: Validate period matches slot's expected voting period
-        // Slots claimed in period N are voted on in period N (same period)
+        // Slots claimed in period_index N are voted on in voting_period N+1 (temporal separation)
         let slot_claim_period = decision_id.period_index();
         let expected_voting_period = decision_id.voting_period();
 

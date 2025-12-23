@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sneed::{DatabaseUnique, Env, RoTxn, RwTxn};
 use std::collections::{HashMap, HashSet};
 
+use crate::math::satoshi::{self, Rounding};
 use crate::state::Error;
 use crate::state::UtxoManager;
 use crate::state::slots::{Decision, SlotId};
@@ -15,108 +16,6 @@ use thiserror::Error as ThisError;
 pub const MAX_MARKET_OUTCOMES: usize = 256;
 pub const L2_STORAGE_RATE_SATS_PER_BYTE: u64 = 1;
 pub const BASE_MARKET_STORAGE_COST_SATS: u64 = 1000;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MarketStateHash([u8; 32]);
-
-impl MarketStateHash {
-    pub fn new(data: [u8; 32]) -> Self {
-        Self(data)
-    }
-
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    pub fn from_data(data: &str) -> Self {
-        let hash_bytes = hashes::hash(data.as_bytes());
-        let mut result = [0u8; 32];
-        result.copy_from_slice(&hash_bytes[0..32]);
-        Self(result)
-    }
-}
-
-impl std::fmt::Display for MarketStateHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.0))
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketStateVersion {
-    pub version: u64,
-    pub previous_state_hash: Option<MarketStateHash>,
-    pub state_hash: MarketStateHash,
-    pub created_at_height: u64,
-    pub transaction_id: Option<[u8; 32]>,
-    pub market_state: MarketState,
-    pub b: f64,
-    pub trading_fee: f64,
-    #[serde(with = "ndarray_1d_serde")]
-    pub shares: Array<f64, Ix1>,
-    #[serde(with = "ndarray_1d_serde")]
-    pub final_prices: Array<f64, Ix1>,
-    pub timestamp: u64,
-}
-
-impl MarketStateVersion {
-    pub fn new(
-        version: u64,
-        previous_state_hash: Option<MarketStateHash>,
-        created_at_height: u64,
-        transaction_id: Option<[u8; 32]>,
-        market_state: MarketState,
-        b: f64,
-        trading_fee: f64,
-        shares: Array<f64, Ix1>,
-        final_prices: Array<f64, Ix1>,
-        timestamp: u64,
-    ) -> Self {
-        let state_data = format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}",
-            version,
-            previous_state_hash
-                .as_ref()
-                .map(|h| h.to_string())
-                .unwrap_or_default(),
-            created_at_height,
-            transaction_id.map(|id| hex::encode(id)).unwrap_or_default(),
-            format!("{:?}", market_state),
-            b,
-            trading_fee,
-            shares
-                .to_vec()
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-
-        let state_hash = MarketStateHash::from_data(&state_data);
-
-        Self {
-            version,
-            previous_state_hash,
-            state_hash,
-            created_at_height,
-            transaction_id,
-            market_state,
-            b,
-            trading_fee,
-            shares,
-            final_prices,
-            timestamp,
-        }
-    }
-
-    pub fn get_state_hash(&self) -> &MarketStateHash {
-        &self.state_hash
-    }
-
-    pub fn is_genesis(&self) -> bool {
-        self.previous_state_hash.is_none() && self.version == 0
-    }
-}
 
 #[derive(Debug, ThisError, Clone)]
 pub enum MarketError {
@@ -522,8 +421,16 @@ pub struct Market {
     pub share_vector_length: usize,
     pub storage_fee_sats: u64,
     pub size: usize,
-    pub state_history: Vec<MarketStateVersion>,
-    pub current_state_hash: MarketStateHash,
+    // Direct state fields (replacing state_history)
+    pub market_state: MarketState,
+    pub b: f64,
+    pub trading_fee: f64,
+    #[serde(with = "ndarray_1d_serde")]
+    pub shares: Array<f64, Ix1>,
+    #[serde(with = "ndarray_1d_serde")]
+    pub final_prices: Array<f64, Ix1>,
+    pub version: u64,
+    pub last_updated_height: u64,
     pub total_volume_sats: u64,
     pub outcome_volumes_sats: Vec<u64>,
 }
@@ -1163,32 +1070,8 @@ impl Market {
         }
 
         let share_vector_length = d_functions.len();
-
         let storage_fee_sats =
             calculate_storage_fee_with_scaling(share_vector_length)?;
-
-        let shares = Array::zeros(share_vector_length);
-        let final_prices = Array::zeros(share_vector_length);
-
-        let final_b = b;
-
-        let genesis_state = MarketStateVersion::new(
-            0,
-            None,
-            created_at_height,
-            None,
-            MarketState::Trading,
-            final_b,
-            trading_fee,
-            shares.clone(),
-            final_prices.clone(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        );
-
-        let genesis_state_hash = genesis_state.get_state_hash().clone();
 
         let mut market = Market {
             id: MarketId([0; 6]),
@@ -1205,14 +1088,18 @@ impl Market {
             share_vector_length,
             storage_fee_sats,
             size: 0,
-            state_history: vec![genesis_state],
-            current_state_hash: genesis_state_hash,
+            market_state: MarketState::Trading,
+            b,
+            trading_fee,
+            shares: Array::zeros(share_vector_length),
+            final_prices: Array::zeros(share_vector_length),
+            version: 0,
+            last_updated_height: created_at_height,
             total_volume_sats: 0,
             outcome_volumes_sats: vec![0; share_vector_length],
         };
 
         market.id = market.calculate_id();
-
         market.calculate_size();
 
         Ok(market)
@@ -1241,7 +1128,7 @@ impl Market {
         MarketId(id_bytes)
     }
     fn calculate_size(&mut self) {
-        let base_size = self.title.len()
+        self.size = self.title.len()
             + self.description.len()
             + self.tags.iter().map(|tag| tag.len()).sum::<usize>()
             + std::mem::size_of_val(&self.tau_from_now)
@@ -1251,120 +1138,79 @@ impl Market {
             + std::mem::size_of_val(&self.expires_at_height)
             + std::mem::size_of_val(&self.share_vector_length)
             + std::mem::size_of_val(&self.storage_fee_sats)
-            + self.state_history.len()
-                * std::mem::size_of::<MarketStateVersion>()
-            + std::mem::size_of_val(&self.current_state_hash);
-
-        self.size = base_size;
-    }
-
-    pub fn get_current_state(&self) -> &MarketStateVersion {
-        self.state_history
-            .last()
-            .expect("Market must have at least genesis state")
-    }
-
-    pub fn get_state_version(
-        &self,
-        version: u64,
-    ) -> Option<&MarketStateVersion> {
-        self.state_history.get(version as usize)
-    }
-
-    pub fn get_state_history(&self) -> &Vec<MarketStateVersion> {
-        &self.state_history
+            + self.shares.len() * std::mem::size_of::<f64>()
+            + self.final_prices.len() * std::mem::size_of::<f64>();
     }
 
     pub fn state(&self) -> MarketState {
-        self.get_current_state().market_state
+        self.market_state
     }
 
     pub fn b(&self) -> f64 {
-        self.get_current_state().b
+        self.b
     }
 
     pub fn trading_fee(&self) -> f64 {
-        self.get_current_state().trading_fee
+        self.trading_fee
     }
 
     pub fn shares(&self) -> &Array<f64, Ix1> {
-        &self.get_current_state().shares
+        &self.shares
     }
 
     pub fn final_prices(&self) -> &Array<f64, Ix1> {
-        &self.get_current_state().final_prices
+        &self.final_prices
     }
 
-    pub fn create_new_state_version(
+    /// Update market state - replaces create_new_state_version
+    pub fn update_state(
         &mut self,
-        transaction_id: Option<[u8; 32]>,
         height: u64,
         new_market_state: Option<MarketState>,
         new_b: Option<f64>,
-        new_trading_fee: Option<f64>,
         new_shares: Option<Array<f64, Ix1>>,
         new_final_prices: Option<Array<f64, Ix1>>,
-    ) -> Result<MarketStateHash, MarketError> {
-        let current_state = self.get_current_state();
-        let next_version = current_state.version + 1;
-
-        let market_state =
-            new_market_state.unwrap_or(current_state.market_state);
-        let b = new_b.unwrap_or(current_state.b);
-        let trading_fee = new_trading_fee.unwrap_or(current_state.trading_fee);
-        let shares = new_shares.unwrap_or_else(|| current_state.shares.clone());
-        let final_prices = new_final_prices
-            .unwrap_or_else(|| current_state.final_prices.clone());
-
-        if b <= 0.0 {
-            return Err(MarketError::InvalidBeta(b));
+    ) -> Result<(), MarketError> {
+        if let Some(new_state) = new_market_state {
+            if !self.market_state.can_transition_to(new_state) {
+                return Err(MarketError::InvalidStateTransition {
+                    from: self.market_state,
+                    to: new_state,
+                });
+            }
+            self.market_state = new_state;
         }
 
-        if new_market_state.is_some()
-            && !current_state.market_state.can_transition_to(market_state)
-        {
-            return Err(MarketError::InvalidStateTransition {
-                from: current_state.market_state,
-                to: market_state,
-            });
+        if let Some(b) = new_b {
+            if b <= 0.0 {
+                return Err(MarketError::InvalidBeta(b));
+            }
+            self.b = b;
         }
 
-        if shares.len() != self.share_vector_length {
-            return Err(MarketError::InvalidDimensions);
+        if let Some(shares) = new_shares {
+            if shares.len() != self.share_vector_length {
+                return Err(MarketError::InvalidDimensions);
+            }
+            self.shares = shares;
         }
 
-        let new_state_version = MarketStateVersion::new(
-            next_version,
-            Some(self.current_state_hash.clone()),
-            height,
-            transaction_id,
-            market_state,
-            b,
-            trading_fee,
-            shares,
-            final_prices,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        );
+        if let Some(prices) = new_final_prices {
+            self.final_prices = prices;
+        }
 
-        let new_state_hash = new_state_version.get_state_hash().clone();
-
-        self.state_history.push(new_state_version);
-        self.current_state_hash = new_state_hash.clone();
-
+        self.version += 1;
+        self.last_updated_height = height;
         self.calculate_size();
 
-        Ok(new_state_hash)
+        Ok(())
     }
 
     pub fn current_prices(&self) -> Array<f64, Ix1> {
         use crate::math::lmsr::LmsrService;
-        let current_state = self.get_current_state();
-        LmsrService::calculate_prices(&current_state.shares, current_state.b)
+        LmsrService::calculate_prices(&self.shares, self.b)
             .unwrap_or_else(|_| {
-                let n = current_state.shares.len();
+                let n = self.shares.len();
                 Array::from_elem(n, 1.0 / n as f64)
             })
     }
@@ -1374,8 +1220,7 @@ impl Market {
         shares: &Array<f64, Ix1>,
     ) -> Array<f64, Ix1> {
         use crate::math::lmsr::LmsrService;
-        let current_state = self.get_current_state();
-        LmsrService::calculate_prices(shares, current_state.b).unwrap_or_else(
+        LmsrService::calculate_prices(shares, self.b).unwrap_or_else(
             |_| {
                 let n = shares.len();
                 Array::from_elem(n, 1.0 / n as f64)
@@ -1408,22 +1253,9 @@ impl Market {
     pub fn update_shares(
         &mut self,
         new_shares: Array<f64, Ix1>,
-        transaction_id: Option<[u8; 32]>,
         height: u64,
-    ) -> Result<MarketStateHash, MarketError> {
-        if new_shares.len() != self.share_vector_length {
-            return Err(MarketError::InvalidDimensions);
-        }
-
-        self.create_new_state_version(
-            transaction_id,
-            height,
-            None,
-            None,
-            None,
-            Some(new_shares),
-            None,
-        )
+    ) -> Result<(), MarketError> {
+        self.update_state(height, None, None, Some(new_shares), None)
     }
 
     pub fn update_trading_volume(
@@ -1453,12 +1285,10 @@ impl Market {
             return Err(MarketError::InvalidDimensions);
         }
 
-        let current_state = self.get_current_state();
-
         use crate::math::lmsr::Lmsr;
-        let lmsr = Lmsr::new(current_state.shares.len());
+        let lmsr = Lmsr::new(self.shares.len());
         let current_cost = lmsr
-            .cost_function(current_state.b, &current_state.shares.view())
+            .cost_function(self.b, &self.shares.view())
             .map_err(|e| {
                 MarketError::DatabaseError(format!(
                     "LMSR calculation failed: {:?}",
@@ -1466,7 +1296,7 @@ impl Market {
                 ))
             })?;
         let new_cost = lmsr
-            .cost_function(current_state.b, &new_shares.view())
+            .cost_function(self.b, &new_shares.view())
             .map_err(|e| {
                 MarketError::DatabaseError(format!(
                     "LMSR calculation failed: {:?}",
@@ -1478,16 +1308,14 @@ impl Market {
     }
 
     pub fn query_amp_b_cost(&self, new_b: f64) -> Result<f64, MarketError> {
-        let current_state = self.get_current_state();
-
-        if new_b <= current_state.b {
+        if new_b <= self.b {
             return Err(MarketError::InvalidBeta(new_b));
         }
 
         use crate::math::lmsr::Lmsr;
-        let lmsr = Lmsr::new(current_state.shares.len());
+        let lmsr = Lmsr::new(self.shares.len());
         let current_cost = lmsr
-            .cost_function(current_state.b, &current_state.shares.view())
+            .cost_function(self.b, &self.shares.view())
             .map_err(|e| {
                 MarketError::DatabaseError(format!(
                     "LMSR calculation failed: {:?}",
@@ -1495,7 +1323,7 @@ impl Market {
                 ))
             })?;
         let new_cost = lmsr
-            .cost_function(new_b, &current_state.shares.view())
+            .cost_function(new_b, &self.shares.view())
             .map_err(|e| {
                 MarketError::DatabaseError(format!(
                     "LMSR calculation failed: {:?}",
@@ -1508,46 +1336,18 @@ impl Market {
 
     pub fn cancel_market(
         &mut self,
-        transaction_id: Option<[u8; 32]>,
+        _transaction_id: Option<[u8; 32]>,
         height: u64,
-    ) -> Result<MarketStateHash, MarketError> {
-        match self.state() {
-            MarketState::Trading => self.create_new_state_version(
-                transaction_id,
-                height,
-                Some(MarketState::Cancelled),
-                None,
-                None,
-                None,
-                None,
-            ),
-            current_state => Err(MarketError::InvalidStateTransition {
-                from: current_state,
-                to: MarketState::Cancelled,
-            }),
-        }
+    ) -> Result<(), MarketError> {
+        self.update_state(height, Some(MarketState::Cancelled), None, None, None)
     }
 
     pub fn invalidate_market(
         &mut self,
-        transaction_id: Option<[u8; 32]>,
+        _transaction_id: Option<[u8; 32]>,
         height: u64,
-    ) -> Result<MarketStateHash, MarketError> {
-        match self.state() {
-            MarketState::Trading => self.create_new_state_version(
-                transaction_id,
-                height,
-                Some(MarketState::Invalid),
-                None,
-                None,
-                None,
-                None,
-            ),
-            current_state => Err(MarketError::InvalidStateTransition {
-                from: current_state,
-                to: MarketState::Invalid,
-            }),
-        }
+    ) -> Result<(), MarketError> {
+        self.update_state(height, Some(MarketState::Invalid), None, None, None)
     }
 
     /// Calculate final_prices from resolved slot outcomes.
@@ -1789,6 +1589,14 @@ impl Market {
     }
 }
 
+/// Generate a deterministic mempool tracking address for a market
+fn mempool_address(market_id: &MarketId) -> Address {
+    let mut bytes = [0u8; 20];
+    bytes[0] = 0xFF;
+    bytes[1..7].copy_from_slice(&market_id.0);
+    Address(bytes)
+}
+
 #[derive(Clone)]
 pub struct MarketsDatabase {
     markets: DatabaseUnique<SerdeBincode<[u8; 6]>, SerdeBincode<Market>>,
@@ -1803,11 +1611,14 @@ pub struct MarketsDatabase {
     /// Maps MarketId -> Current UTXO OutPoint for the market's treasury
     market_utxos: DatabaseUnique<SerdeBincode<[u8; 6]>, SerdeBincode<OutPoint>>,
     /// Maps MarketId -> Current UTXO OutPoint for accumulated author fees
-    market_author_fee_utxos: DatabaseUnique<SerdeBincode<[u8; 6]>, SerdeBincode<OutPoint>>,
+    market_author_fee_utxos:
+        DatabaseUnique<SerdeBincode<[u8; 6]>, SerdeBincode<OutPoint>>,
     /// Maps MarketId -> Pending treasury UTXOs from transactions (not yet consolidated)
-    pending_treasury_utxos: DatabaseUnique<SerdeBincode<[u8; 6]>, SerdeBincode<Vec<OutPoint>>>,
+    pending_treasury_utxos:
+        DatabaseUnique<SerdeBincode<[u8; 6]>, SerdeBincode<Vec<OutPoint>>>,
     /// Maps MarketId -> Pending author fee UTXOs from transactions (not yet consolidated)
-    pending_author_fee_utxos: DatabaseUnique<SerdeBincode<[u8; 6]>, SerdeBincode<Vec<OutPoint>>>,
+    pending_author_fee_utxos:
+        DatabaseUnique<SerdeBincode<[u8; 6]>, SerdeBincode<Vec<OutPoint>>>,
 }
 
 impl MarketsDatabase {
@@ -2010,8 +1821,7 @@ impl MarketsDatabase {
         let slot_index = DatabaseUnique::create(env, rwtxn, "markets_by_slot")?;
         let share_accounts =
             DatabaseUnique::create(env, rwtxn, "share_accounts")?;
-        let market_utxos =
-            DatabaseUnique::create(env, rwtxn, "market_utxos")?;
+        let market_utxos = DatabaseUnique::create(env, rwtxn, "market_utxos")?;
         let market_author_fee_utxos =
             DatabaseUnique::create(env, rwtxn, "market_author_fee_utxos")?;
         let pending_treasury_utxos =
@@ -2050,6 +1860,51 @@ impl MarketsDatabase {
         }
 
         Ok(())
+    }
+
+    /// Delete a market and all its associated index entries.
+    /// Used when reverting a market creation on reorg.
+    pub fn delete_market(
+        &self,
+        txn: &mut RwTxn,
+        market_id: &MarketId,
+    ) -> Result<bool, Error> {
+        // Get the market first to know what indexes to clean up
+        let Some(market) = self.markets.try_get(txn, market_id.as_bytes())?
+        else {
+            return Ok(false);
+        };
+
+        // Remove from state index
+        self.update_state_index(txn, market_id, Some(market.state()), None)?;
+
+        // Remove from expiry index if applicable
+        if let Some(expires_at) = market.expires_at_height {
+            self.update_expiry_index(txn, market_id, Some(expires_at), None)?;
+        }
+
+        // Remove from slot index for each decision slot
+        for &slot_id in &market.decision_slots {
+            self.update_slot_index(txn, market_id, slot_id, false)?;
+        }
+
+        // Clear market UTXO reference
+        self.market_utxos.delete(txn, market_id.as_bytes())?;
+
+        // Clear author fee UTXO reference
+        self.market_author_fee_utxos
+            .delete(txn, market_id.as_bytes())?;
+
+        // Clear any pending UTXOs
+        self.pending_treasury_utxos
+            .delete(txn, market_id.as_bytes())?;
+        self.pending_author_fee_utxos
+            .delete(txn, market_id.as_bytes())?;
+
+        // Delete the market itself
+        self.markets.delete(txn, market_id.as_bytes())?;
+
+        Ok(true)
     }
 
     pub fn get_market(
@@ -2412,8 +2267,15 @@ impl MarketsDatabase {
                 }
 
                 // Get consensus outcome from the voting database (canonical source)
-                let voting_period_id = crate::state::voting::types::VotingPeriodId::new(slot_id.voting_period());
-                if let Some(outcome) = state.voting().databases().get_consensus_outcome(txn, voting_period_id, *slot_id)? {
+                let voting_period_id =
+                    crate::state::voting::types::VotingPeriodId::new(
+                        slot_id.voting_period(),
+                    );
+                if let Some(outcome) = state
+                    .voting()
+                    .databases()
+                    .get_consensus_outcome(txn, voting_period_id, *slot_id)?
+                {
                     slot_outcomes.insert(*slot_id, outcome);
                 }
 
@@ -2438,12 +2300,10 @@ impl MarketsDatabase {
                         ))
                     })?;
 
-                // Create intermediate state with final prices (still Trading) to enable payout calculation
+                // Set final prices for payout calculation
                 market
-                    .create_new_state_version(
-                        None,
+                    .update_state(
                         current_height as u64,
-                        None, // Keep Trading temporarily
                         None,
                         None,
                         None,
@@ -2475,11 +2335,9 @@ impl MarketsDatabase {
 
                 // Transition directly to Ossified
                 market
-                    .create_new_state_version(
-                        None,
+                    .update_state(
                         current_height as u64,
                         Some(MarketState::Ossified),
-                        None,
                         None,
                         None,
                         None,
@@ -2536,10 +2394,7 @@ impl MarketsDatabase {
         rotxn: &RoTxn,
         market_id: &MarketId,
     ) -> Result<Option<Array<f64, Ix1>>, Error> {
-        let mut mempool_addr_bytes = [0u8; 20];
-        mempool_addr_bytes[0] = 0xFF;
-        mempool_addr_bytes[1..7].copy_from_slice(&market_id.0);
-        let mempool_addr = Address(mempool_addr_bytes);
+        let mempool_addr = mempool_address(market_id);
 
         match self.share_accounts.get(rotxn, &mempool_addr) {
             Ok(account) => {
@@ -2566,10 +2421,7 @@ impl MarketsDatabase {
         market_id: &MarketId,
         shares: &Array<f64, Ix1>,
     ) -> Result<(), Error> {
-        let mut mempool_addr_bytes = [0u8; 20];
-        mempool_addr_bytes[0] = 0xFF;
-        mempool_addr_bytes[1..7].copy_from_slice(&market_id.0);
-        let mempool_addr = Address(mempool_addr_bytes);
+        let mempool_addr = mempool_address(market_id);
 
         let mut account = match self.share_accounts.get(rwtxn, &mempool_addr) {
             Ok(acc) => acc,
@@ -2595,10 +2447,7 @@ impl MarketsDatabase {
         rwtxn: &mut RwTxn,
         market_id: &MarketId,
     ) -> Result<(), Error> {
-        let mut mempool_addr_bytes = [0u8; 20];
-        mempool_addr_bytes[0] = 0xFF;
-        mempool_addr_bytes[1..7].copy_from_slice(&market_id.0);
-        let mempool_addr = Address(mempool_addr_bytes);
+        let mempool_addr = mempool_address(market_id);
 
         if let Ok(mut account) = self.share_accounts.get(rwtxn, &mempool_addr) {
             account.positions.retain(|(mid, _), _| mid != market_id);
@@ -2773,18 +2622,10 @@ impl MarketsDatabase {
             }
 
             market
-                .create_new_state_version(
-                    None,
-                    0,
-                    None,
-                    None,
-                    None,
-                    Some(new_shares_array),
-                    None,
-                )
+                .update_state(0, None, None, Some(new_shares_array), None)
                 .map_err(|e| {
                     Error::DatabaseError(format!(
-                        "Failed to create new market state: {:?}",
+                        "Failed to update market state: {:?}",
                         e
                     ))
                 })?;
@@ -3039,7 +2880,8 @@ impl MarketsDatabase {
         market: &Market,
         block_height: u64,
     ) -> Result<MarketPayoutSummary, Error> {
-        let treasury_sats = self.get_market_treasury_sats(txn, state, &market.id)?;
+        let treasury_sats =
+            self.get_market_treasury_sats(txn, state, &market.id)?;
         let final_prices = market.final_prices();
 
         let shareholders = self.get_shareholders_for_market(txn, &market.id)?;
@@ -3073,9 +2915,10 @@ impl MarketsDatabase {
             for (outcome_index, shares) in positions {
                 let final_price = final_prices[outcome_index as usize];
                 let weighted_shares = shares * final_price;
-                let payout_sats = (weighted_shares / total_weighted_shares
-                    * treasury_sats as f64)
-                    .floor() as u64;
+                let payout_calc = weighted_shares / total_weighted_shares
+                    * treasury_sats as f64;
+                let payout_sats = satoshi::to_sats(payout_calc, Rounding::Down)
+                    .unwrap_or(0);
 
                 if payout_sats > 0 {
                     payouts.push(SharePayoutRecord {
@@ -3106,7 +2949,8 @@ impl MarketsDatabase {
         }
 
         // Get author fees from Author Fee UTXO
-        let author_fees_distributed = self.get_author_fee_sats(txn, state, &market.id)?;
+        let author_fees_distributed =
+            self.get_author_fee_sats(txn, state, &market.id)?;
 
         Ok(MarketPayoutSummary {
             market_id: market.id.clone(),
@@ -3193,7 +3037,9 @@ impl MarketsDatabase {
         }
 
         // Consume the Market UTXO (treasury is now distributed to shareholders)
-        if let Some(market_utxo) = self.get_market_utxo(txn, &payout_summary.market_id)? {
+        if let Some(market_utxo) =
+            self.get_market_utxo(txn, &payout_summary.market_id)?
+        {
             state.delete_utxo_with_address_index(txn, &market_utxo)?;
             self.clear_market_utxo(txn, &payout_summary.market_id)?;
             tracing::debug!(
@@ -3204,7 +3050,9 @@ impl MarketsDatabase {
         }
 
         // Consume the Author Fee UTXO (fees now paid to market creator)
-        if let Some(fee_utxo) = self.get_author_fee_utxo(txn, &payout_summary.market_id)? {
+        if let Some(fee_utxo) =
+            self.get_author_fee_utxo(txn, &payout_summary.market_id)?
+        {
             state.delete_utxo_with_address_index(txn, &fee_utxo)?;
             self.clear_author_fee_utxo(txn, &payout_summary.market_id)?;
             tracing::debug!(
@@ -3337,7 +3185,9 @@ impl MarketsDatabase {
         txn: &RoTxn,
         market_id: &MarketId,
     ) -> Result<Option<OutPoint>, Error> {
-        Ok(self.market_author_fee_utxos.try_get(txn, market_id.as_bytes())?)
+        Ok(self
+            .market_author_fee_utxos
+            .try_get(txn, market_id.as_bytes())?)
     }
 
     /// Set the current UTXO OutPoint for a market's author fees
@@ -3347,7 +3197,11 @@ impl MarketsDatabase {
         market_id: &MarketId,
         outpoint: &OutPoint,
     ) -> Result<(), Error> {
-        self.market_author_fee_utxos.put(txn, market_id.as_bytes(), outpoint)?;
+        self.market_author_fee_utxos.put(
+            txn,
+            market_id.as_bytes(),
+            outpoint,
+        )?;
         Ok(())
     }
 
@@ -3357,7 +3211,8 @@ impl MarketsDatabase {
         txn: &mut RwTxn,
         market_id: &MarketId,
     ) -> Result<(), Error> {
-        self.market_author_fee_utxos.delete(txn, market_id.as_bytes())?;
+        self.market_author_fee_utxos
+            .delete(txn, market_id.as_bytes())?;
         Ok(())
     }
 
@@ -3392,7 +3247,8 @@ impl MarketsDatabase {
             .try_get(txn, market_id.as_bytes())?
             .unwrap_or_default();
         pending.push(*outpoint);
-        self.pending_treasury_utxos.put(txn, market_id.as_bytes(), &pending)?;
+        self.pending_treasury_utxos
+            .put(txn, market_id.as_bytes(), &pending)?;
         Ok(())
     }
 
@@ -3408,7 +3264,11 @@ impl MarketsDatabase {
             .try_get(txn, market_id.as_bytes())?
             .unwrap_or_default();
         pending.push(*outpoint);
-        self.pending_author_fee_utxos.put(txn, market_id.as_bytes(), &pending)?;
+        self.pending_author_fee_utxos.put(
+            txn,
+            market_id.as_bytes(),
+            &pending,
+        )?;
         Ok(())
     }
 
@@ -3442,7 +3302,8 @@ impl MarketsDatabase {
         txn: &mut RwTxn,
         market_id: &MarketId,
     ) -> Result<(), Error> {
-        self.pending_treasury_utxos.delete(txn, market_id.as_bytes())?;
+        self.pending_treasury_utxos
+            .delete(txn, market_id.as_bytes())?;
         Ok(())
     }
 
@@ -3452,7 +3313,8 @@ impl MarketsDatabase {
         txn: &mut RwTxn,
         market_id: &MarketId,
     ) -> Result<(), Error> {
-        self.pending_author_fee_utxos.delete(txn, market_id.as_bytes())?;
+        self.pending_author_fee_utxos
+            .delete(txn, market_id.as_bytes())?;
         Ok(())
     }
 
@@ -3839,5 +3701,4 @@ mod tests {
             "Adequate liquidity should result in positive, finite shares"
         );
     }
-
 }

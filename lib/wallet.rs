@@ -902,10 +902,14 @@ impl Wallet {
         let market_id_bytes = *market_id.as_bytes();
 
         // Calculate total cost (base + trading fee + tx fee)
-        let total_market_cost = bitcoin::Amount::from_sat(base_cost_sats + trading_fee_sats);
-        let total_cost = tx_fee.checked_add(total_market_cost).ok_or(AmountOverflowError)?;
+        let total_market_cost =
+            bitcoin::Amount::from_sat(base_cost_sats + trading_fee_sats);
+        let total_cost = tx_fee
+            .checked_add(total_market_cost)
+            .ok_or(AmountOverflowError)?;
 
-        let (total_bitcoin, bitcoin_utxos) = self.select_bitcoins(total_cost)?;
+        let (total_bitcoin, bitcoin_utxos) =
+            self.select_bitcoins(total_cost)?;
         let change = total_bitcoin - total_cost;
 
         let inputs = bitcoin_utxos.into_keys().collect();
@@ -917,7 +921,9 @@ impl Wallet {
             treasury_address,
             OutputContent::MarketTreasury {
                 market_id: market_id_bytes,
-                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(base_cost_sats)),
+                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(
+                    base_cost_sats,
+                )),
             },
         ));
 
@@ -927,7 +933,9 @@ impl Wallet {
             fee_address,
             OutputContent::MarketAuthorFee {
                 market_id: market_id_bytes,
-                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(trading_fee_sats)),
+                amount: BitcoinOutputContent(bitcoin::Amount::from_sat(
+                    trading_fee_sats,
+                )),
             },
         ));
 

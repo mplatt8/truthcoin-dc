@@ -28,49 +28,53 @@ const NONSTANDARD_SLOT_MIN: u32 = 500;
 const PERIOD_SHIFT: u32 = 14;
 const SLOT_MASK: u32 = MAX_SLOT_INDEX;
 
-impl SlotId {
-    pub fn new(period: u32, index: u32) -> Result<Self, Error> {
-        if period > MAX_PERIOD_INDEX {
-            return Err(Error::InvalidSlotId {
-                reason: format!(
-                    "Period {} exceeds maximum {}",
-                    period, MAX_PERIOD_INDEX
-                ),
-            });
-        }
-        if index > MAX_SLOT_INDEX {
-            return Err(Error::InvalidSlotId {
-                reason: format!(
-                    "Slot index {} exceeds maximum {}",
-                    index, MAX_SLOT_INDEX
-                ),
-            });
-        }
+/// Validates that period and index are within valid bounds.
+/// Shared by SlotId::new() and SlotId::from_bytes().
+fn validate_slot_bounds(period: u32, index: u32) -> Result<(), Error> {
+    if period > MAX_PERIOD_INDEX {
+        return Err(Error::InvalidSlotId {
+            reason: format!(
+                "Period {} exceeds maximum {}",
+                period, MAX_PERIOD_INDEX
+            ),
+        });
+    }
+    if index > MAX_SLOT_INDEX {
+        return Err(Error::InvalidSlotId {
+            reason: format!(
+                "Slot index {} exceeds maximum {}",
+                index, MAX_SLOT_INDEX
+            ),
+        });
+    }
+    Ok(())
+}
 
+impl SlotId {
+    #[inline(always)]
+    const fn as_u32(self) -> u32 {
+        ((self.0[0] as u32) << 16) | ((self.0[1] as u32) << 8) | (self.0[2] as u32)
+    }
+
+    pub fn new(period: u32, index: u32) -> Result<Self, Error> {
+        validate_slot_bounds(period, index)?;
         let combined = (period << PERIOD_SHIFT) | index;
         let bytes = [
             (combined >> 16) as u8,
             (combined >> 8) as u8,
             combined as u8,
         ];
-
         Ok(SlotId(bytes))
     }
 
     #[inline(always)]
     pub const fn period_index(self) -> u32 {
-        let combined = ((self.0[0] as u32) << 16)
-            | ((self.0[1] as u32) << 8)
-            | (self.0[2] as u32);
-        combined >> PERIOD_SHIFT
+        self.as_u32() >> PERIOD_SHIFT
     }
 
     #[inline(always)]
     pub const fn slot_index(self) -> u32 {
-        let combined = ((self.0[0] as u32) << 16)
-            | ((self.0[1] as u32) << 8)
-            | (self.0[2] as u32);
-        combined & SLOT_MASK
+        self.as_u32() & SLOT_MASK
     }
 
     pub fn as_bytes(self) -> [u8; 3] {
@@ -78,30 +82,10 @@ impl SlotId {
     }
 
     pub fn from_bytes(bytes: [u8; 3]) -> Result<Self, Error> {
-        let combined = ((bytes[0] as u32) << 16)
-            | ((bytes[1] as u32) << 8)
-            | (bytes[2] as u32);
-        let period = combined >> PERIOD_SHIFT;
-        let index = combined & SLOT_MASK;
-
-        if period > MAX_PERIOD_INDEX {
-            return Err(Error::InvalidSlotId {
-                reason: format!(
-                    "Period {} exceeds maximum {}",
-                    period, MAX_PERIOD_INDEX
-                ),
-            });
-        }
-        if index > MAX_SLOT_INDEX {
-            return Err(Error::InvalidSlotId {
-                reason: format!(
-                    "Slot index {} exceeds maximum {}",
-                    index, MAX_SLOT_INDEX
-                ),
-            });
-        }
-
-        Ok(SlotId(bytes))
+        let slot = SlotId(bytes);
+        let combined = slot.as_u32();
+        validate_slot_bounds(combined >> PERIOD_SHIFT, combined & SLOT_MASK)?;
+        Ok(slot)
     }
 
     pub fn from_hex(slot_id_hex: &str) -> Result<Self, Error> {
@@ -254,22 +238,16 @@ impl SlotState {
     Clone, Debug, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd,
 )]
 pub struct SlotStateHistory {
-    pub current_state: SlotState,
-    pub state_changed_at_height: u32,
     pub voting_period: Option<u32>,
     pub state_history: Vec<(SlotState, u32)>,
 }
 
 impl SlotStateHistory {
     pub fn new_created(_slot_id: SlotId, height: u32) -> Self {
-        let mut history = Self {
-            current_state: SlotState::Created,
-            state_changed_at_height: height,
+        Self {
             voting_period: None,
-            state_history: Vec::new(),
-        };
-        history.state_history.push((SlotState::Created, height));
-        history
+            state_history: vec![(SlotState::Created, height)],
+        }
     }
 
     pub fn new(_slot_id: SlotId, initial_height: u64, _timestamp: u64) -> Self {
@@ -278,20 +256,22 @@ impl SlotStateHistory {
     }
 
     pub fn current_state(&self) -> SlotState {
-        self.current_state
+        self.state_history
+            .last()
+            .map(|(s, _)| *s)
+            .unwrap_or(SlotState::Created)
     }
 
     pub fn transition_to_claimed(&mut self, height: u32) -> Result<(), Error> {
-        if !self.current_state.can_transition_to(SlotState::Claimed) {
+        let current = self.current_state();
+        if !current.can_transition_to(SlotState::Claimed) {
             return Err(Error::InvalidSlotState {
                 reason: format!(
                     "Cannot transition to Claimed from {:?}",
-                    self.current_state
+                    current
                 ),
             });
         }
-        self.current_state = SlotState::Claimed;
-        self.state_changed_at_height = height;
         self.state_history.push((SlotState::Claimed, height));
         Ok(())
     }
@@ -301,16 +281,15 @@ impl SlotStateHistory {
         voting_period: u32,
         height: u32,
     ) -> Result<(), Error> {
-        if !self.current_state.can_transition_to(SlotState::Voting) {
+        let current = self.current_state();
+        if !current.can_transition_to(SlotState::Voting) {
             return Err(Error::InvalidSlotState {
                 reason: format!(
                     "Cannot transition to Voting from {:?}",
-                    self.current_state
+                    current
                 ),
             });
         }
-        self.current_state = SlotState::Voting;
-        self.state_changed_at_height = height;
         self.voting_period = Some(voting_period);
         self.state_history.push((SlotState::Voting, height));
         Ok(())
@@ -321,16 +300,17 @@ impl SlotStateHistory {
         consensus_outcome: f64,
         height: u32,
     ) -> Result<(), Error> {
-        if !self.current_state.can_transition_to(SlotState::Resolved) {
+        let current = self.current_state();
+        if !current.can_transition_to(SlotState::Resolved) {
             return Err(Error::InvalidSlotState {
                 reason: format!(
                     "Cannot transition to Resolved from {:?}",
-                    self.current_state
+                    current
                 ),
             });
         }
 
-        if consensus_outcome < 0.0 || consensus_outcome > 1.0 {
+        if !(0.0..=1.0).contains(&consensus_outcome) {
             return Err(Error::InvalidSlotState {
                 reason: format!(
                     "Consensus outcome {} outside valid range [0.0, 1.0]",
@@ -339,8 +319,6 @@ impl SlotStateHistory {
             });
         }
 
-        self.current_state = SlotState::Resolved;
-        self.state_changed_at_height = height;
         self.state_history.push((SlotState::Resolved, height));
         Ok(())
     }
@@ -350,11 +328,11 @@ impl SlotStateHistory {
     }
 
     pub fn can_accept_votes(&self) -> bool {
-        self.current_state == SlotState::Voting
+        self.current_state() == SlotState::Voting
     }
 
     pub fn has_consensus(&self) -> bool {
-        self.current_state.has_consensus()
+        self.current_state().has_consensus()
     }
 
     pub fn has_reached_state(&self, state: SlotState) -> bool {
@@ -374,14 +352,6 @@ impl SlotStateHistory {
     pub fn rollback_to_height(&mut self, height: u64) {
         let height_u32 = height as u32;
         self.state_history.retain(|(_, h)| *h <= height_u32);
-
-        if let Some((state, height)) = self.state_history.last() {
-            self.current_state = *state;
-            self.state_changed_at_height = *height;
-        } else {
-            self.current_state = SlotState::Created;
-            self.state_changed_at_height = 0;
-        }
     }
 
     pub fn get_state_height(&self, state: SlotState) -> Option<u64> {
@@ -455,15 +425,27 @@ impl SlotConfig {
     }
 }
 
-// Convert L1 timestamp to period index for slot claims
-// Inline implementation since this is for claim periods, not voting periods
+/// Convert timestamp to period index (single source of truth).
+/// Used by RPC and other layers for consistent period calculation.
 #[inline]
-fn timestamp_to_quarter_index(ts_secs: u64) -> Result<u32, Error> {
-    if ts_secs < BITCOIN_GENESIS_TIMESTAMP {
-        return Ok(0);
+pub fn timestamp_to_period(timestamp: u64) -> u32 {
+    if timestamp < BITCOIN_GENESIS_TIMESTAMP {
+        return 0;
     }
-    let elapsed_seconds = ts_secs - BITCOIN_GENESIS_TIMESTAMP;
-    Ok((elapsed_seconds / SECONDS_PER_QUARTER) as u32)
+    let elapsed_seconds = timestamp - BITCOIN_GENESIS_TIMESTAMP;
+    (elapsed_seconds / SECONDS_PER_QUARTER) as u32
+}
+
+/// Convert period index to human-readable name (single source of truth).
+/// Returns "Genesis" for period 0, otherwise "Q{quarter} Y{year}".
+#[inline]
+pub fn period_to_name(period: u32) -> String {
+    if period == 0 {
+        return "Genesis".to_string();
+    }
+    let year = 2009 + (period - 1) / 4;
+    let quarter = ((period - 1) % 4) + 1;
+    format!("Q{} Y{}", quarter, year)
 }
 
 pub fn quarter_to_string(quarter_idx: u32, config: &SlotConfig) -> String {
@@ -498,7 +480,7 @@ fn get_current_period(
             Ok((height / config.testing_blocks_per_period) + 1)
         }
     } else {
-        timestamp_to_quarter_index(timestamp)
+        Ok(timestamp_to_period(timestamp))
     }
 }
 
@@ -669,10 +651,6 @@ impl Dbs {
         Ok(periods)
     }
 
-    pub fn timestamp_to_quarter(ts_secs: u64) -> Result<u32, Error> {
-        timestamp_to_quarter_index(ts_secs)
-    }
-
     pub fn is_testing_mode(&self) -> bool {
         self.config.testing_mode
     }
@@ -836,7 +814,8 @@ impl Dbs {
             }
         }
 
-        let claimed_slots = self.get_claimed_slot_ids_for_period(rotxn, period_index)?;
+        let claimed_slots =
+            self.get_claimed_slot_ids_for_period(rotxn, period_index)?;
 
         if claimed_slots.contains(&slot_id) {
             return Err(Error::SlotAlreadyClaimed { slot_id });
@@ -931,7 +910,8 @@ impl Dbs {
 
         let mut available_slots = Vec::with_capacity(max_slot_index as usize);
 
-        let claimed_slots = self.get_claimed_slot_ids_for_period(rotxn, period_index)?;
+        let claimed_slots =
+            self.get_claimed_slot_ids_for_period(rotxn, period_index)?;
 
         for slot_index in 0..max_slot_index {
             let slot_id = SlotId::new(period_index, slot_index as u32)?;
@@ -969,7 +949,8 @@ impl Dbs {
         rotxn: &sneed::RoTxn,
         period_index: u32,
     ) -> Result<u64, Error> {
-        let claimed_slots = self.get_claimed_slot_ids_for_period(rotxn, period_index)?;
+        let claimed_slots =
+            self.get_claimed_slot_ids_for_period(rotxn, period_index)?;
         Ok(claimed_slots.len() as u64)
     }
 
@@ -1181,7 +1162,8 @@ impl Dbs {
             while let Some((slot_id, mut history)) = iter.next()? {
                 let was_claimed = history.current_state() != SlotState::Created;
                 history.rollback_to_height(height);
-                let is_now_created = history.current_state() == SlotState::Created;
+                let is_now_created =
+                    history.current_state() == SlotState::Created;
 
                 // If slot was claimed but rolled back to Created, track it for removal
                 if was_claimed && is_now_created {
@@ -1207,7 +1189,11 @@ impl Dbs {
                 if period_slots.is_empty() {
                     self.period_slots.delete(rwtxn, &period_index)?;
                 } else {
-                    self.period_slots.put(rwtxn, &period_index, &period_slots)?;
+                    self.period_slots.put(
+                        rwtxn,
+                        &period_index,
+                        &period_slots,
+                    )?;
                 }
             }
         }

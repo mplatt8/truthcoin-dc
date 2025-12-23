@@ -2,164 +2,20 @@
 
 ## Prerequisites
 
-### Required Dependencies
+### Installation Guides
 
-This project requires the following external components.
+Choose the installation guide for your operating system:
 
-#### macOS: Install Xcode Command Line Tools
+| OS | Guide |
+|----|-------|
+| **macOS** | [macOS Installation Guide](docs/INSTALL_MACOS.md) |
+| **Linux** | [Linux Installation Guide](docs/INSTALL_LINUX.md) |
+| **Windows** | [Windows Installation Guide](docs/INSTALL_WINDOWS.md) |
 
-Required for compiling code on macOS. This must be installed first.
-
-```bash
-xcode-select --install
-```
-
-Follow the prompts to complete installation.
-
-#### macOS: Install Homebrew
-
-Homebrew is a package manager for macOS used to install dependencies.
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
-
-After installation, follow the instructions in the terminal to add Homebrew to your PATH.
-
-Verify installation:
-```bash
-brew --version
-```
-
-#### Install Git
-
-Git is required to clone repositories.
-
-**macOS (with Homebrew):**
-```bash
-brew install git
-```
-
-**Linux (Debian/Ubuntu):**
-```bash
-sudo apt install git
-```
-
-**Windows:**
-
-Download and install from [git-scm.com](https://git-scm.com/download/win)
-
-Verify installation:
-```bash
-git --version
-```
-
-#### Install grpcurl
-
-Open a new terminal session
-
-grpcurl is required for interacting with the BIP300301 enforcer gRPC service.
-
-**macOS (Homebrew):**
-```bash
-brew install grpcurl
-```
-
-**Linux (Download binary):**
-```bash
-# Download latest release (adjust version as needed)
-curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz | tar -xz
-sudo mv grpcurl /usr/local/bin/
-```
-
-**Windows (Chocolatey):**
-```powershell
-choco install grpcurl
-```
-
-**Windows (Manual):**
-1. Download `grpcurl_X.X.X_windows_x86_64.zip` from [GitHub releases](https://github.com/fullstorydev/grpcurl/releases)
-2. Extract the zip file
-3. Add the folder containing `grpcurl.exe` to your PATH
-
-Verify installation:
-```bash
-grpcurl --version
-```
-
-#### Install Rust, Cargo, and Rustup
-
-Rust and Cargo are required to build truthcoin and electrs from source.
-
-**macOS / Linux:**
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-```
-
-**Windows:**
-
-Download and run the installer from [rustup.rs](https://rustup.rs)
-
-**Install nightly toolchain (required):**
-```bash
-rustup install nightly
-rustup default nightly
-```
-
-Verify installation:
-```bash
-rustc --version
-cargo --version
-```
-
-#### Download Pre-built Binaries
-
-Create a new directory for the binaries
-
-```bash
-mkdir truthcoin-binaries
-cd truthcoin-binaries
-```
-
-Download pre-built binaries for your specific OS from [releases.drivechain.info](https://releases.drivechain.info) into new parent directory (truthcoin-binaries):
-  *  `L1-bitcoin-patched-latest-x86_64-[OS].zip`
-  *  `bip300301-enforcer-latest-x86_64-[OS].zip`
-
-Rename the folders:
-
-```bash
-mv ~/[DOWNLOAD-LOCATION]/L1-bitcoin-patched-latest-x86_64-[OS] ./bitcoin-patched
-mv ~/[DOWNLOAD-LOCATION]/bip300301-enforcer-latest-x86_64-[OS] ./bip300301_enforcer
-```
-
-Rename the enforcer binary inside the folder:
-
-```bash
-mv ./bip300301_enforcer/bip300301-enforcer-latest-x86_64-[OS] ./bip300301_enforcer/bip300301_enforcer
-```
-
-Make the downloaded binaries executable
-```bash 
-chmod +x ./bip300301_enforcer/bip300301_enforcer
-chmod +x ./bitcoin-patched/bitcoind
-chmod +x ./bitcoin-patched/bitcoin-cli
-```
-
-Then build electrs and truthcoin from source (assuming your current working directory is truthcoin-binaries):
-```bash
-# Electrs (Blockstream fork with HTTP/REST API)
-git clone https://github.com/blockstream/electrs.git
-cd electrs 
-cargo build --release
-cd ..
-
-# Truthcoin
-git clone https://github.com/mplatt8/truthcoin-dc.git
-cd truthcoin-dc
-git submodule update --init --recursive
-cargo build
-```
+Each guide covers:
+- Installing Git, grpcurl, and Rust toolchain
+- Downloading pre-built binaries
+- Building electrs and truthcoin from source
 
 ## Integration Tests
 
@@ -199,7 +55,7 @@ roundtrip.rs is a full coverage test of the node
 rm -rf /tmp/regtest-data && mkdir -p /tmp/regtest-data/{bitcoin,electrs,enforcer,truthcoin}
 ```
 
-### 2. Start All Four Binaries In This Order(each in separate terminal)
+### 2. Start All Four Binaries In This Order (each in separate terminal)
 
 **Bitcoin Core:**
 ```bash
@@ -274,14 +130,52 @@ grpcurl -plaintext -d '{
 
 # Mine L1 block, then L2 genesis block
 grpcurl -plaintext -d '{"blocks": 1, "ack_all_proposals": true}' 127.0.0.1:50051 cusf.mainchain.v1.WalletService.GenerateBlocks
-curl -X POST http://127.0.0.1:18332 -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"mine","params":[null],"id":1}'
 ```
 
 ### Mining Helper Script
 
 Use `./mine_blocks.sh [N]` to mine N block pairs (L1 + L2):
 ```bash
-./mine_blocks.sh 5  # Mines 5 L1 blocks and 5 L2 blocks
+./mine_blocks.sh (If no [N] is specified, 1 block pair will be mined by default)
+```
+
+**It is recommended to make multiple deposits to your Truthcoin node to avoid double spending UTXO's within each block.
+***If you run into UTXO double spend errors, you need to run the mining script for fresh UTXO's
+
+---
+
+## Creating Markets
+
+Markets require decision slots. Slots must be claimed and confirmed before they can be used in market creation.
+
+### 1. Claim a Slot
+
+```bash
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 slot-claim \
+  --period-index 0 --slot-index 0 --is-standard true --is-scaled false \
+  --question "Will BTC hit $100K?" --fee-sats 1000
+```
+
+### 2. Mine Blocks to Confirm
+
+```bash
+./mine_blocks.sh 1
+```
+
+### 3. Get Slot ID for Market Creation
+
+```bash
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 slot-list --period 0 --status claimed
+```
+
+Use the returned slot ID in your market's `--dimensions` parameter.
+
+### 4. Create Market
+
+```bash
+./target/debug/truthcoin_dc_app_cli --rpc-port 18332 market-create \
+  --title "Will BTC hit $100K?" --description "Binary prediction market" \
+  --dimensions "[SLOT_ID_HERE]" --beta 7.0 --fee-sats 1000
 ```
 
 ---

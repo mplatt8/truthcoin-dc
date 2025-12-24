@@ -97,6 +97,12 @@ chmod +x ./bitcoin-patched/bitcoin-cli
 
 ### 5. Build from Source
 
+> **Note:** If building Bitcoin from source, install ZMQ first or you'll get `MethodNotFound` errors for `getzmqnotifications`:
+> ```bash
+> sudo apt install libzmq3-dev  # Debian/Ubuntu
+> sudo dnf install zeromq-devel  # Fedora
+> ```
+
 ```bash
 # Electrs (Blockstream fork with HTTP/REST API)
 git clone https://github.com/blockstream/electrs.git

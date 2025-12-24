@@ -106,7 +106,7 @@ cargo build --release
 cd ..
 
 # Truthcoin
-git clone https://github.com/mplatt8/truthcoin-dc.git
+git clone https://github.com/LayerTwo-Labs/truthcoin-dc.git
 cd truthcoin-dc
 git submodule update --init --recursive
 cargo build

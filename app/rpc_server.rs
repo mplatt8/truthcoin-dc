@@ -32,10 +32,11 @@ use truthcoin_dc::{
 };
 use truthcoin_dc_app_rpc_api::{
     ConsensusResults, CreateTradeRequest, CreateTradeResponse, DecisionFilter,
-    DecisionListItem, DecisionState, DecisionSummary, MarketAmplifyBetaRequest,
-    MarketBuyRequest, MarketBuyResponse, MarketSellRequest, MarketSellResponse,
-    ParticipationStats, PeriodStats, RpcServer, SubmitBallotRequest, TxInfo,
-    VoteFilter, VoteInfo, VoterInfo, VoterInfoFull, VotingPeriodFull,
+    DecisionListItem, DecisionState, DecisionSummary, GetBlockTemplateResponse,
+    MarketAmplifyBetaRequest, MarketBuyRequest, MarketBuyResponse,
+    MarketSellRequest, MarketSellResponse, ParticipationStats, PeriodStats,
+    RpcServer, SubmitBallotRequest, TxInfo, VoteFilter, VoteInfo, VoterInfo,
+    VoterInfoFull, VotingPeriodFull,
 };
 
 use crate::app::App;
@@ -566,6 +567,29 @@ impl RpcServer for RpcServerImpl {
         Ok(block)
     }
 
+    async fn get_block_template(&self) -> RpcResult<GetBlockTemplateResponse> {
+        let template = self
+            .app
+            .local_pool
+            .spawn_pinned({
+                let app = self.app.clone();
+                move || async move {
+                    app.get_block_template().await.map_err(custom_err)
+                }
+            })
+            .await
+            .unwrap()?;
+        Ok(GetBlockTemplateResponse {
+            critical_hash: template.header.hash(),
+            block: Block {
+                header: template.header,
+                body: template.body,
+                height: template.height,
+            },
+            fees_sats: template.fees.to_sat(),
+        })
+    }
+
     async fn get_best_sidechain_block_hash(
         &self,
     ) -> RpcResult<Option<BlockHash>> {
@@ -1009,6 +1033,25 @@ impl RpcServer for RpcServerImpl {
             bitcoin::hashes::Hash::from_byte_array(txid.0),
         );
         Ok(bitcoin_txid)
+    }
+
+    async fn connect_block(
+        &self,
+        block: Block,
+        main_block_hash: bitcoin::BlockHash,
+    ) -> RpcResult<bool> {
+        self.app
+            .local_pool
+            .spawn_pinned({
+                let app = self.app.clone();
+                move || async move {
+                    app.connect_block(block, main_block_hash)
+                        .await
+                        .map_err(custom_err)
+                }
+            })
+            .await
+            .unwrap()
     }
 
     async fn connect_peer(&self, addr: SocketAddr) -> RpcResult<()> {

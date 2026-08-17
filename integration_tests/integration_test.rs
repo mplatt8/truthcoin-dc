@@ -8,6 +8,7 @@ use bip300301_enforcer_integration_tests::{
 use futures::{FutureExt, channel::mpsc, future::BoxFuture};
 
 use crate::{
+    block_template::block_template_trial,
     ibd::ibd_trial,
     roundtrip::roundtrip_trial,
     setup::{Init, PostSetup},
@@ -52,6 +53,11 @@ pub fn tests(
     failure_collector: TestFailureCollector,
 ) -> Vec<AsyncTrial<BoxFuture<'static, anyhow::Result<()>>>> {
     vec![
+        block_template_trial(
+            bin_paths.clone(),
+            file_registry.clone(),
+            failure_collector.clone(),
+        ),
         deposit_withdraw_roundtrip(
             bin_paths.clone(),
             file_registry.clone(),

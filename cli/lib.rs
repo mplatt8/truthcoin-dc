@@ -223,6 +223,18 @@ pub enum Command {
     #[command(name = "get-block")]
     GetBlock { block_hash: BlockHash },
 
+    /// Assemble a block to blind merge mine, without requesting BMM for it
+    #[command(name = "get-block-template")]
+    GetBlockTemplate,
+
+    /// Connect a block for which a BMM request was included in the specified
+    /// mainchain block. The block is the JSON returned by `get-block-template`.
+    #[command(name = "connect-block")]
+    ConnectBlock {
+        block: String,
+        main_block_hash: bitcoin::BlockHash,
+    },
+
     /// Get best mainchain block hash
     #[command(name = "get-best-mainchain-block-hash")]
     GetBestMainchainBlockHash,
@@ -778,6 +790,19 @@ where
         Command::GetBlock { block_hash } => {
             let block = rpc_client.get_block(block_hash).await?;
             json_response(&block)?
+        }
+        Command::GetBlockTemplate => {
+            let template = rpc_client.get_block_template().await?;
+            json_response(&template)?
+        }
+        Command::ConnectBlock {
+            block,
+            main_block_hash,
+        } => {
+            let block = serde_json::from_str(&block)?;
+            let accepted =
+                rpc_client.connect_block(block, main_block_hash).await?;
+            format!("{accepted}")
         }
         Command::GetBestMainchainBlockHash => {
             let block_hash = rpc_client.get_best_mainchain_block_hash().await?;

@@ -270,16 +270,91 @@ pub struct DecisionListingFeeInfo {
     pub claimed: u64,
 }
 
+#[derive(
+    Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketStatus {
+    Trading,
+    Cancelled,
+    Invalid,
+    Settled,
+}
+
+impl From<truthcoin_dc::state::markets::MarketState> for MarketStatus {
+    fn from(state: truthcoin_dc::state::markets::MarketState) -> Self {
+        match state {
+            truthcoin_dc::state::markets::MarketState::Trading => Self::Trading,
+            truthcoin_dc::state::markets::MarketState::Cancelled => {
+                Self::Cancelled
+            }
+            truthcoin_dc::state::markets::MarketState::Invalid => Self::Invalid,
+            truthcoin_dc::state::markets::MarketState::Settled => Self::Settled,
+        }
+    }
+}
+
+impl std::fmt::Display for MarketStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Trading => "trading",
+            Self::Cancelled => "cancelled",
+            Self::Invalid => "invalid",
+            Self::Settled => "settled",
+        };
+        f.write_str(value)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct MarketDimension {
+    /// Position in the market's ordered dimension specification.
+    pub dimension_index: usize,
+    /// Hex-encoded decision ID backing this dimension.
+    pub decision_id: String,
+    /// Decision header, kept separate from outcome names.
+    pub name: String,
+    pub kind: MarketDimensionKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MarketDimensionKind {
+    Binary {
+        lower_label: String,
+        upper_label: String,
+    },
+    Scaled {
+        min: f64,
+        max: f64,
+        increment: f64,
+        /// The current protocol does not carry a unit field, so this is null
+        /// until one is added to the decision definition.
+        unit: Option<String>,
+        lower_label: String,
+        upper_label: String,
+    },
+    Category {
+        /// State labels in coordinate order.
+        options: Vec<String>,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct MarketOutcome {
-    pub name: String,
-    pub current_price: f64,
-    pub probability: f64,
+    /// Dense index used by market_buy and market_sell.
+    pub outcome_index: usize,
+    /// Human-readable description of this joint outcome.
+    pub label: String,
+    /// LMSR price for this outcome. For the current market implementation,
+    /// this is also the outcome probability.
+    pub price: f64,
     pub volume_sats: u64,
-    /// The internal state array index used by market_buy/market_sell
-    pub index: usize,
-    /// The ordinal display position (0-based) among valid outcomes
-    pub display_index: usize,
+    /// Index into the full Cartesian state tensor, including non-tradeable
+    /// abstain coordinates.
+    pub full_state_index: usize,
+    /// One coordinate per ordered market dimension.
+    pub coordinates: Vec<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -287,18 +362,24 @@ pub struct MarketData {
     pub market_id: String,
     pub title: String,
     pub description: String,
-    pub outcomes: Vec<MarketOutcome>,
-    pub state: String,
-    pub market_maker: String,
-    pub expires_at: Option<u32>,
-    pub beta: f64,
-    pub trading_fee: f64,
     pub tags: Vec<String>,
+    pub creator_address: String,
     pub created_at_height: u32,
-    pub treasury: f64,
+    pub expires_at_height: Option<u32>,
+    /// Ordered dimension metadata. The dimension decision IDs are the
+    /// authoritative decision list for this market.
+    pub dimensions: Vec<MarketDimension>,
+    pub outcomes: Vec<MarketOutcome>,
+    pub state: MarketStatus,
+    /// Effective LMSR beta used for pricing, in satoshis per share unit.
+    pub beta: f64,
+    /// Author-funded LMSR liquidity base, in satoshis.
+    pub liquidity_base_sats: u64,
+    /// Exact market treasury balance, in satoshis.
+    pub treasury_sats: u64,
     pub total_volume_sats: u64,
-    pub liquidity: f64,
-    pub decision_ids: Vec<String>,
+    /// Fractional trading fee applied to buys and sells.
+    pub trading_fee_rate: f64,
     pub resolution: Option<MarketResolution>,
     pub tx_pow_hash_selector: u8,
     pub tx_pow_ordering: u8,
@@ -314,8 +395,8 @@ pub struct MarketResolution {
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 pub struct WinningOutcome {
     pub outcome_index: usize,
-    pub outcome_name: String,
-    pub final_price: f64,
+    pub label: String,
+    pub price: f64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -324,7 +405,7 @@ pub struct MarketSummary {
     pub title: String,
     pub description: String,
     pub outcome_count: usize,
-    pub state: String,
+    pub state: MarketStatus,
     pub volume_sats: u64,
     pub created_at_height: u32,
 }
@@ -507,7 +588,8 @@ pub struct ScoreChange {
     MarketCreateRequest, MarketCreateResponse, PeriodPricingSummary,
     ConsensusResults, DecisionSummary,
     EncryptionPubKey, FilledOutputContent, Header, InitialLiquidityCalculation,
-    MarketBuyRequest, MarketBuyResponse, MarketData, MarketOutcome,
+    MarketBuyRequest, MarketBuyResponse, MarketData, MarketDimension,
+    MarketDimensionKind, MarketOutcome, MarketStatus,
     MarketSellRequest, MarketSellResponse, MarketSummary,
     MerkleRoot, OutPoint, Output, OutputContent,
     ParticipationStats, PeerConnectionStatus, PeriodStats,
